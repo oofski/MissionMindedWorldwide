@@ -3,7 +3,7 @@ name: Build Windows App
 on:
   push:
     branches:
-      - claude/confident-cori-tzj1sg
+      - main
     paths-ignore:
       - '**.md'
   workflow_dispatch:
