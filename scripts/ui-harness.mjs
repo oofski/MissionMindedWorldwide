@@ -1981,7 +1981,7 @@ async function main() {
     const probe = `
       const os=require('os'),fs=require('fs'),path=require('path');
       const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mmwsetup-'));
-      const db=require(process.argv[1]); db.init(dir);
+      const db=require(process.argv[2]); db.init(dir);
       const out={};
       out.needsSetup = db.needsSetup();
       out.noBackdoor = !db.login('admin','admin');
@@ -2005,8 +2005,25 @@ async function main() {
       db.close(); fs.rmSync(dir,{recursive:true,force:true});
       process.stdout.write(JSON.stringify(out));
     `;
-    const dbPath = new URL('../src/main/db.js', import.meta.url).pathname;
-    const r = JSON.parse(execFileSync(process.execPath, ['-e', probe, dbPath], { encoding: 'utf8' }));
+    // fileURLToPath, not URL.pathname: on Windows the latter yields
+    // "/D:/a/..." — a leading slash that require() cannot resolve.
+    const { fileURLToPath } = await import('node:url');
+    const dbPath = fileURLToPath(new URL('../src/main/db.js', import.meta.url));
+    // Written to a .cjs file rather than passed with -e: a multi-line script as
+    // an argv entry depends on the platform's command-line quoting, and this
+    // harness has to behave identically on the Windows build runner.
+    //
+    // It lives beside this harness rather than in the OS temp dir because Node
+    // resolves require() from the script's own directory — better-sqlite3 is
+    // only reachable from inside the repo.
+    const probeFile = path.join(fileURLToPath(new URL('.', import.meta.url)), '.setup-probe.cjs');
+    let r;
+    try {
+      fs.writeFileSync(probeFile, probe);
+      r = JSON.parse(execFileSync(process.execPath, [probeFile, dbPath], { encoding: 'utf8' }));
+    } finally {
+      fs.rmSync(probeFile, { force: true });
+    }
     log(r.needsSetup, 'MMW setup: a fresh install asks for setup');
     log(r.noBackdoor, 'MMW setup: a fresh install has no default account to sign in with');
     log(r.rejects.every(Boolean), 'MMW setup: blank name, short username and weak password are all refused');
