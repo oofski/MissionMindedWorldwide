@@ -24,7 +24,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 22, not 20: jsdom 30 pulls an undici that calls
+          # webidl.util.markAsUncloneable, which does not exist on Node 20, so
+          # the harness cannot even load there. Electron ships its own Node, so
+          # this only sets the toolchain the build and harness run under.
+          node-version: '22'
 
       - name: Install dependencies
         run: npm install
