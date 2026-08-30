@@ -57,15 +57,15 @@ export function renderLogin(ctx) {
   // Left: branded hero panel — the MMW wordmark on its own ink ground.
   const hero = el('div', { class: 'auth-hero' }, [
     el('div', { class: 'auth-brand' }, [
-      el('div', { class: 'auth-brand-badge' }, ['CH']),
+      el('img', { class: 'auth-brand-mark', src: '../../assets/mmw-mark-white.png', alt: '' }),
       el('div', { class: 'auth-brand-name' }, [
         el('strong', {}, ['Mission Minded']),
-        el('span', {}, ['Worldwide']),
+        el('span', {}, ['Free Clinics']),
       ]),
     ]),
     el('div', { class: 'auth-hero-body' }, [
-      el('div', { class: 'auth-eyebrow' }, ['Helping hands for healthy living']),
-      el('h1', { class: 'auth-headline' }, ['The operations backbone for your dental clinic.']),
+      el('div', { class: 'auth-eyebrow' }, ['Free dental, medical and vision clinics']),
+      el('h1', { class: 'auth-headline' }, ['The operations backbone for your free clinic.']),
     ]),
     el('div', { class: 'auth-features' }, [
       feature('lock', 'Roles & permissions'),

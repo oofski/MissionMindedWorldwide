@@ -7,34 +7,29 @@
    chrome so the black wordmark sits on its own ground.
    ============================================================ */
 
-/* ---- Brand typefaces, bundled for full offline use ---- */
-@font-face{ font-family:'Montserrat'; font-style:normal; font-weight:600; font-display:swap;
-  src:url('../assets/fonts/montserrat-600.woff2') format('woff2'); }
-@font-face{ font-family:'Montserrat'; font-style:normal; font-weight:700; font-display:swap;
-  src:url('../assets/fonts/montserrat-700.woff2') format('woff2'); }
-@font-face{ font-family:'Montserrat'; font-style:normal; font-weight:800; font-display:swap;
-  src:url('../assets/fonts/montserrat-800.woff2') format('woff2'); }
-@font-face{ font-family:'Open Sans'; font-style:normal; font-weight:400; font-display:swap;
-  src:url('../assets/fonts/opensans-400.woff2') format('woff2'); }
-@font-face{ font-family:'Open Sans'; font-style:normal; font-weight:600; font-display:swap;
-  src:url('../assets/fonts/opensans-600.woff2') format('woff2'); }
-@font-face{ font-family:'Open Sans'; font-style:normal; font-weight:700; font-display:swap;
-  src:url('../assets/fonts/opensans-700.woff2') format('woff2'); }
+/* ---- Typefaces ----
+   Taken from MMW's own documents. The consent form's letterhead is set in
+   Copperplate Gothic Light; the body of every MMW form is Arial/Helvetica.
+   Both ship with Windows, so nothing is bundled and nothing is licensed —
+   which also means the clinic laptops render the real letterhead face offline.
+   Copperplate is a glyphic all-caps display face: correct for the wordmark and
+   eyebrows, unreadable for dense clinical text, so it is scoped to the brand
+   lockup exactly as MMW uses it on paper. ---- */
 
 :root {
   /* ---- MMW raw palette (straight off the printed forms) ---- */
-  --mmw-cyan:#00BCD4;      /* section headings on the consent form */
-  --mmw-magenta:#C0559A;   /* "Clearance" band on the Patient Record */
-  --mmw-green:#8CC63F;     /* "Dental" band on the Patient Record */
+  --mmw-cyan:#00BBD0;      /* section headings on the consent form */
+  --mmw-magenta:#C356A0;   /* "Clearance" band on the Patient Record */
+  --mmw-green:#8DC63F;     /* "Dental" band on the Patient Record */
   --mmw-ink:#141719;       /* the logotype's black */
 
   /* Cyan ramp — deepened for text/UI contrast on light surfaces */
-  --cyan-deep:#00707F; --cyan:#00A6BC; --cyan-soft:#e2f6f9; --cyan-soft-2:#c7ecf2; --cyan-border:#a9e0e9;
+  --cyan-deep:#006E7C; --cyan:#00A5B9; --cyan-soft:#e2f6f9; --cyan-soft-2:#c7ecf2; --cyan-border:#a9e0e9;
   /* Ink ramp — the app chrome (sidebar, inverse surfaces) */
   --ink:#141719; --ink-deep:#0b0d0e; --ink-soft:#eef0f1; --ink-soft-2:#e0e3e5; --ink-border:#c9ced2;
   /* Module accents, straight from the record's two coloured bands */
-  --magenta:#a8397f; --magenta-strong:#C0559A; --magenta-soft:#f9e8f3; --magenta-border:#ecc4de;
-  --green:#5f8f22; --green-strong:#8CC63F; --green-soft:#eef6e1; --green-border:#d2e7b3;
+  --magenta:#a8397f; --magenta-strong:#C356A0; --magenta-soft:#f7e8f2; --magenta-border:#E7C7DF;
+  --green:#5f8f22; --green-strong:#8DC63F; --green-soft:#E5F1D4; --green-border:#cfe3ae;
   /* Danger needs to read as danger; the brand sheet has no red, so this is a
      deliberate, restrained addition used only for destructive/alert states. */
   --red:#d13b2e; --red-strong:#e04434; --red-soft:#fdeae7; --red-border:#f5c6c0;
@@ -44,7 +39,7 @@
      names. Keeping the names and re-pointing the values rebrands the whole
      app without touching 17k lines of view code. ---------------------- */
   --brand-teal:var(--mmw-cyan); --brand-navy:var(--mmw-ink); --brand-coral:var(--red-strong);
-  --brand-sky:#4fc7d8; --brand-jade:var(--green-strong); --brand-meadow:var(--mmw-green); --brand-mint:#d8eec0;
+  --brand-sky:#4fc7d8; --brand-jade:var(--green-strong); --brand-meadow:var(--mmw-green); --brand-mint:#E5F1D4;
   --teal-deep:var(--cyan-deep); --teal:var(--cyan); --teal-soft:var(--cyan-soft); --teal-soft-2:var(--cyan-soft-2); --teal-border:var(--cyan-border);
   --navy:var(--ink); --navy-deep:var(--ink-deep); --navy-soft:var(--ink-soft); --navy-soft-2:var(--ink-soft-2); --navy-border:var(--ink-border);
   --coral:var(--red); --coral-strong:var(--red-strong); --coral-soft:var(--red-soft); --coral-border:var(--red-border);
@@ -77,10 +72,12 @@
   --info:var(--cyan-deep);    --info-soft:var(--cyan-soft);    --info-border:var(--cyan-border);
   --neutral:#5c636b; --neutral-soft:#edeef0; --neutral-border:#dee1e4;
 
-  /* Type — Montserrat (display) + Open Sans (UI/body). The MMW logotype is a
-     wide geometric sans; Montserrat is the closest bundled match. */
-  --font-display: "Montserrat", ui-sans-serif, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
-  --font-sans: "Open Sans", ui-sans-serif, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  /* Type — see the typefaces note above. */
+  /* Brand lockup only — the letterhead face from MMW's consent form. */
+  --font-brand: "Copperplate Gothic Light", "Copperplate Gothic", Copperplate, "Copperplate Gothic Bold", "Optima", ui-serif, Georgia, serif;
+  /* Headings and UI: Arial/Helvetica, the body face of every MMW form. */
+  --font-display: Arial, "Helvetica Neue", Helvetica, ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+  --font-sans: Arial, "Helvetica Neue", Helvetica, ui-sans-serif, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
   --fs-display:30px; --fs-h1:23px; --fs-h2:18px; --fs-h3:16px;
   --fs-base:15px; --fs-sm:13px; --fs-xs:12px; --fs-2xs:11px; --fs-stat:30px;
@@ -152,8 +149,8 @@ h3{ font-weight:var(--fw-semibold); }
   background-image:linear-gradient(180deg, #1b1f22 0%, var(--ink) 55%, var(--ink-deep) 100%); }
 .sidebar-brand{ display:flex; align-items:center; gap:11px; padding:6px 8px 16px; border-bottom:1px solid var(--border-inverse); margin-bottom:8px; }
 .brand-mark{ width:30px; height:30px; border-radius:6px; }
-.brand-name{ font-family:var(--font-display); font-weight:var(--fw-bold); font-size:var(--fs-base); color:#fff; letter-spacing:var(--tracking-tight); }
-.brand-sub{ font-size:var(--fs-2xs); letter-spacing:var(--tracking-eyebrow); color:var(--text-on-inverse-mute); font-weight:var(--fw-semibold); text-transform:uppercase; }
+.brand-name{ font-family:var(--font-brand); font-weight:var(--fw-bold); font-size:var(--fs-base); color:#fff; letter-spacing:.06em; text-transform:uppercase; }
+.brand-sub{ font-family:var(--font-brand); font-size:var(--fs-2xs); letter-spacing:.16em; color:var(--text-on-inverse-mute); font-weight:var(--fw-semibold); text-transform:uppercase; }
 .nav{ display:flex; flex-direction:column; gap:2px; margin-top:4px; }
 .nav-group-label{
   text-transform:uppercase; letter-spacing:.12em; font-size:var(--fs-2xs, 10px); font-weight:var(--fw-bold);

@@ -10,7 +10,7 @@ Built as a Windows desktop app (Electron). **No cloud required. All patient data
 lives on the device** and is only ever copied out by an authorized staff member.
 An optional clinic-local sync keeps several laptops at one event in step.
 
-> ### ⚠️ Early preview — v0.0.1
+> ### ⚠️ Early preview — v0.0.2
 > This is the first cut. The application is carried over from the Mission Minded
 > codebase and rebranded to MMW, with the MMW flow (wristband IDs, the four
 > Clearance vitals, service selection) built on top. **It has not been used in a
@@ -42,9 +42,9 @@ purge, so a clinic can answer a grant return after the records are gone.
 Every push to `main` builds a fresh Windows `.exe` on GitHub's Windows runners
 and publishes it on the **[Releases](../../releases)** page:
 
-- **`MMW-Setup-0.0.1.exe`** — standard installer (Start-menu + desktop
+- **`MMW-Setup-0.0.2.exe`** — standard installer (Start-menu + desktop
   shortcuts, and required for auto-update).
-- **`MMW-Portable-0.0.1.exe`** — single portable executable that runs without
+- **`MMW-Portable-0.0.2.exe`** — single portable executable that runs without
   installing (ideal for a USB stick on shared clinic laptops).
 
 The same files are on any successful run under **Actions → Build Windows App →
@@ -53,15 +53,24 @@ Artifacts**.
 Windows will warn that the publisher is unknown — the build is not code-signed.
 Choose **More info → Run anyway**.
 
-### Default sign-in accounts
+### First run — setting up a computer
 
-| Role | Username | Password |
-|------|----------|----------|
-| Administrator | `admin` | `admin` |
-| Doctor | `doctor` | `doctor` |
-| Triage / Front Desk | `triage` | `triage` |
+There are **no default accounts**. The first time the app opens on a machine it
+shows a setup screen with two ways through:
 
-> Change these in **Admin → Staff** before a real deployment.
+**Set up this computer** — you are the first person. Enter your name, choose a
+username and password (8+ characters), and optionally name the clinic. That
+creates the clinic's administrator and signs you straight in. Add the rest of
+your team under **Admin → Staff & roles**.
+
+**Join a clinic already set up** — the clinic already exists on another laptop.
+Enter the clinic address and key from **Admin → Cloud** on the first machine.
+This computer downloads the clinic, including its staff accounts, and everyone
+signs in with the account they already have.
+
+> There is no password recovery. Write the administrator password down and keep
+> it somewhere safe — if it is lost, the only way back in is a fresh install,
+> which starts with an empty database.
 
 ---
 

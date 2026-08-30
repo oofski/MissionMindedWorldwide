@@ -14,6 +14,12 @@ const db = require('../src/main/db.js');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uih-'));
 const DB_PATH = db.init(tmp);
+
+// v0.0.2: nothing is seeded any more — the harness bootstraps through the same
+// first-run setup path a real clinic uses, so that path is covered by every run.
+const SETUP_ADMIN = { full_name: 'Harness Admin', username: 'harness.admin', password: 'harness-pw-2026' };
+const signInAdmin = () => db.login(SETUP_ADMIN.username, SETUP_ADMIN.password);
+db.createFirstAdmin(SETUP_ADMIN);
 // A second handle on the same file, for the handful of checks that have to
 // forge history (back-date a visit) or read a column the API does not expose.
 const rawDb = () => new (require('better-sqlite3'))(DB_PATH);
@@ -346,7 +352,7 @@ async function main() {
     log(full.medical_history.bp_systolic == null, 'A2: vitals NOT collected at patient check-in');
 
     // ---- Render the clinician views and check history appears ----
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const { renderRecords } = await import('../src/renderer/js/views/records.js');
     const ctx = { navigate: () => {}, toast: () => {}, store: (await import('../src/renderer/js/store.js')).store };
     ctx.store.setUser(currentUser);
@@ -361,7 +367,7 @@ async function main() {
 
   // ---- Smoke render the other views to catch runtime errors ----
   // Always run authenticated so a kiosk regression can't mask real view errors.
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   // v1.0.9: the triage view is unregistered from the app shell (station removed).
   const views = ['dashboard', 'provider', 'reports', 'admin', 'emt', 'checkout', 'hygienist', 'management'];
   for (const v of views) {
@@ -381,7 +387,7 @@ async function main() {
   }
 
   // ---- Permission tests (the role-gate that broke check-in) ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   db.createUser(currentUser, { username: 'docx', full_name: 'Dr X', role: 'doctor', password: 'x' });
   let pr = await window.api.authLogin({ username: 'docx', password: 'x' });
   log(pr.ok && pr.data.role === 'doctor', 'can sign in as a doctor');
@@ -390,12 +396,12 @@ async function main() {
   pr = await window.api.usersList();
   log(!pr.ok && /permission/i.test(pr.error || ''), 'permission guard works: doctor blocked from staff list');
   // triage role can also check in
-  currentUser = db.login('admin', 'admin'); db.createUser(currentUser, { username: 'trix', full_name: 'Front', role: 'triage', password: 'x' });
+  currentUser = signInAdmin(); db.createUser(currentUser, { username: 'trix', full_name: 'Front', role: 'triage', password: 'x' });
   await window.api.authLogin({ username: 'trix', password: 'x' });
   pr = await window.api.patientsCreate({ first_name: 'Tri', last_name: 'Age', demographics: {}, medical_history: {}, dental_history: {}, consents: [] });
   log(pr.ok, 'TRIAGE can complete a check-in: ' + (pr.ok ? 'allowed' : pr.error));
   // v1.0.6 roles: EMT records vitals; CHECKOUT dismisses a signed-off patient.
-  currentUser = db.login('admin', 'admin'); db.createUser(currentUser, { username: 'emtx', full_name: 'EMT One', role: 'emt', password: 'x' });
+  currentUser = signInAdmin(); db.createUser(currentUser, { username: 'emtx', full_name: 'EMT One', role: 'emt', password: 'x' });
   db.createUser(currentUser, { username: 'cox', full_name: 'Checkout One', role: 'checkout', password: 'x' });
   const vp = db.createPatient(currentUser, { first_name: 'Vital', last_name: 'Test', demographics: {}, medical_history: {}, dental_history: {} });
   await window.api.authLogin({ username: 'emtx', password: 'x' });
@@ -412,7 +418,7 @@ async function main() {
   log(pr.ok && pr.data.status === 'triaged' && pr.data.triage.route === 'dentist', 'EMT routes to dentist -> patient enters dentist queue (triaged): ' + (pr.ok ? 'ok' : pr.error));
   let listed = db.listPatients({}).find((x) => x.id === vp.id);
   log(listed && listed.route === 'dentist' && ['triaged', 'in_treatment'].includes(listed.status), 'routed patient appears in the dentist queue filter with route exposed');
-  const hp = db.createPatient(db.login('admin', 'admin'), { first_name: 'Clean', last_name: 'Route', demographics: {}, medical_history: {}, dental_history: {} });
+  const hp = db.createPatient(signInAdmin(), { first_name: 'Clean', last_name: 'Route', demographics: {}, medical_history: {}, dental_history: {} });
   await window.api.authLogin({ username: 'emtx', password: 'x' });
   // v1.5.24: vitals are a hard gate — routing without them is refused.
   const noVitalsRoute = await window.api.patientsRoute({ patientId: hp.id, route: 'hygienist' });
@@ -423,7 +429,7 @@ async function main() {
   pr = await window.api.patientsRoute({ patientId: hp.id, route: 'nowhere' });
   log(!pr.ok, 'invalid route rejected: ' + (pr.ok ? 'NOT REJECTED' : 'rejected'));
   // hygienist role cannot route (routing is the EMT/doctor station's job)
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   db.createUser(currentUser, { username: 'hygroute', full_name: 'Hyg Route', role: 'hygienist', password: 'x' });
   await window.api.authLogin({ username: 'hygroute', password: 'x' });
   pr = await window.api.patientsRoute({ patientId: hp.id, route: 'dentist' });
@@ -431,13 +437,13 @@ async function main() {
   pr = await window.api.usersList();
   log(!pr.ok, 'EMT blocked from staff list (guard): ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
   // checkout dismiss: a locked (signed-off) patient can be dismissed
-  currentUser = db.login('admin', 'admin'); db.saveTreatment(currentUser, vp.id, { provider_name: 'Dr', provider_signature: 'data:,s' }, true);
+  currentUser = signInAdmin(); db.saveTreatment(currentUser, vp.id, { provider_name: 'Dr', provider_signature: 'data:,s' }, true);
   await window.api.authLogin({ username: 'cox', password: 'x' });
   pr = await window.api.patientsDismiss(vp.id);
   log(pr.ok && pr.data.status === 'dismissed', 'CHECKOUT can dismiss a signed-off patient: ' + (pr.ok ? 'allowed' : pr.error));
 
   // ---- v1.2.1: patients move through WITHOUT a forced sign-off/lock ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const flowP = db.createPatient(currentUser, { first_name: 'Flow', last_name: 'Through', demographics: {}, medical_history: {}, dental_history: {}, route: 'dentist' });
   db.saveVitals(currentUser, flowP.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
   db.routePatient(currentUser, flowP.id, 'dentist');
@@ -452,7 +458,7 @@ async function main() {
   pr = await window.api.patientsDismiss(flowP.id);
   log(pr.ok && pr.data.status === 'dismissed', 'v1.2.1: CHECKOUT dismisses a completed patient with NO lock required: ' + (pr.ok ? 'allowed' : pr.error));
   // v1.2.1: the optional lock still works and makes the record read-only
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const lockP = db.createPatient(currentUser, { first_name: 'Lock', last_name: 'Opt', demographics: {}, medical_history: {}, dental_history: {}, route: 'dentist' });
   db.saveVitals(currentUser, lockP.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '66' });
   db.routePatient(currentUser, lockP.id, 'dentist');
@@ -460,14 +466,14 @@ async function main() {
   let lockedThrew = false; try { db.saveTreatment(currentUser, lockP.id, { provider_name: 'Dr B' }, 'complete'); } catch (e) { lockedThrew = /locked/i.test(e.message); }
   log(lk.treatment.locked && lockedThrew, 'v1.2.1: optional lock still finalizes a read-only record when chosen');
   // guard: a patient still at check-in (not seen by EMT) cannot be dismissed
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const rawP = db.createPatient(currentUser, { first_name: 'Not', last_name: 'Seen', demographics: {}, medical_history: {}, dental_history: {} });
   await window.api.authLogin({ username: 'cox', password: 'x' });
   pr = await window.api.patientsDismiss(rawP.id);
   log(!pr.ok && /EMT|nurse|vitals/i.test(pr.error || ''), 'v1.2.1: a checked-in (unseen) patient still cannot be dismissed: ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
 
   // ---- REGISTRATION role: front-desk check-in only, into the queue ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const reg = db.createUser(currentUser, { username: 'regx', full_name: 'Reg One', role: 'registration', password: 'x' });
   log(reg.role === 'registration', 'registration role can be created (CHECK widened, existing accounts intact)');
   await window.api.authLogin({ username: 'regx', password: 'x' });
@@ -483,7 +489,7 @@ async function main() {
   log(!pr.ok && /permission/i.test(pr.error || ''), 'REGISTRATION cannot dismiss patients (guard): ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
 
   // ---- v1.0.7: HYGIENIST role + event-scoped staff ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const hyg = db.createUser(currentUser, { username: 'hygx', full_name: 'Hyg One', role: 'hygienist', password: 'x' });
   log(hyg.role === 'hygienist', 'hygienist role can be created (CHECK widened, existing accounts intact)');
   const activeEv = await window.api.eventsActive();
@@ -495,7 +501,7 @@ async function main() {
   pr = await window.api.usersList();
   log(!pr.ok && /permission/i.test(pr.error || ''), 'HYGIENIST blocked from staff list (guard): ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
   // Clear-event-staff removes scoped clinical staff but keeps the admin.
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const evId = (activeEv.data ? activeEv.data.id : Number(db.getSetting('active_event_id')));
   const before = db.listUsers().length;
   pr = await window.api.usersClearEventStaff(evId);
@@ -515,7 +521,7 @@ async function main() {
     log(!bpStatus('', null).high && !bpStatus(null, null).high && !bpStatus('abc', 'x').high, 'BP: blank / omitted / non-numeric reading is never high');
   }
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const store2 = (await import('../src/renderer/js/store.js')).store; store2.setUser(currentUser);
     const ctx2 = { navigate: () => {}, toast: () => {}, store: store2, setDetail: () => {} };
     const hiP = db.createPatient(currentUser, { first_name: 'High', last_name: 'Pressure', demographics: {}, medical_history: {}, dental_history: { reason: 'x' }, route: 'dentist' });
@@ -550,7 +556,7 @@ async function main() {
 
   // ---- v1.4.4: staff accounts are SYNCED so a team created on one laptop shows
   //               up on every laptop. Guard that 'user' is a syncable entity. ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   db.createUser(currentUser, { username: 'syncme', full_name: 'Sync Me', role: 'doctor', password: 'x' });
   const syncRows = db.collectSyncRows(1000).rows;
   const userRow = syncRows.find((r) => r.entity === 'user' && r.data && r.data.username === 'syncme');
@@ -562,7 +568,7 @@ async function main() {
 
   // ---- v1.4.6: the active-event SELECTION syncs (stamped on the event row) so a
   //               "Set active" on one laptop reaches every laptop. ----
-  currentUser = db.login('admin', 'admin');
+  currentUser = signInAdmin();
   const evSel = db.createEvent(currentUser, { name: 'Sync Event', location: 'X', languages: 'en' });
   db.setActiveEvent(currentUser, evSel.id);
   log(db.getActiveEvent().id === evSel.id, 'v1.4.6: Set active selects the event on this device');
@@ -588,7 +594,7 @@ async function main() {
     log(i18nMod.tRaw('consent.generalFull') === undefined && Array.isArray(i18nMod.t('consent.generalFull')), 'v1.4.7: other languages keep their own consent (tRaw undefined; t falls back to English)');
     i18nMod.setLang('en');
 
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     // Chairside oral-surgery consent with tooth numbers (dentist station).
     const cp = db.createPatient(currentUser, { first_name: 'Chair', last_name: 'Side', demographics: {}, medical_history: {}, dental_history: {}, consents: [] });
     const afterAdd = db.addPatientConsent(currentUser, cp.id, { type: 'oral_surgery', signer_name: 'Chair Side', tooth_numbers: '18, 19', signature_png: 'data:,sig' });
@@ -653,14 +659,14 @@ async function main() {
     log(!!pain && /pain management/i.test(pain.label) && pain.flag !== true, 'health history: "Pain management program" is offered as a condition checkbox (not a red flag)');
     log(!!weight && /weight management/i.test(weight.label) && weight.flag !== true, 'health history: "Weight management program" is offered as a condition checkbox (not a red flag)');
     // A patient can check them and they persist on the record.
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const hp = db.createPatient(currentUser, { first_name: 'Pat', last_name: 'Hh', demographics: {}, medical_history: { conditions: ['pain_mgmt', 'weight_mgmt'] }, dental_history: {}, consents: [] });
     log((db.getPatient(hp.id).medical_history.conditions || []).includes('pain_mgmt') && (db.getPatient(hp.id).medical_history.conditions || []).includes('weight_mgmt'), 'health history: the two program selections save on the patient record');
   }
 
   // ---- v1.5.14: dashboard live CRM board + clickable KPIs; reports dashboard ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const store14 = (await import('../src/renderer/js/store.js')).store; store14.setUser(currentUser);
     let navTo = null;
     const ctx14 = { navigate: (v) => { navTo = v; }, toast: () => {}, store: store14, setDetail: () => {} };
@@ -697,7 +703,7 @@ async function main() {
 
   // ---- v1.5.15: patient pre-registration (public link → routed into the event) ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     // Every event exposes a per-event pre-registration link on its current cloud.
     const evs = db.listEvents();
     const activeEv = evs.find((e) => e.active) || evs[0];
@@ -747,7 +753,7 @@ async function main() {
 
   // ---- v1.5.16: consistency fixes (bleeding=thinner, Left tag, time tags, tile) ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     // #1: a "Bleeding disorder" condition now raises the thinner flag on the
     // EMT/dentist screens (medFlags), matching the queues (db on_thinner).
     const mf = await import('../src/renderer/js/medFlags.js');
@@ -785,7 +791,7 @@ async function main() {
 
   // ---- v1.5.17: pre-registration carries a SIGNED consent into the chart ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const ev17 = db.listEvents().find((e) => e.active) || db.listEvents()[0];
     const puid = 'prereg17-patient';
     const iso = '2099-02-01T00:00:00.000Z';
@@ -809,7 +815,7 @@ async function main() {
 
   // ---- v1.5.18: returning-patient new visit, ZIP export, reports email list ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
 
     // #1: start a new visit from an existing record — details carry over, fresh visit.
     const src = db.createPatient(currentUser, { first_name: 'Rita', last_name: 'Returns', dob: '1980-05-05', gender: 'female', phone: '5551234567', email: 'rita@example.com', demographics: { address: '5 Elm St' }, medical_history: { conditions: ['diabetes'], allergies: ['penicillin'] }, dental_history: { reason: 'old reason', visit_type: 'extraction_pain', prior_dentist: 'Dr. Prior' }, consents: [] });
@@ -844,7 +850,7 @@ async function main() {
 
   // ---- v1.5.0: X-ray import — per-x-ray tooth + auto-name, synced; import tile. ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const xp = db.createPatient(currentUser, { first_name: 'Ex', last_name: 'Ray', demographics: {}, medical_history: {}, dental_history: {}, consents: [] });
     const added = db.addXray(currentUser, xp.id, { image_png: 'data:image/png;base64,AAAA', note: 'Ray_Ex_UR_T3', tooth: '3' });
     let xl = db.listXrays(xp.id);
@@ -865,7 +871,7 @@ async function main() {
 
   // ---- v1.5.13: upload → center form (tooth/quadrant/general) → save + drive delete ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const store51 = (await import('../src/renderer/js/store.js')).store; store51.setUser(currentUser);
     const ctx51 = { navigate: () => {}, toast: () => {}, store: store51, setDetail: () => {} };
     const renderProvider = (await import('../src/renderer/js/views/provider.js')).renderProvider;
@@ -955,7 +961,7 @@ async function main() {
   // check-in creates — so a board showing 30 pre-registered patients in "Checked
   // in" sat next to a tile reading 1 (the single walk-in).
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evW = db.listEvents().find((e) => e.active) || db.listEvents()[0];
     const before = db.dashboardStats().waiting_triage;
 
@@ -991,7 +997,7 @@ async function main() {
 
   // ---- v1.5.24: auto-routing from the patient's own answer ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const mk = (last, visit) => db.createPatient(currentUser, {
       first_name: 'Auto', last_name: last, dob: '1990-01-01', gender: 'female',
       demographics: {}, medical_history: {}, dental_history: { visit_type: visit, reason: 'x' },
@@ -1008,7 +1014,7 @@ async function main() {
 
   // ---- v1.5.24: the front desk's arrival check ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const signed = { type: 'general', signer_name: 'Pat Ient', relationship: 'Self', signature_png: 'data:image/png;base64,AAAA' };
 
     // Consent signed + a cleaning chosen -> ready, and confirming marks them here.
@@ -1125,7 +1131,7 @@ async function main() {
 
   // ---- v1.5.24: vitals are a hard gate, and patients can be walked back ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const mkP = (last, visit) => db.createPatient(currentUser, {
       first_name: 'Gate', last_name: last, dob: '1980-01-01', gender: 'male',
       demographics: {}, medical_history: {}, dental_history: { visit_type: visit || 'filling' },
@@ -1191,7 +1197,7 @@ async function main() {
 
   // ---- v1.5.26: arrivals tabs + A–Z order; hygienist history; slider fix ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const ev26 = db.listEvents().find((e) => e.active) || db.listEvents()[0];
     const signed = [{ type: 'general', signer_name: 'S', signature_png: 'data:image/png;base64,AAAA' }];
     // Desk-registered, deliberately out of alphabetical order.
@@ -1243,7 +1249,7 @@ async function main() {
 
   // The hygienist must see the medical history, not just the dentist.
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const hp26 = db.createPatient(currentUser, {
       first_name: 'Hyg', last_name: 'History', dob: '1975-05-05', gender: 'female',
       demographics: {}, medical_history: { conditions: ['diabetes', 'high_bp'], allergies: ['penicillin'], allergies_other: 'Sulfa', under_treatment: 'yes' },
@@ -1267,7 +1273,7 @@ async function main() {
 
   // ---- v1.6.0: export as a spreadsheet, restore it, and purge PHI ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const ev = db.createEvent(currentUser, { name: 'Export Test', location: 'Sandy' });
     db.setActiveEvent(currentUser, ev.id);
     const pt = db.createPatient(currentUser, {
@@ -1356,7 +1362,7 @@ async function main() {
 
   // ---- v1.6.1: one-tap check-out tick, and a modernised Reports tab ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const ev61 = db.listEvents().find((e) => e.active) || db.listEvents()[0];
     db.setActiveEvent(currentUser, ev61.id);
     const mk = (last, city) => {
@@ -1416,7 +1422,7 @@ async function main() {
 
   // ---- v1.6.2: a patient who left HAS finished; sign-ups vs check-outs ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const ev62 = db.createEvent(currentUser, { name: 'Completion Test', location: 'Sandy' });
     db.setActiveEvent(currentUser, ev62.id);
     const mk62 = (last, { prereg = false, finish = false } = {}) => {
@@ -1480,7 +1486,7 @@ async function main() {
 
   // ---- v1.6.2: a deleted patient STAYS deleted, everywhere ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evD = db.createEvent(currentUser, { name: 'Deletion Test' });
     db.setActiveEvent(currentUser, evD.id);
     const ghost = db.createPatient(currentUser, {
@@ -1530,7 +1536,7 @@ async function main() {
 
   // ---- v1.6.3: EVERY delete travels, not just the patient one ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evT = db.createEvent(currentUser, { name: 'Travel Test' });
     db.setActiveEvent(currentUser, evT.id);
     const tombUids = () => new Set(db.collectSyncRows(800).rows.filter((r) => r.deleted).map((r) => r.uid));
@@ -1584,7 +1590,7 @@ async function main() {
 
   // ---- v1.6.4: every patient list A–Z; treatment notes name their clinician ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evA = db.createEvent(currentUser, { name: 'Alphabetical Test' });
     db.setActiveEvent(currentUser, evA.id);
     const consent = [{ type: 'general', signer_name: 'S', signature_png: 'data:image/png;base64,AAAA' }];
@@ -1652,7 +1658,7 @@ async function main() {
 
   // ---- v1.6.5: an export + delete must never destroy the reporting totals ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evR = db.createEvent(currentUser, { name: 'Report Loss Test', location: 'Sandy' });
     db.setActiveEvent(currentUser, evR.id);
     const seed = (last, city) => {
@@ -1723,7 +1729,7 @@ async function main() {
 
   // ---- v1.6.6: the report data that "got removed" — the rest of the story ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
 
     // 1. "All events" is the DEFAULT view of the Reports tab. It computed from
     //    the live patient list alone, so every finished clinic counted as zero —
@@ -1867,7 +1873,7 @@ async function main() {
 
   // ---- v1.6.6: a deletion that could not be applied is retried, not lost ----
   {
-    currentUser = db.login('admin', 'admin');
+    currentUser = signInAdmin();
     const evX = db.createEvent(currentUser, { name: 'FK Order Clinic', location: 'Sandy' });
     db.setActiveEvent(currentUser, evX.id);
     const px = db.createPatient(currentUser, {
@@ -1951,6 +1957,65 @@ async function main() {
 
     log(JSON.stringify(db.getPatient(w1.id).demographics.services) === JSON.stringify(['dental', 'vision']),
       'MMW: the services chosen at registration are kept on the record');
+  }
+
+  /* ================= MMW v0.0.2 — first-run administrator setup ==============
+     The app no longer ships admin/admin, so these cover both halves: that the
+     backdoor is really gone, and that the one call able to create an account
+     without being signed in cannot be used twice. */
+  {
+    // On THIS database an administrator already exists (created at startup).
+    log(db.needsSetup() === false, 'MMW setup: an installed machine does not ask for setup again');
+    log(!db.login('admin', 'admin'), 'MMW setup: the old admin/admin account no longer exists');
+
+    // The security property: createFirstAdmin is reachable without signing in,
+    // so it must refuse outright once any account exists.
+    let blocked = false;
+    try { db.createFirstAdmin({ full_name: 'Mallory', username: 'mallory', password: 'password123' }); }
+    catch (_) { blocked = true; }
+    log(blocked, 'MMW setup: a second administrator cannot be created through setup');
+
+    // Fresh-install behaviour needs a database with no accounts at all, which
+    // means a separate process — the data layer holds one connection.
+    const { execFileSync } = await import('node:child_process');
+    const probe = `
+      const os=require('os'),fs=require('fs'),path=require('path');
+      const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mmwsetup-'));
+      const db=require(process.argv[1]); db.init(dir);
+      const out={};
+      out.needsSetup = db.needsSetup();
+      out.noBackdoor = !db.login('admin','admin');
+      out.rejects = [];
+      for (const bad of [{},{full_name:'A'},{full_name:'A',username:'ab'},{full_name:'A',username:'anna',password:'short'}]) {
+        try { db.createFirstAdmin(bad); out.rejects.push(false); } catch(e){ out.rejects.push(true); }
+      }
+      const u = db.createFirstAdmin({full_name:'Anna Reed',username:'Anna.Reed',password:'clinic2026',clinic_name:'Yorba Linda Clinic'});
+      out.role = u.role;
+      out.lowercased = u.username === 'anna.reed';
+      out.signsIn = !!db.login('anna.reed','clinic2026');
+      out.wrongPwFails = !db.login('anna.reed','nope');
+      out.setupDone = db.needsSetup() === false;
+      out.clinicNamed = db.getActiveEvent().name === 'Yorba Linda Clinic';
+      // Must NOT reuse the legacy shared admin uid: two laptops each set up
+      // independently would then share one sync identity, and last-write-wins
+      // would overwrite one administrator's password.
+      const raw = new (require('better-sqlite3'))(require('path').join(dir,'mission-minded.db'));
+      out.uid = raw.prepare('SELECT uid FROM users').get().uid;
+      raw.close();
+      db.close(); fs.rmSync(dir,{recursive:true,force:true});
+      process.stdout.write(JSON.stringify(out));
+    `;
+    const dbPath = new URL('../src/main/db.js', import.meta.url).pathname;
+    const r = JSON.parse(execFileSync(process.execPath, ['-e', probe, dbPath], { encoding: 'utf8' }));
+    log(r.needsSetup, 'MMW setup: a fresh install asks for setup');
+    log(r.noBackdoor, 'MMW setup: a fresh install has no default account to sign in with');
+    log(r.rejects.every(Boolean), 'MMW setup: blank name, short username and weak password are all refused');
+    log(r.role === 'admin' && r.lowercased, 'MMW setup: the first account is an administrator, username normalised');
+    log(r.signsIn && r.wrongPwFails, 'MMW setup: the chosen password works and a wrong one does not');
+    log(r.setupDone, 'MMW setup: setup does not run again once an account exists');
+    log(r.clinicNamed, 'MMW setup: the clinic name given at setup is applied to the event');
+    log(r.uid !== '00000000-0000-4000-8000-000000000002',
+      'MMW setup: the first administrator does not reuse the shared admin sync identity');
   }
 
   await tick();

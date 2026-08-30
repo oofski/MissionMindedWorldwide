@@ -13,6 +13,8 @@ export const api = {
   login: (username, password) => call('authLogin', { username, password }),
   logout: () => window.api.authLogout(),
   current: () => call('authCurrent'),
+  needsSetup: () => call('authNeedsSetup'),
+  setupAdmin: (p) => call('authSetupAdmin', p),
 
   listUsers: () => call('usersList'),
   createUser: (p) => call('usersCreate', p),

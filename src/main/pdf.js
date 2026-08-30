@@ -53,20 +53,20 @@ function styles() {
   return `
     <style>
       * { box-sizing: border-box; }
-      body { font-family: 'Segoe UI', Arial, sans-serif; color: #1f2933; font-size: 12px; margin: 0; }
+      body { font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; color: #14181c; font-size: 12px; margin: 0; }
       .page { padding: 36px 40px; }
-      .hdr { display:flex; justify-content:space-between; align-items:flex-start; border-bottom: 3px solid #1a6aa8; padding-bottom: 10px; margin-bottom: 16px; }
-      .brand { font-size: 20px; font-weight: 700; color:#1a6aa8; letter-spacing:.5px; }
+      .hdr { display:flex; justify-content:space-between; align-items:flex-start; border-bottom: 3px solid #00BBD0; padding-bottom: 10px; margin-bottom: 16px; }
+      .brand { font-family: 'Copperplate Gothic Light', 'Copperplate Gothic', Copperplate, Arial, sans-serif; font-size: 18px; font-weight: 700; color:#14181c; letter-spacing:1.2px; text-transform:uppercase; }
       .brand small { display:block; font-size: 10px; color:#7cb342; font-weight:700; letter-spacing:3px; }
       .doc-title { text-align:right; font-size: 14px; font-weight:700; color:#334e68; }
       .doc-title small { display:block; font-weight: 400; color:#627d98; font-size: 10px; }
-      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color:#1a6aa8; border-bottom:1px solid #d9e2ec; padding-bottom:4px; margin: 18px 0 8px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color:#006E7C; border-bottom:1px solid #dfe4e8; padding-bottom:4px; margin: 18px 0 8px; }
       table { width:100%; border-collapse: collapse; }
       td, th { text-align:left; vertical-align: top; padding: 3px 6px; }
       .grid td { width: 50%; }
       .label { color:#627d98; font-size: 10px; text-transform: uppercase; letter-spacing:.5px; }
       .val { font-weight: 600; }
-      .chips span { display:inline-block; background:#eaf3f9; color:#1a6aa8; border:1px solid #cfe2f0; border-radius: 10px; padding: 2px 9px; margin: 2px 4px 2px 0; font-size: 11px; }
+      .chips span { display:inline-block; background:#e2f6f9; color:#006E7C; border:1px solid #a9e0e9; border-radius: 10px; padding: 2px 9px; margin: 2px 4px 2px 0; font-size: 11px; }
       .flag { background:#fdecec !important; color:#b3261e !important; border-color:#f5c2c0 !important; }
       .box { border:1px solid #d9e2ec; border-radius:6px; padding:8px 10px; margin: 6px 0; background:#fbfdff; }
       .sig { border:1px solid #d9e2ec; border-radius:6px; padding:6px; display:inline-block; margin-right: 12px; }

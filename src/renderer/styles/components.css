@@ -161,17 +161,21 @@
   position:relative; overflow:hidden; color:#fff;
   padding:clamp(28px, 4vw, 60px);
   display:flex; flex-direction:column; gap:24px;
-  background:linear-gradient(155deg, var(--teal-deep) 0%, #145561 52%, #0d3f4c 100%);
+  /* Ink, matching the sidebar and the black MMW logotype, with a cyan wash. */
+  background:linear-gradient(155deg, #1e2327 0%, var(--ink) 55%, var(--ink-deep) 100%);
 }
 .auth-hero::after{ content:''; position:absolute; inset:0; pointer-events:none;
-  background:radial-gradient(120% 80% at 82% 8%, rgba(255,255,255,.12), transparent 60%); }
+  background:radial-gradient(120% 80% at 82% 8%, rgba(0,187,208,.22), transparent 62%); }
 .auth-brand{ position:relative; z-index:1; display:flex; align-items:center; gap:12px; }
 .auth-brand-badge{ width:46px; height:46px; border-radius:13px; flex:0 0 auto;
   background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.22);
   display:flex; align-items:center; justify-content:center; font-weight:var(--fw-bold); font-size:16px; letter-spacing:.02em; }
 .auth-brand-name{ line-height:1.15; }
-.auth-brand-name strong{ display:block; font-size:15px; font-weight:var(--fw-semibold); }
-.auth-brand-name span{ font-size:11px; letter-spacing:.16em; text-transform:uppercase; opacity:.8; }
+/* The lockup uses MMW's letterhead face; everything else stays Arial. */
+.auth-brand-name strong{ display:block; font-family:var(--font-brand); font-size:15px; font-weight:var(--fw-bold); letter-spacing:.06em; text-transform:uppercase; }
+.auth-brand-name span{ font-family:var(--font-brand); font-size:11px; letter-spacing:.16em; text-transform:uppercase; opacity:.8; }
+/* Real MMW mark, reversed out of the ink panel, replacing the old text badge. */
+.auth-brand-mark{ width:46px; height:46px; flex:0 0 auto; object-fit:contain; }
 .auth-hero-body{ position:relative; z-index:1; flex:1; display:flex; flex-direction:column; justify-content:center; max-width:480px; }
 .auth-eyebrow{ font-size:11px; letter-spacing:.16em; text-transform:uppercase; font-weight:var(--fw-semibold); opacity:.85; margin-bottom:16px; }
 .auth-headline{ margin:0; color:#fff; font-size:clamp(30px, 3.3vw, 46px); line-height:1.08; font-weight:800; letter-spacing:-0.02em; }
@@ -183,6 +187,7 @@
 .auth-feature strong{ font-size:15px; font-weight:var(--fw-semibold); }
 .auth-panel{ display:flex; align-items:center; justify-content:center; padding:24px; background:var(--surface); overflow-y:auto; }
 .auth-form{ width:100%; max-width:384px; }
+.auth-sub{ margin:6px 0 18px; color:var(--text-muted); font-size:var(--fs-sm); line-height:1.5; }
 .auth-title{ margin:0 0 22px; font-size:28px; font-weight:var(--fw-bold); color:var(--text-strong); }
 .auth-remember{ display:flex; align-items:center; gap:9px; margin:2px 0 6px; font-size:var(--fs-sm); color:var(--text-muted); cursor:pointer; user-select:none; }
 .auth-check{ width:17px; height:17px; accent-color:var(--teal); cursor:pointer; flex:0 0 auto; }

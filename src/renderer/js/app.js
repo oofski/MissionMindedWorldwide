@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { api } from './api.js';
 import { icon } from './icons.js';
 import { renderLogin } from './views/login.js';
+import { renderSetup } from './views/setup.js';
 import { renderKiosk } from './views/kiosk.js';
 import { renderArrivals } from './views/arrivals.js';
 import { renderDashboard } from './views/dashboard.js';
@@ -83,6 +84,7 @@ let lastNav = { name: 'dashboard', params: {} };
 const LIVE_VIEWS = new Set(['dashboard', 'emt', 'provider', 'hygienist', 'checkout', 'records', 'management']);
 
 function navigate(name, params = {}) {
+  if (name === 'setup') return renderFullscreen(renderSetup(ctx));
   if (name === 'login') return renderFullscreen(renderLogin(ctx));
   if (name === 'kiosk') return renderFullscreen(renderKiosk(ctx));
 
@@ -360,7 +362,12 @@ async function logout() {
 // Expose for the login view to trigger an update-info refresh after sign-in.
 ctx.afterLogin = async () => { await refreshAppInfo(true); updateVersionUI(); };
 
-// Boot.
+// Boot. A machine with no account has to run setup before anything else — the
+// app no longer ships a default administrator to fall back on. If the check
+// itself fails, fall through to sign-in rather than stranding the user on a
+// blank screen.
 setLang('en');
-navigate('login');
+api.needsSetup()
+  .then((r) => navigate(r && r.needsSetup ? 'setup' : 'login'))
+  .catch(() => navigate('login'));
 api.appVersion().then((i) => { appInfo.version = i.version; }).catch(() => {});

@@ -76,12 +76,22 @@ jobs:
             clinics. Windows desktop app. **Download the installer once — it
             auto-updates from here on.**
 
-            > **Early preview (v${{ steps.ver.outputs.version }}).** This is a first cut carried over
-            > from the Caring Hands codebase and rebranded to MMW. It has not yet been
-            > used in a live clinic, and the consent wording has not been through legal
-            > review. Do not rely on it for patient records until it has.
+            > **Early preview (v${{ steps.ver.outputs.version }}).** Carried over from the Caring
+            > Hands codebase and rebranded to MMW. It has not yet been used in a live
+            > clinic, and the consent wording has not been through legal review. Do not
+            > rely on it for patient records until it has.
 
-            ### What's in this build
+            ### New in this build
+            - **First-run setup.** There is no shipped `admin/admin` any more. The
+              first person to open the app creates the administrator and chooses the
+              password; a second laptop picks **Join a clinic already set up**, points
+              at the same clinic cloud, and everyone signs in with their own account.
+            - **MMW colours and type.** The palette is sampled from the printed
+              Patient Record — cyan `#00BBD0`, Clearance magenta `#C356A0`, Dental
+              green `#8DC63F` — and the lockup is set in Copperplate Gothic, the
+              letterhead face from MMW's consent form, with Arial for everything else.
+
+            ### Also in the app
             - **Registration** issues a 6-digit patient ID and prints a **Code 128
               wristband**. Every later station starts by scanning that band.
             - **Clearance** records the four vitals from the printed MMW record —

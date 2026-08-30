@@ -420,16 +420,69 @@ function convergeSeedAdmin() {
   }
 }
 
+/**
+ * True when this machine has no usable account and must run first-time setup.
+ *
+ * Deactivated accounts do not count: an install whose only admin was disabled
+ * would otherwise be permanently locked out with no way back in.
+ */
+function needsSetup() {
+  return db.prepare('SELECT COUNT(*) AS n FROM users WHERE active = 1').get().n === 0;
+}
+
+/**
+ * Create the clinic's first administrator.
+ *
+ * Security: this is the one call that can create an account without being
+ * signed in, so it hard-refuses the moment any account exists. Without that
+ * guard it would be a permanent privilege-escalation route on every install.
+ *
+ * The account gets a fresh sync identity like any other user (uid is assigned
+ * lazily on first sync). It deliberately does NOT reuse DEFAULT_ADMIN_UID: that
+ * existed to converge the old auto-seeded admin/admin, which was byte-identical
+ * on every install. These accounts are not — each is a named person with their
+ * own password — so sharing one identity would let two laptops that were both
+ * set up independently overwrite each other's password on sync and lock one of
+ * them out of their own machine.
+ */
+function createFirstAdmin(data) {
+  if (db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0) {
+    throw new Error('This computer is already set up. Sign in instead.');
+  }
+  const d = data || {};
+  const username = String(d.username || '').trim().toLowerCase();
+  const fullName = String(d.full_name || '').trim();
+  const password = String(d.password || '');
+  if (!fullName) throw new Error('Please enter your name.');
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+    throw new Error('Username must be 3–32 characters: letters, numbers, dot, dash or underscore.');
+  }
+  if (password.length < 8) throw new Error('Password must be at least 8 characters.');
+
+  const { salt, hash } = hashPassword(password);
+  const info = db.prepare(
+    `INSERT INTO users (username, full_name, role, salt, hash, active, created_at)
+     VALUES (?,?,?,?,?,1,?)`
+  ).run(username, fullName, 'admin', salt, hash, now());
+
+  // Name the clinic now if they gave one, so the first event is not a placeholder.
+  const clinic = String(d.clinic_name || '').trim();
+  if (clinic) {
+    const evId = Number(getSetting('active_event_id'));
+    if (evId) db.prepare('UPDATE events SET name = ?, updated_at = ?, synced_rev = NULL, content_rev = NULL WHERE id = ?').run(clinic, now(), evId);
+  }
+
+  const user = db.prepare('SELECT id, username, full_name, role FROM users WHERE id = ?').get(info.lastInsertRowid);
+  audit(user, 'setup.admin_created', 'user', user.id, `First administrator created: ${username}`);
+  return user;
+}
+
 function seed() {
   const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
   if (userCount === 0) {
-    // Only a bootstrap administrator is created. The admin creates all other
-    // staff accounts from Admin > Staff. (No demo doctor/triage accounts.)
-    const { salt, hash } = hashPassword('admin');
-    db.prepare(
-      `INSERT INTO users (username, full_name, role, salt, hash, active, created_at)
-       VALUES (?,?,?,?,?,1,?)`
-    ).run('admin', 'Clinic Administrator', 'admin', salt, hash, now());
+    // No account is seeded. A well-known admin/admin on every install is a real
+    // exposure for a machine holding patient records, so the first person to
+    // open the app creates the administrator themselves (see createFirstAdmin).
   } else {
     // One-time cleanup for databases seeded by an earlier version: disable the
     // old demo doctor/triage accounts if they still use the default password.
@@ -448,7 +501,7 @@ function seed() {
     const info = db.prepare(
       `INSERT INTO events (name, location, start_date, end_date, languages, active, created_at, uid)
        VALUES (?,?,?,?,?,1,?,?)`
-    ).run('Lowell Fairgrounds Clinic', 'Lowell, OR', today(), today(), 'en,es', now(), DEFAULT_EVENT_UID);
+    ).run('Mission Minded Clinic', '', today(), today(), 'en,es', now(), DEFAULT_EVENT_UID);
     setSetting('active_event_id', String(info.lastInsertRowid));
   }
   // Existing installs (or after any event change): make sure the default event is
@@ -2516,6 +2569,7 @@ function close() {
 module.exports = {
   init, close,
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
+  needsSetup, createFirstAdmin,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,
   createPatient, startVisitFromExisting, updatePatient, deletePatient, getPatient, listPatients, searchAllPatients, patientHistory,
   findPatientByCode,

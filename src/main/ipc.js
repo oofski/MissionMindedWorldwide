@@ -127,6 +127,17 @@ function handle(channel, fn, { requireAuth = true } = {}) {
 
 function register(getMainWindow) {
   /* ---- Auth ---- */
+  // First-run setup. These two are reachable without signing in — by
+  // definition there is no account yet — so they are left out of PERMS. The
+  // real protection is in db.createFirstAdmin, which refuses outright once any
+  // account exists, so this can never become a way to add a second admin.
+  handle('auth:needsSetup', () => ({ needsSetup: db.needsSetup() }));
+  handle('auth:setupAdmin', (payload) => {
+    const user = db.createFirstAdmin(payload || {});
+    currentUser = user;   // sign the new administrator straight in
+    return user;
+  });
+
   ipcMain.handle('auth:login', async (_e, { username, password }) => {
     try {
       const user = db.login(username, password);
