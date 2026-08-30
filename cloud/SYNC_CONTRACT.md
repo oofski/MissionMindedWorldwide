@@ -1,4 +1,4 @@
-# Caring Hands — Cloud Sync Contract (v1.1.0)
+# Mission Minded Worldwide — Cloud Sync Contract (v1.1.0)
 
 The Cloudflare Worker + D1 is a **shared queue brain**. Each clinic station runs the
 Electron app and syncs the active event's patient-flow rows through the Worker so the
@@ -32,9 +32,9 @@ works locally and re-syncs when reconnected.
 ```
 
 ## HTTP API (Worker)
-Base URL = the deployed Worker, e.g. `https://caring-hands-sync.<subdomain>.workers.dev`.
+Base URL = the deployed Worker, e.g. `https://mmw-sync.<subdomain>.workers.dev`.
 
-- `GET /health` → `{ ok:true, service:"caring-hands-sync", version:"1.1.0", time:"<iso>" }`
+- `GET /health` → `{ ok:true, service:"mmw-sync", version:"1.1.0", time:"<iso>" }`
   (no auth — used by the app's "Test connection").
 - **Auth (all other routes):** header `Authorization: Bearer <CLINIC_KEY>`. The Worker
   compares against the `CLINIC_KEY` secret (constant-time). Mismatch → `401 {ok:false,error}`.

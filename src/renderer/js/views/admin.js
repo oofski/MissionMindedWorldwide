@@ -683,7 +683,7 @@ export function renderAdmin(ctx, params = {}) {
     /* --- Advanced (rarely needed: point at a different server) --- */
     const urlInput = el('input', {
       class: 'input', type: 'text', value: st.url || '',
-      placeholder: 'https://caring-hands-sync.<subdomain>.workers.dev',
+      placeholder: 'https://mmw-sync.<subdomain>.workers.dev',
     });
     const keyInput = el('input', {
       class: 'input', type: 'password',

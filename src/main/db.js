@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Caring Hands — local-first data layer.
+ * Mission Minded Worldwide — local-first data layer.
  *
  * A single embedded SQLite database holds every clinic record. No network
  * calls are ever made from this module; all data lives on the device and is
@@ -22,7 +22,7 @@ let db = null;
 function init(userDataDir) {
   const dir = userDataDir;
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const dbPath = path.join(dir, 'caring-hands.db');
+  const dbPath = path.join(dir, 'mission-minded.db');
 
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -177,6 +177,10 @@ function migrate() {
   // survive every event. Existing rows default to NULL and stay global.
   addColumn('users', 'event_id', 'INTEGER');
   // v1.0.8: EMT confirms blood-thinner use with the patient after vitals.
+  // MMW Clearance records four vitals, not three: the printed record's band is
+  // BP / BS / PULSE / RESP. Blood sugar and respiration had no column.
+  addColumn('triage', 'glucose', 'INTEGER');        // BS, mg/dL
+  addColumn('triage', 'respiration', 'INTEGER');    // breaths per minute
   addColumn('triage', 'blood_thinner', 'TEXT');          // 'yes' | 'no' | null (unasked)
   addColumn('triage', 'blood_thinner_detail', 'TEXT');   // which thinner(s), when known
   // v1.0.9: the EMT station routes each patient after vitals — to the dentist
@@ -215,7 +219,23 @@ function migrate() {
   // be seen (consents checked, station assigned). Pre-registered patients can sit
   // in the queue for days before they walk in, so "checked in" alone can't mean
   // "present".
+  // MMW: the short, scannable patient ID printed on the wristband. Kept
+  // unique across the whole table rather than per-event, so a band scanned at
+  // any station resolves to exactly one person even after an event rolls over.
+  addColumn('patients', 'patient_code', 'TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_patients_code ON patients(patient_code) WHERE patient_code IS NOT NULL');
+
   addColumn('patients', 'arrived_at', 'TEXT');
+
+  // Give any pre-existing patient a wristband ID so every record is scannable.
+  for (const row of db.prepare('SELECT id FROM patients WHERE patient_code IS NULL').all()) {
+    let assigned = null;
+    for (let attempt = 0; attempt < 100 && !assigned; attempt++) {
+      const candidate = String(crypto.randomInt(100000, 1000000));
+      if (!db.prepare('SELECT 1 FROM patients WHERE patient_code = ?').get(candidate)) assigned = candidate;
+    }
+    if (assigned) db.prepare('UPDATE patients SET patient_code = ? WHERE id = ?').run(assigned, row.id);
+  }
   addColumn('patients', 'arrived_by_name', 'TEXT');
   // v1.6.0: deleting a record locally used to be undone by the next sync — the
   // row was simply pulled back from the cloud. A tombstone is the record OF a
@@ -784,6 +804,30 @@ function visitNeedsSurgeryConsent(visitType) {
   return String(visitType || '').startsWith('extraction');
 }
 
+/**
+ * Allocate an unused wristband ID.
+ *
+ * Six digits, drawn randomly rather than sequentially: a sequential ID leaks
+ * how many patients a clinic has seen and, more practically, makes two laptops
+ * running offline hand out the same number. Random + a uniqueness check keeps
+ * the codes independent per station until they sync.
+ */
+function generatePatientCode() {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const code = String(crypto.randomInt(100000, 1000000));
+    if (!db.prepare('SELECT 1 FROM patients WHERE patient_code = ?').get(code)) return code;
+  }
+  throw new Error('Could not allocate a patient ID. Please try again.');
+}
+
+/** Resolve a scanned wristband to a patient. Returns null when unknown. */
+function findPatientByCode(code) {
+  const clean = String(code || '').replace(/\D/g, '');
+  if (!clean) return null;
+  const row = db.prepare('SELECT id FROM patients WHERE patient_code = ?').get(clean);
+  return row ? getPatient(row.id) : null;
+}
+
 function createPatient(actor, data) {
   const eventId = Number(getSetting('active_event_id'));
   if (!eventId) throw new Error('No active clinic event. Ask an admin to create one.');
@@ -796,8 +840,8 @@ function createPatient(actor, data) {
   const info = db.prepare(
     `INSERT INTO patients
        (event_id, language, first_name, last_name, dob, gender, phone, email,
-        demographics, medical_history, dental_history, status, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        demographics, medical_history, dental_history, status, patient_code, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     eventId,
     d.language || 'en',
@@ -811,6 +855,7 @@ function createPatient(actor, data) {
     JSON.stringify(d.medical_history || {}),
     JSON.stringify(d.dental_history || {}),
     'checked_in',
+    generatePatientCode(),
     now(),
     now()
   );
@@ -1036,22 +1081,23 @@ function saveVitals(actor, patientId, data) {
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
   const sys = toIntOrNull(d.bp_systolic), dia = toIntOrNull(d.bp_diastolic), hr = toIntOrNull(d.heart_rate);
+  const glu = toIntOrNull(d.glucose), resp = toIntOrNull(d.respiration);
   // Only treat this as a vitals write when at least one vitals key is present, so
   // a review-only or blood-thinner-only save never nulls out previously recorded
   // vitals (or reassigns vitals_by/vitals_at to the wrong actor).
-  const hasVitals = ['bp_systolic', 'bp_diastolic', 'heart_rate'].some((k) => Object.prototype.hasOwnProperty.call(d, k));
+  const hasVitals = ['bp_systolic', 'bp_diastolic', 'heart_rate', 'glucose', 'respiration'].some((k) => Object.prototype.hasOwnProperty.call(d, k));
   // Blood-thinner confirmation is optional and only written when the key is
   // present, so a plain vitals save never clears a previously recorded answer.
   const hasBT = Object.prototype.hasOwnProperty.call(d, 'blood_thinner');
   const bt = hasBT ? (d.blood_thinner || null) : null;
   const btd = hasBT ? (d.blood_thinner_detail || null) : null;
   if (!tr) {
-    db.prepare(`INSERT INTO triage (patient_id, status, bp_systolic, bp_diastolic, heart_rate, vitals_by, vitals_at, blood_thinner, blood_thinner_detail)
-                VALUES (?, 'waiting', ?, ?, ?, ?, ?, ?, ?)`).run(patientId, sys, dia, hr, hasVitals && actor ? actor.id : null, hasVitals ? now() : null, bt, btd);
+    db.prepare(`INSERT INTO triage (patient_id, status, bp_systolic, bp_diastolic, heart_rate, glucose, respiration, vitals_by, vitals_at, blood_thinner, blood_thinner_detail)
+                VALUES (?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(patientId, sys, dia, hr, glu, resp, hasVitals && actor ? actor.id : null, hasVitals ? now() : null, bt, btd);
   } else {
     if (hasVitals) {
-      db.prepare('UPDATE triage SET bp_systolic=?, bp_diastolic=?, heart_rate=?, vitals_by=?, vitals_at=? WHERE patient_id=?')
-        .run(sys, dia, hr, actor ? actor.id : null, now(), patientId);
+      db.prepare('UPDATE triage SET bp_systolic=?, bp_diastolic=?, heart_rate=?, glucose=?, respiration=?, vitals_by=?, vitals_at=? WHERE patient_id=?')
+        .run(sys, dia, hr, glu, resp, actor ? actor.id : null, now(), patientId);
     }
     if (hasBT) db.prepare('UPDATE triage SET blood_thinner=?, blood_thinner_detail=? WHERE patient_id=?').run(bt, btd, patientId);
   }
@@ -1609,7 +1655,7 @@ function backupTo(destPath) {
 // including the things a spreadsheet cannot hold (consent signatures, x-ray
 // images). This is the file that makes it safe to wipe a laptop after a clinic:
 // the spreadsheet is for reading, this is for putting the clinic back.
-const BUNDLE_FORMAT = 'caring-hands-clinic';
+const BUNDLE_FORMAT = 'mmw-clinic';
 const BUNDLE_VERSION = 1;
 function exportClinicBundle(eventId) {
   // uids are normally handed out lazily by the first cloud sync. A clinic that
@@ -1643,7 +1689,7 @@ function exportClinicBundle(eventId) {
 // rather than doubling it.
 function importClinicBundle(actor, bundle) {
   const b = bundle || {};
-  if (b.format !== BUNDLE_FORMAT) throw new Error('That is not a Caring Hands clinic backup file.');
+  if (b.format !== BUNDLE_FORMAT) throw new Error('That is not a Mission Minded clinic backup file.');
   if (!b.event || !Array.isArray(b.patients)) throw new Error('This backup file is incomplete or damaged.');
 
   const counts = { patients: 0, updated: 0, consents: 0, xrays: 0 };
@@ -1984,7 +2030,7 @@ function captureEventSummary(actor, eventId) {
 // totals were being captured: the numbers come back, the people do not.
 function rebuildSummaryFromBundle(actor, bundle) {
   const b = bundle || {};
-  if (b.format !== BUNDLE_FORMAT) throw new Error('That is not a Caring Hands clinic backup file.');
+  if (b.format !== BUNDLE_FORMAT) throw new Error('That is not a Mission Minded clinic backup file.');
   if (!b.event || !Array.isArray(b.patients)) throw new Error('This backup file is incomplete or damaged.');
   const txBy = new Map((b.treatments || []).map((r) => [r.patient_id, r]));
   const triBy = new Map((b.triage || []).map((r) => [r.patient_id, r]));
@@ -2472,6 +2518,7 @@ module.exports = {
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,
   createPatient, startVisitFromExisting, updatePatient, deletePatient, getPatient, listPatients, searchAllPatients, patientHistory,
+  findPatientByCode,
   listIncompletePatients, deleteIncompletePatients,
   saveVitals, routePatient, updateConsentTeeth, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,
   arrivalReadiness, confirmArrival, routeFromVisitType, visitNeedsSurgeryConsent,

@@ -1,8 +1,10 @@
 /* ============================================================
-   CARING HANDS — BRAND DESIGN TOKENS (v1.0.7)
-   Built from the official Brand Standards: Teal + Navy carry the
-   brand; Coral is the single sparing accent (the heart at the
-   center of the mark). Montserrat for display, Open Sans for UI.
+   MISSION MINDED WORLDWIDE — BRAND DESIGN TOKENS (v0.0.1)
+   Taken from the MMW Patient Record and Consent forms:
+   the logotype is monochrome black, headings are MMW cyan, and
+   the record itself is colour-coded by module — magenta for
+   Clearance (medical) and green for Dental. Ink carries the
+   chrome so the black wordmark sits on its own ground.
    ============================================================ */
 
 /* ---- Brand typefaces, bundled for full offline use ---- */
@@ -20,46 +22,66 @@
   src:url('../assets/fonts/opensans-700.woff2') format('woff2'); }
 
 :root {
-  /* ---- Brand raw palette (straight from the standards sheet) ---- */
-  --brand-teal:#35AAB5; --brand-navy:#06357B; --brand-coral:#FF2E17;
-  --brand-sky:#5DB9E2; --brand-jade:#6CC898; --brand-meadow:#83C651; --brand-mint:#BFE6D0;
-  /* Deepened variants tuned for text/US-legible contrast on light surfaces */
-  --teal-deep:#1c7c87; --teal:#35AAB5; --teal-soft:#e3f4f6; --teal-soft-2:#cdebee; --teal-border:#b7e0e4;
-  --navy:#06357B; --navy-deep:#052a63; --navy-soft:#e7eef8; --navy-soft-2:#d4e1f1; --navy-border:#b4c9e7;
-  --coral:#e02616; --coral-strong:#FF2E17; --coral-soft:#fdeae7; --coral-border:#f6c7c0;
+  /* ---- MMW raw palette (straight off the printed forms) ---- */
+  --mmw-cyan:#00BCD4;      /* section headings on the consent form */
+  --mmw-magenta:#C0559A;   /* "Clearance" band on the Patient Record */
+  --mmw-green:#8CC63F;     /* "Dental" band on the Patient Record */
+  --mmw-ink:#141719;       /* the logotype's black */
+
+  /* Cyan ramp — deepened for text/UI contrast on light surfaces */
+  --cyan-deep:#00707F; --cyan:#00A6BC; --cyan-soft:#e2f6f9; --cyan-soft-2:#c7ecf2; --cyan-border:#a9e0e9;
+  /* Ink ramp — the app chrome (sidebar, inverse surfaces) */
+  --ink:#141719; --ink-deep:#0b0d0e; --ink-soft:#eef0f1; --ink-soft-2:#e0e3e5; --ink-border:#c9ced2;
+  /* Module accents, straight from the record's two coloured bands */
+  --magenta:#a8397f; --magenta-strong:#C0559A; --magenta-soft:#f9e8f3; --magenta-border:#ecc4de;
+  --green:#5f8f22; --green-strong:#8CC63F; --green-soft:#eef6e1; --green-border:#d2e7b3;
+  /* Danger needs to read as danger; the brand sheet has no red, so this is a
+     deliberate, restrained addition used only for destructive/alert states. */
+  --red:#d13b2e; --red-strong:#e04434; --red-soft:#fdeae7; --red-border:#f5c6c0;
+
+  /* ---- Legacy token aliases -------------------------------------------
+     The views and components.css were written against Caring Hands' token
+     names. Keeping the names and re-pointing the values rebrands the whole
+     app without touching 17k lines of view code. ---------------------- */
+  --brand-teal:var(--mmw-cyan); --brand-navy:var(--mmw-ink); --brand-coral:var(--red-strong);
+  --brand-sky:#4fc7d8; --brand-jade:var(--green-strong); --brand-meadow:var(--mmw-green); --brand-mint:#d8eec0;
+  --teal-deep:var(--cyan-deep); --teal:var(--cyan); --teal-soft:var(--cyan-soft); --teal-soft-2:var(--cyan-soft-2); --teal-border:var(--cyan-border);
+  --navy:var(--ink); --navy-deep:var(--ink-deep); --navy-soft:var(--ink-soft); --navy-soft-2:var(--ink-soft-2); --navy-border:var(--ink-border);
+  --coral:var(--red); --coral-strong:var(--red-strong); --coral-soft:var(--red-soft); --coral-border:var(--red-border);
 
   /* Surfaces */
-  --surface-canvas:#f5f7f9; --surface:#ffffff; --surface-raised:#ffffff;
-  --surface-sunken:#eef2f4; --surface-hover:#f1f5f6; --surface-active:#e7eef0;
-  --surface-header:#f2f6f8; --surface-inverse:var(--navy);
+  --surface-canvas:#f6f7f8; --surface:#ffffff; --surface-raised:#ffffff;
+  --surface-sunken:#eef0f2; --surface-hover:#f2f4f5; --surface-active:#e8ebed;
+  --surface-header:#f4f6f7; --surface-inverse:var(--ink);
 
   /* Text */
-  --text-strong:#0e1b30; --text:#28323f; --text-muted:#5a6675; --text-subtle:#8792a1;
-  --text-on-accent:#ffffff; --text-on-inverse:#eaf1fb; --text-on-inverse-mute:rgba(234,241,251,.66);
+  --text-strong:#14181c; --text:#2a3138; --text-muted:#5c6570; --text-subtle:#88919b;
+  --text-on-accent:#ffffff; --text-on-inverse:#f0f2f3; --text-on-inverse-mute:rgba(240,242,243,.66);
 
   /* Borders */
-  --border:#e2e7ec; --border-strong:#cfd7de; --border-subtle:#edf0f3;
-  --border-focus:var(--teal); --border-inverse:rgba(255,255,255,.12);
+  --border:#e3e6e9; --border-strong:#cfd4d9; --border-subtle:#eef0f2;
+  --border-focus:var(--cyan); --border-inverse:rgba(255,255,255,.13);
 
-  /* Accent = Navy (primary actions, high contrast). Teal is the secondary brand accent. */
-  --accent:var(--navy); --accent-hover:var(--navy-deep); --accent-active:#041f4d;
-  --accent-soft:var(--teal-soft); --accent-soft-2:var(--teal-soft-2); --accent-border:var(--teal-border); --accent-text:var(--teal-deep);
+  /* Accent = Ink for primary actions (high contrast, matches the wordmark);
+     cyan is the brand accent used for emphasis, rails and focus. */
+  --accent:var(--ink); --accent-hover:#23282c; --accent-active:var(--ink-deep);
+  --accent-soft:var(--cyan-soft); --accent-soft-2:var(--cyan-soft-2); --accent-border:var(--cyan-border); --accent-text:var(--cyan-deep);
 
-  /* Brand green — status only (from the globe greens) */
-  --brand-green:#2f8f66; --brand-green-soft:#e6f5ee;
+  /* Brand green — status only */
+  --brand-green:#4f8f2f; --brand-green-soft:var(--green-soft);
 
   /* Status trios */
-  --success:#2f8f66; --success-soft:#e6f5ee; --success-border:#bce3ce;
+  --success:#4f8f2f; --success-soft:var(--green-soft); --success-border:var(--green-border);
   --warning:#9a6a13; --warning-soft:#f7eed9; --warning-border:#e8d4a6;
-  --danger:var(--coral);  --danger-soft:var(--coral-soft);  --danger-border:var(--coral-border);
-  --info:var(--teal-deep);    --info-soft:var(--teal-soft);    --info-border:var(--teal-border);
-  --neutral:#5a616b; --neutral-soft:#eceef1; --neutral-border:#dfe2e6;
+  --danger:var(--red);  --danger-soft:var(--red-soft);  --danger-border:var(--red-border);
+  --info:var(--cyan-deep);    --info-soft:var(--cyan-soft);    --info-border:var(--cyan-border);
+  --neutral:#5c636b; --neutral-soft:#edeef0; --neutral-border:#dee1e4;
 
-  /* Type — Montserrat (display) + Open Sans (UI/body), per brand standards */
+  /* Type — Montserrat (display) + Open Sans (UI/body). The MMW logotype is a
+     wide geometric sans; Montserrat is the closest bundled match. */
   --font-display: "Montserrat", ui-sans-serif, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   --font-sans: "Open Sans", ui-sans-serif, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   --font-mono: ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
-  /* Brand hierarchy: H1 30/800 · H2 22/700 · H3 17/600 · body 15/400 · eyebrow 12/600 */
   --fs-display:30px; --fs-h1:23px; --fs-h2:18px; --fs-h3:16px;
   --fs-base:15px; --fs-sm:13px; --fs-xs:12px; --fs-2xs:11px; --fs-stat:30px;
   --lh-tight:1.2; --lh-normal:1.55;
@@ -70,24 +92,24 @@
   --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:20px;
   --space-6:24px; --space-8:32px; --space-10:40px; --space-12:48px; --space-16:64px;
 
-  /* Radius — a touch rounder to echo the logotype's roundness */
-  --radius-xs:5px; --radius-sm:7px; --radius-md:10px; --radius-lg:13px; --radius-full:999px;
+  /* Radius — squarer than Caring Hands; the MMW mark is all straight strokes */
+  --radius-xs:3px; --radius-sm:5px; --radius-md:8px; --radius-lg:11px; --radius-full:999px;
 
-  /* Elevation */
-  --shadow-xs:0 1px 1px rgba(6,53,123,.04);
-  --shadow-sm:0 1px 2px rgba(6,53,123,.07),0 1px 1px rgba(6,53,123,.04);
-  --shadow-md:0 2px 8px rgba(6,53,123,.10),0 1px 2px rgba(6,53,123,.06);
-  --shadow-lg:0 10px 28px rgba(6,53,123,.14),0 3px 8px rgba(6,53,123,.07);
-  --shadow-overlay:rgba(9,22,45,.48);
-  --focus-ring:0 0 0 3px rgba(53,170,181,.30);
-  --focus-ring-danger:0 0 0 3px rgba(224,38,22,.22);
+  /* Elevation — neutral ink shadows rather than blue */
+  --shadow-xs:0 1px 1px rgba(20,23,25,.04);
+  --shadow-sm:0 1px 2px rgba(20,23,25,.07),0 1px 1px rgba(20,23,25,.04);
+  --shadow-md:0 2px 8px rgba(20,23,25,.10),0 1px 2px rgba(20,23,25,.06);
+  --shadow-lg:0 10px 28px rgba(20,23,25,.14),0 3px 8px rgba(20,23,25,.07);
+  --shadow-overlay:rgba(12,15,17,.50);
+  --focus-ring:0 0 0 3px rgba(0,188,212,.32);
+  --focus-ring-danger:0 0 0 3px rgba(209,59,46,.22);
 
   /* Borders as tokens */
   --border-line:1px solid var(--border);
   --border-line-strong:1px solid var(--border-strong);
   --divider:1px solid var(--border-subtle);
   --table-head-rule:1px solid var(--border-strong);
-  --accent-bar:3px solid var(--teal);
+  --accent-bar:3px solid var(--cyan);
 
   /* Motion */
   --ease:cubic-bezier(0.2,0,0,1); --dur-fast:120ms; --dur:160ms;
@@ -114,12 +136,12 @@ h3{ font-weight:var(--fw-semibold); }
 .muted{ color:var(--text-muted); }
 .subtle{ color:var(--text-subtle); }
 .small{ font-size:var(--fs-xs); }
-::selection{ background:var(--teal-soft-2); }
+::selection{ background:var(--cyan-soft-2); }
 
 /* Scrollbars — slim, neutral */
 ::-webkit-scrollbar{ width:11px; height:11px; }
-::-webkit-scrollbar-thumb{ background:#c4d0d4; border:3px solid transparent; background-clip:content-box; border-radius:999px; }
-::-webkit-scrollbar-thumb:hover{ background:#a9b8bd; border:3px solid transparent; background-clip:content-box; }
+::-webkit-scrollbar-thumb{ background:#c8ced2; border:3px solid transparent; background-clip:content-box; border-radius:999px; }
+::-webkit-scrollbar-thumb:hover{ background:#adb5ba; border:3px solid transparent; background-clip:content-box; }
 ::-webkit-scrollbar-track{ background:transparent; }
 
 /* ===== App shell ===== */
@@ -127,9 +149,9 @@ h3{ font-weight:var(--fw-semibold); }
 .app-fullscreen{ height:100vh; }
 
 .sidebar{ background:var(--surface-inverse); color:var(--text-on-inverse); display:flex; flex-direction:column; padding:16px 13px; gap:6px;
-  background-image:linear-gradient(180deg, #073c8a 0%, var(--navy) 42%, var(--navy-deep) 100%); }
+  background-image:linear-gradient(180deg, #1b1f22 0%, var(--ink) 55%, var(--ink-deep) 100%); }
 .sidebar-brand{ display:flex; align-items:center; gap:11px; padding:6px 8px 16px; border-bottom:1px solid var(--border-inverse); margin-bottom:8px; }
-.brand-mark{ width:34px; height:34px; border-radius:8px; background:#fff; padding:2px; }
+.brand-mark{ width:30px; height:30px; border-radius:6px; }
 .brand-name{ font-family:var(--font-display); font-weight:var(--fw-bold); font-size:var(--fs-base); color:#fff; letter-spacing:var(--tracking-tight); }
 .brand-sub{ font-size:var(--fs-2xs); letter-spacing:var(--tracking-eyebrow); color:var(--text-on-inverse-mute); font-weight:var(--fw-semibold); text-transform:uppercase; }
 .nav{ display:flex; flex-direction:column; gap:2px; margin-top:4px; }

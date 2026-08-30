@@ -44,7 +44,7 @@ export function renderKiosk(ctx) {
     clear(root);
     root.append(
       el('div', { class: 'kiosk-gate' }, [
-        el('img', { class: 'kiosk-gate-logo', src: '../../assets/logo.svg', alt: 'Caring Hands' }),
+        el('img', { class: 'kiosk-gate-logo', src: '../../assets/mmw-logo.png', alt: 'Mission Minded Free Clinics' }),
         el('div', { class: 'kiosk-welcome' }, [t('intake.welcome')]),
         el('div', { class: 'kiosk-choose' }, [t('intake.chooseLanguage')]),
         el('div', { class: 'lang-grid' }, languageList(eventLangs).map((l) =>
@@ -90,7 +90,7 @@ export function renderKiosk(ctx) {
     );
 
     const header = el('div', { class: 'kiosk-header' }, [
-      el('img', { class: 'kiosk-logo', src: '../../assets/logo.svg', alt: 'Caring Hands' }),
+      el('img', { class: 'kiosk-logo', src: '../../assets/mmw-logo.png', alt: 'Mission Minded Free Clinics' }),
       el('div', { class: 'kiosk-step-label' }, [`${t('intake.step')} ${idx + 1} ${t('intake.of')} ${total} · ${step.title}`]),
       el('button', { class: 'btn btn--ghost btn--sm btn--icon kiosk-exit', onClick: backTo }, [icon('x', { size: 16 })]),
     ]);
@@ -140,6 +140,33 @@ export function renderKiosk(ctx) {
     limitDigits(phone.input, 10);
     limitDigits(emPhone.input, 10);
 
+    // MMW runs dental, medical and vision under one roof, and the registration
+    // form asks which the patient is here for. It drives who they queue for, so
+    // at least one has to be chosen — a blank would strand them in no queue.
+    const SERVICES = [
+      { key: 'dental', label: L({ en: 'Dental', es: 'Dental', ru: 'Стоматология' }) },
+      { key: 'medical', label: L({ en: 'Medical', es: 'Médico', ru: 'Медицина' }) },
+      { key: 'vision', label: L({ en: 'Vision', es: 'Visión', ru: 'Зрение' }) },
+    ];
+    const chosenServices = new Set(Array.isArray(d.services) && d.services.length ? d.services : ['dental']);
+    const serviceBtns = SERVICES.map((svc) => {
+      const btn = el('button', {
+        type: 'button',
+        class: 'chip-btn' + (chosenServices.has(svc.key) ? ' chip-btn--on' : ''),
+        onClick: () => {
+          if (chosenServices.has(svc.key)) chosenServices.delete(svc.key); else chosenServices.add(svc.key);
+          btn.classList.toggle('chip-btn--on', chosenServices.has(svc.key));
+          btn.setAttribute('aria-pressed', String(chosenServices.has(svc.key)));
+        },
+        'aria-pressed': String(chosenServices.has(svc.key)),
+      }, [svc.label]);
+      return btn;
+    });
+    const servicesField = el('div', { class: 'span-2' }, [
+      el('span', { class: 'field-label' }, [L({ en: 'Services needed today', es: 'Servicios que necesita hoy', ru: 'Необходимые услуги' })]),
+      el('div', { class: 'chip-row' }, serviceBtns),
+    ]);
+
     // F4: referral as a dropdown of known sources; "Other" reveals a free-text field.
     const referral = selectField(t('intake.referral'), [
       { value: '', label: '—' },
@@ -157,6 +184,7 @@ export function renderKiosk(ctx) {
       city.node, stateF.node,
       el('div', { class: 'span-2' }, [mailing.node]),
       marital.node, emName.node, emPhone.node,
+      servicesField,
       el('div', { class: 'span-2' }, [referral.node]),
       referralOtherWrap,
     ]);
@@ -173,11 +201,13 @@ export function renderKiosk(ctx) {
         if (!phone.get()) { toast(t('common.required') + ': ' + t('intake.phone'), 'error'); return false; }
         if (!emName.get()) { toast(t('common.required') + ': ' + t('intake.emergencyName'), 'error'); return false; }
         if (!emPhone.get()) { toast(t('common.required') + ': ' + t('intake.emergencyPhone'), 'error'); return false; }
+        if (!chosenServices.size) { toast(L({ en: 'Please choose at least one service.', es: 'Elija al menos un servicio.', ru: 'Выберите хотя бы одну услугу.' }), 'error'); return false; }
         data.first_name = first.get(); data.last_name = last.get();
         data.dob = dob.get(); data.gender = gender.get(); data.phone = phone.get(); data.email = email.get();
         Object.assign(data.demographics, {
           address: address.get(), city: city.get(), state: stateF.get(), mailing_address: mailing.get(), marital_status: marital.get(),
           emergency_name: emName.get(), emergency_phone: emPhone.get(),
+          services: SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k)),
           referral: referral.get(),
           referral_other: referral.get() === 'other' ? referralOther.get() : '',
         });

@@ -183,7 +183,7 @@ function register(getMainWindow) {
     const res = await dialog.showOpenDialog({
       title: 'Choose a clinic backup file',
       properties: ['openFile'],
-      filters: [{ name: 'Caring Hands backup', extensions: ['json'] }],
+      filters: [{ name: 'Mission Minded backup', extensions: ['json'] }],
     });
     if (res.canceled || !res.filePaths || !res.filePaths[0]) return { imported: false };
     let bundle;
@@ -218,7 +218,7 @@ function register(getMainWindow) {
     const res = await dialog.showOpenDialog({
       title: 'Choose the clinic backup file to rebuild a report from',
       properties: ['openFile'],
-      filters: [{ name: 'Caring Hands backup', extensions: ['json'] }],
+      filters: [{ name: 'Mission Minded backup', extensions: ['json'] }],
     });
     if (res.canceled || !res.filePaths || !res.filePaths[0]) return { rebuilt: false };
     let bundle;
@@ -256,6 +256,15 @@ function register(getMainWindow) {
   });
   handle('patients:update', ({ id, ...data }) => db.updatePatient(currentUser, id, data));
   handle('patients:get', (id) => db.getPatient(id));
+  // MMW: resolve a scanned wristband. A handheld scanner types the digits and
+  // presses Enter, so the code arrives with stray whitespace/CR — normalising
+  // lives in the data layer, and an unknown band returns a clear error rather
+  // than a null the caller has to guess at.
+  handle('patients:findByCode', (code) => {
+    const found = db.findPatientByCode(code);
+    if (!found) throw new Error('No patient found for that wristband.');
+    return found;
+  });
   handle('patients:list', (opts) => db.listPatients(opts || {}));
   handle('patients:records', (opts) => db.listPatients(opts || {}));
   handle('patients:searchAll', (term) => db.searchAllPatients(term));
@@ -440,7 +449,7 @@ function register(getMainWindow) {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const res = await dialog.showSaveDialog(getMainWindow(), {
       title: 'Back up clinic database to USB / drive',
-      defaultPath: `caring-hands-backup-${stamp}.db`,
+      defaultPath: `mmw-backup-${stamp}.db`,
       filters: [{ name: 'SQLite database', extensions: ['db'] }],
     });
     if (res.canceled || !res.filePath) return { saved: false };
@@ -474,7 +483,7 @@ function register(getMainWindow) {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const res = await dialog.showSaveDialog(getMainWindow(), {
       title: 'Export clinic data as a ZIP (for a hard drive)',
-      defaultPath: `caring-hands-${evName}-${stamp}.zip`,
+      defaultPath: `mmw-${evName}-${stamp}.zip`,
       filters: [{ name: 'ZIP archive', extensions: ['zip'] }],
     });
     if (res.canceled || !res.filePath) return { saved: false };
@@ -484,13 +493,13 @@ function register(getMainWindow) {
     try { await db.backupTo(tmp); dbBuf = fs.readFileSync(tmp); }
     finally { try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ } }
     const readme = [
-      'Caring Hands Worldwide — clinic data export',
+      'Mission Minded Worldwide — clinic data export',
       'Event: ' + (data.event ? data.event.name : '(none)'),
       'Exported: ' + new Date().toISOString(),
       'Patients in this event: ' + (data.patients ? data.patients.length : 0),
       '',
       'Contents:',
-      '  database.db   full SQLite database — the complete clinic (open in Caring Hands or any SQLite tool)',
+      '  database.db   full SQLite database — the complete clinic (open in Mission Minded or any SQLite tool)',
       '  records.json  all patient records for this event, human-readable',
       '',
       'This archive contains protected health information. Store it securely.',
@@ -515,7 +524,7 @@ function register(getMainWindow) {
     });
     if (res.canceled || !res.filePaths.length) return { saved: false };
     const destDir = res.filePaths[0];
-    const base = `${patient.last_name}_${patient.first_name}_CaringHands`.replace(/[^a-z0-9_]/gi, '');
+    const base = `${patient.last_name}_${patient.first_name}_MMW`.replace(/[^a-z0-9_]/gi, '');
     const folder = path.join(destDir, base);
     fs.mkdirSync(folder, { recursive: true });
     // Full clinical PDF + portable JSON (with x-ray images) for continuity of care.
@@ -580,7 +589,7 @@ function register(getMainWindow) {
   /* ---- Version & offline updates (available from any view) ---- */
   ipcMain.handle('app:version', async () => {
     try {
-      return { ok: true, data: { version: updater.currentVersion(), platform: process.platform, name: 'Caring Hands' } };
+      return { ok: true, data: { version: updater.currentVersion(), platform: process.platform, name: 'Mission Minded' } };
     } catch (err) {
       return { ok: false, error: err.message };
     }

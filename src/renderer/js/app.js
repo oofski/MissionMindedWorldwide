@@ -183,7 +183,7 @@ function renderShell(active, contentNode) {
   const sidebar = el('aside', { class: 'sidebar' }, [
     el('div', { class: 'sidebar-brand' }, [
       el('img', { src: '../../assets/icon.png', class: 'brand-mark', alt: '' }),
-      el('div', {}, [el('div', { class: 'brand-name' }, ['Caring Hands']), el('div', { class: 'brand-sub' }, ['WORLDWIDE'])]),
+      el('div', {}, [el('div', { class: 'brand-name' }, ['Mission Minded']), el('div', { class: 'brand-sub' }, ['FREE CLINICS'])]),
     ]),
     el('nav', { class: 'nav' }, navItems),
     el('div', { class: 'sidebar-foot' }, [
@@ -338,7 +338,7 @@ async function openUpdateModal() {
   }
 
   body.append(
-    el('p', {}, [el('strong', {}, [`Caring Hands v${appInfo.version || ''}`]), el('br'), el('span', { class: 'subtle small' }, ['The app checks GitHub for new versions and installs them for you — no manual download. A USB/folder option is available when offline.'])]),
+    el('p', {}, [el('strong', {}, [`Mission Minded v${appInfo.version || ''}`]), el('br'), el('span', { class: 'subtle small' }, ['The app checks GitHub for new versions and installs them for you — no manual download. A USB/folder option is available when offline.'])]),
     onlineSection,
     el('div', { class: 'login-divider', style: 'margin:16px 0' }, [el('span', {}, ['offline option'])]),
     el('div', {}, [el('div', { class: 'field-label' }, ['From USB / folder']), usbStatus, usbActions]),

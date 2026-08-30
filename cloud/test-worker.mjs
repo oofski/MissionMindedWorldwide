@@ -158,7 +158,7 @@ async function main() {
     h.status === 200 &&
       h.data &&
       h.data.ok === true &&
-      h.data.service === 'caring-hands-sync' &&
+      h.data.service === 'mmw-sync' &&
       h.data.version === '1.6.6' &&
       h.data.seq === true &&
       typeof h.data.time === 'string'

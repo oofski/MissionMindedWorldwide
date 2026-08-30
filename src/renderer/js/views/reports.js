@@ -410,7 +410,7 @@ function emailCard(full) {
   const rows = list.map((p) => el('div', { class: 'lookup-row' }, [
     el('div', { style: 'min-width:0' }, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]), el('div', { class: 'subtle small' }, [patientEmail(p)])]),
     el('button', { class: 'btn btn--ghost btn--sm', onClick: () => {
-      const mail = `mailto:${encodeURIComponent(patientEmail(p))}?subject=${encodeURIComponent('Your Caring Hands visit summary')}&body=${encodeURIComponent('Your visit summary from Caring Hands Worldwide is attached.')}`;
+      const mail = `mailto:${encodeURIComponent(patientEmail(p))}?subject=${encodeURIComponent('Your Mission Minded visit summary')}&body=${encodeURIComponent('Your visit summary from Mission Minded Worldwide is attached.')}`;
       api.openExternal(mail);
     } }, [icon('mail', { size: 14 }), 'Email']),
   ]));

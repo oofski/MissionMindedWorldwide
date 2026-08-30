@@ -5,14 +5,14 @@
  *
  * The clinic runs fully offline, so updates arrive on the same USB drives the
  * team already carries. This module scans removable drives (and an optional
- * folder) for a newer Caring Hands installer and can launch it. No network.
+ * folder) for a newer Mission Minded installer and can launch it. No network.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { app, shell } = require('electron');
 
-const INSTALLER_RE = /^Caring-Hands-(?:Setup|Portable)-(\d+\.\d+\.\d+)\.exe$/i;
+const INSTALLER_RE = /^MMW-(?:Setup|Portable)-(\d+\.\d+\.\d+)\.exe$/i;
 
 function currentVersion() {
   return app.getVersion();
@@ -62,9 +62,9 @@ function checkForUpdates(extraDir) {
   const found = [];
   for (const root of candidateRoots(extraDir)) {
     scanDir(root, found);
-    // Also look one level down in a CaringHands/ updates folder on the drive.
-    scanDir(path.join(root, 'CaringHands'), found);
-    scanDir(path.join(root, 'Caring Hands'), found);
+    // Also look one level down in an MMW/ updates folder on the drive.
+    scanDir(path.join(root, 'MMW'), found);
+    scanDir(path.join(root, 'Mission Minded'), found);
   }
   // Dedupe by path
   const seen = new Set();
@@ -86,7 +86,7 @@ function checkForUpdates(extraDir) {
 async function openInstaller(installerPath) {
   if (!installerPath || !fs.existsSync(installerPath)) throw new Error('Installer not found.');
   const m = INSTALLER_RE.exec(path.basename(installerPath));
-  if (!m) throw new Error('Not a recognized Caring Hands installer.');
+  if (!m) throw new Error('Not a recognized Mission Minded installer.');
   const err = await shell.openPath(installerPath);
   if (err) throw new Error(err);
   // Give the installer a moment to spawn, then quit so it can replace files.

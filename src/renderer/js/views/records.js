@@ -341,7 +341,7 @@ export function renderRecords(ctx, params = {}) {
     try {
       const r = await api.pdfGenerate(p.id, 'full');
       if (r.saved) {
-        await api.openExternal(`mailto:${p.email}?subject=${encodeURIComponent('Your Caring Hands dental record')}&body=${encodeURIComponent('Your dental record from Caring Hands Worldwide is attached.')}`);
+        await api.openExternal(`mailto:${p.email}?subject=${encodeURIComponent('Your Mission Minded dental record')}&body=${encodeURIComponent('Your dental record from Mission Minded Worldwide is attached.')}`);
         toast('PDF saved — attach it in your email program.', 'success');
       }
     } catch (e) { toast(e.message, 'error'); }

@@ -20,7 +20,7 @@ export function renderCheckout(ctx, params = {}) {
         try { const r = await api.usbUploadCheckout(); if (r.uploaded != null) toast(`Uploaded ${r.uploaded} patient file(s) from USB`, 'success'); queue(); } catch (e) { toast(e.message, 'error'); }
       } }, [icon('usb', { size: 15 }), 'Upload USB to database']),
       el('button', { class: 'btn btn--ghost btn--sm', onClick: async () => {
-        const ok = await modal({ title: 'Clear USB drive?', body: 'This deletes the Caring Hands patient folder(s) on the chosen drive so it can be reused.', confirmText: 'Clear drive', cancelText: 'Cancel', danger: true });
+        const ok = await modal({ title: 'Clear USB drive?', body: 'This deletes the Mission Minded patient folder(s) on the chosen drive so it can be reused.', confirmText: 'Clear drive', cancelText: 'Cancel', danger: true });
         if (!ok) return;
         try { const r = await api.usbClear(); toast(`Cleared ${r.cleared} folder(s)`, 'success'); } catch (e) { toast(e.message, 'error'); }
       } }, [icon('trash', { size: 15 }), 'Clear USB']),
@@ -169,7 +169,7 @@ export function renderCheckout(ctx, params = {}) {
     try {
       const r = await api.pdfGenerate(p.id, 'summary');
       if (r && r.saved) {
-        await api.openExternal(`mailto:${encodeURIComponent(p.email)}?subject=${encodeURIComponent('Your Caring Hands visit summary')}&body=${encodeURIComponent('Your visit summary from Caring Hands Worldwide is attached.')}`);
+        await api.openExternal(`mailto:${encodeURIComponent(p.email)}?subject=${encodeURIComponent('Your Mission Minded visit summary')}&body=${encodeURIComponent('Your visit summary from Mission Minded Worldwide is attached.')}`);
         toast('Summary saved — attach it in your email program.', 'success');
       }
     } catch (e) { toast(e.message, 'error'); }

@@ -9,6 +9,7 @@ import { sortedByName } from '../patientSort.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
 import { bloodThinnerStatus, bloodThinnerText, bpStatus } from '../medFlags.js';
+import { scanBox } from '../components/wristband.js';
 
 const QUADRANTS = [['UR', 'UR'], ['UL', 'UL'], ['LR', 'LR'], ['LL', 'LL']];
 const fmtWhen = (ts) => { if (!ts) return ''; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
@@ -57,6 +58,7 @@ export function renderProvider(ctx, params = {}) {
         el('div', {}, [el('h1', {}, [t('nav.provider')]), el('p', { class: 'view-sub' }, [`${dentistQueue.length} patient(s) in the dentist queue — patients arrive here once the EMT station records vitals and routes them`])]),
         ghostBtn('refresh', 'Refresh', queue),
       ]),
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: (pt) => detail(pt.id) })]),
       el('div', { class: 'card' }, [table(dentistQueue, 'No patients in the dentist queue yet — the EMT station sends patients here after vitals.')]),
       atHygienist.length ? el('details', { class: 'collapse' }, [
         el('summary', {}, [`At the hygienist (${atHygienist.length})`]),

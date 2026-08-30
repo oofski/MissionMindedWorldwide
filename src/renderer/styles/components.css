@@ -583,3 +583,65 @@
 .signup-bar .bar-track{ flex:1; }
 .signup-pct{ font-weight:var(--fw-semibold); color:var(--text-strong); min-width:38px; text-align:right; }
 @media (max-width:900px){ .signup-row{ grid-template-columns:1fr auto auto; } .signup-bar{ grid-column:1 / -1; } }
+
+/* ============================================================
+   MMW — wristband, scanning, and the record's module colours
+   ============================================================ */
+
+/* ---- Module bands, mirroring the printed Patient Record ----
+   The paper form colour-codes Clearance magenta and Dental green, and staff
+   navigate it by those colours. Carrying them into the app means a volunteer
+   who has only ever used the paper form still knows which section they are in. */
+.module-head{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:9px 16px; border-radius:var(--radius-md) var(--radius-md) 0 0;
+  font-family:var(--font-display); font-weight:var(--fw-bold); font-size:var(--fs-h3);
+  color:#fff; letter-spacing:var(--tracking-tight);
+}
+.module-head--clearance{ background:var(--magenta-strong); }
+.module-head--dental{ background:var(--green-strong); }
+.module-body{ border:var(--border-line); border-top:none; border-radius:0 0 var(--radius-md) var(--radius-md); padding:16px; background:var(--surface); }
+.module-body--clearance{ background:var(--magenta-soft); border-color:var(--magenta-border); }
+.module-body--dental{ background:var(--green-soft); border-color:var(--green-border); }
+
+/* ---- Scan box ---- */
+.scan-box{
+  display:flex; align-items:center; gap:8px; padding:6px 8px 6px 12px;
+  background:var(--surface); border:2px solid var(--cyan); border-radius:var(--radius-md);
+  box-shadow:var(--shadow-sm); max-width:420px;
+}
+.scan-box:focus-within{ box-shadow:var(--focus-ring); }
+.scan-icon{ display:flex; color:var(--cyan-deep); flex:none; }
+.scan-input{
+  border:none; outline:none; background:transparent; flex:1; min-width:0;
+  font-family:var(--font-mono); font-size:var(--fs-h3); letter-spacing:.12em;
+  color:var(--text-strong); padding:4px 0;
+}
+.scan-input::placeholder{ font-family:var(--font-sans); font-size:var(--fs-sm); letter-spacing:normal; color:var(--text-subtle); }
+
+/* ---- Wristband label ---- */
+.wristband{
+  background:#fff; border:1px solid var(--border-strong); border-radius:var(--radius-md);
+  padding:14px 16px; display:flex; flex-direction:column; gap:8px; max-width:420px;
+}
+.wristband--empty{ color:var(--text-muted); font-size:var(--fs-sm); }
+.wb-head{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.wb-logo{ height:26px; width:auto; }
+.wb-id{ font-family:var(--font-mono); font-size:var(--fs-h2); font-weight:var(--fw-bold); letter-spacing:.14em; color:#000; }
+.wb-name{ font-family:var(--font-display); font-weight:var(--fw-bold); font-size:var(--fs-h2); color:#000; line-height:1.15; }
+.wb-meta{ display:flex; flex-wrap:wrap; gap:10px; font-size:var(--fs-xs); color:#333; }
+.wb-svc{ text-transform:uppercase; letter-spacing:var(--tracking-eyebrow); font-weight:var(--fw-semibold); }
+.wb-code{ margin-top:2px; }
+.wb-code svg{ display:block; max-width:100%; height:auto; }
+
+/* ---- Printing ----
+   Only the band goes to paper. Hiding every other top-level node (rather than
+   restyling the app) keeps toasts, modals and the sidebar off the label. */
+#print-root{ display:none; }
+@media print{
+  @page{ margin:8mm; }
+  body.printing > *{ display:none !important; }
+  body.printing > #print-root{ display:block !important; }
+  .wristband--print{ border:none; padding:0; max-width:none; }
+  .wristband--print .wb-code svg{ width:auto; }
+}

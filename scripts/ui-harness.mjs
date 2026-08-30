@@ -299,7 +299,7 @@ async function main() {
 
   // Step: General consent — agree + signer + signature
   log(/Consent|Consentimiento/i.test($('.kiosk-step-label').textContent), 'on consent step');
-  log(/specimens, tissue or parts/i.test($('.kiosk-body').textContent) && /hold Caring Hands Worldwide/i.test($('.kiosk-body').textContent), 'general consent shows the complete new wording at check-in');
+  log(/Mission Minded Worldwide \(MMW\)/i.test($('.kiosk-body').textContent) && /patient waiver/i.test($('.kiosk-body').textContent) && /501\(c\)3/i.test($('.kiosk-body').textContent), 'general consent shows the full MMW wording at check-in');
   const agree = $('.big-check'); if (agree) { agree.checked = true; agree.dispatchEvent(new window.Event('change', { bubbles: true })); }
   const signer = $all('.kiosk-body input').find((i) => /name/i.test(i.placeholder || '') || true);
   // signer is the first text input on consent step
@@ -574,7 +574,14 @@ async function main() {
   {
     const { CATALOG } = await import('../src/renderer/i18n/strings.js');
     const i18nMod = await import('../src/renderer/js/i18n.js');
-    log((CATALOG.en.consent.generalFull || []).length === 7 && (CATALOG.en.consent.oralSurgeryFull || []).length >= 8, 'v1.4.7: full general (7) + oral-surgery consent wording present in English');
+    // MMW's printed consents: 7 clauses in the health-care application and 7
+    // paragraphs of oral surgery. Also assert the two details that make them
+    // MMW's rather than a generic consent — the org name and the post-op number.
+    log((CATALOG.en.consent.generalFull || []).length === 7
+      && (CATALOG.en.consent.oralSurgeryFull || []).length === 7
+      && CATALOG.en.consent.oralSurgeryFull.join(' ').includes('Mission Minded Worldwide (MMW)')
+      && CATALOG.en.consent.oralSurgeryFull.join(' ').includes('(951) 317-4968'),
+      'MMW general (7) + oral-surgery (7) consent wording present in English');
     i18nMod.setLang('en');
     log(Array.isArray(i18nMod.tRaw('consent.generalFull')), 'v1.4.7: English defines the full consent text (tRaw)');
     i18nMod.setLang('es');
@@ -1898,6 +1905,52 @@ async function main() {
     log(stray.deferredRows.length === 0,
       'v1.6.6: a record whose clinic was deleted here is not retried for ever');
     hx.close();
+  }
+
+  /* ================= MMW v0.0.1 — wristband, scanning, Clearance vitals ========
+     The EMR flow keys every station off a scanned band, so these cover the
+     whole path: issue a code, encode it, scan it back, and record the four
+     vitals the printed Clearance band asks for. */
+  {
+    const { code128Modules } = await import('../src/renderer/js/components/barcode.js');
+
+    const evW = db.createEvent(currentUser, { name: 'Wristband Clinic' });
+    db.setActiveEvent(currentUser, evW.id);
+    const w1 = db.createPatient(currentUser, { first_name: 'Ana', last_name: 'Ruiz', dob: '1990-04-02',
+      gender: 'female', demographics: { city: 'Yorba Linda', state: 'CA', services: ['dental', 'vision'] } });
+    const w2 = db.createPatient(currentUser, { first_name: 'Bo', last_name: 'Chen', dob: '1985-01-09' });
+    const g1 = db.getPatient(w1.id), g2 = db.getPatient(w2.id);
+
+    log(/^[0-9]{6}$/.test(g1.patient_code || ''), 'MMW: registration issues a 6-digit wristband ID');
+    log(g1.patient_code !== g2.patient_code, 'MMW: two patients never share a wristband ID');
+
+    // A scanner types the digits then presses Enter, so trailing CR/whitespace
+    // is the normal case, not an edge case.
+    const scanned = db.findPatientByCode('  ' + g1.patient_code + '\r\n');
+    log(!!scanned && scanned.id === g1.id, 'MMW: scanning a band resolves to that patient');
+    log(db.findPatientByCode('000001') === null, 'MMW: an unknown band resolves to nothing rather than a wrong patient');
+
+    // The barcode has to be a real Code 128 frame or no scanner will read it:
+    // start + data + modulo-103 check + stop.
+    const mods = code128Modules(g1.patient_code);
+    log(mods.reduce((a, b) => a + b, 0) === 11 * 5 + 13,
+      'MMW: the wristband barcode is a well-formed Code 128 frame');
+    log(JSON.stringify(code128Modules('123456'))
+      === JSON.stringify(['211232', '112232', '131123', '331121', '132131', '2331112'].join('').split('').map(Number)),
+      'MMW: Code 128 subset C encoding matches the standard (check digit 44)');
+
+    // Clearance records BP / BS / PULSE / RESP, per the printed record.
+    db.saveVitals(currentUser, w1.id, { bp_systolic: 128, bp_diastolic: 82, heart_rate: 74, glucose: 104, respiration: 16 });
+    const v = db.getPatient(w1.id).triage;
+    log(v.glucose === 104 && v.respiration === 16, 'MMW: Clearance records blood sugar and respiration');
+    // A later review-only save must not silently wipe them.
+    db.saveVitals(currentUser, w1.id, { blood_thinner: 'no' });
+    const v2 = db.getPatient(w1.id).triage;
+    log(v2.glucose === 104 && v2.respiration === 16 && v2.bp_systolic === 128,
+      'MMW: a review-only save does not wipe the recorded vitals');
+
+    log(JSON.stringify(db.getPatient(w1.id).demographics.services) === JSON.stringify(['dental', 'vision']),
+      'MMW: the services chosen at registration are kept on the record');
   }
 
   await tick();

@@ -8,6 +8,7 @@ import { patientHistoryPanel } from '../components/patientHistory.js';
 import { bloodThinnerText } from '../medFlags.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
+import { scanBox } from '../components/wristband.js';
 import { sortedByName } from '../patientSort.js';
 
 // Cleaning options a hygienist performs (mirrors the provider's cleaning set).
@@ -51,6 +52,7 @@ export function renderHygienist(ctx, params = {}) {
         el('div', {}, [el('h1', {}, ['Cleanings']), el('p', { class: 'view-sub' }, [`${forCleaning.length} routed for cleaning · ${live.length} patient(s) in clinic`])]),
         el('button', { class: 'btn btn--ghost btn--sm', onClick: queue }, [icon('refresh', { size: 15 }), 'Refresh']),
       ]),
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: (pt) => detail(pt.id) })]),
       el('div', { class: 'card' }, [
         el('div', { class: 'card-title' }, [icon('sparkle', { size: 15 }), 'Routed for cleaning']),
         el('div', { class: 'data-table-wrap' }, [

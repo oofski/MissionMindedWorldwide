@@ -1,4 +1,4 @@
-// Caring Hands — Cloud Sync Worker (v1.6.6)
+// Mission Minded Worldwide — Cloud Sync Worker (v1.6.6)
 // =============================================================================
 // NO INSTALLS NEEDED. To deploy: create a Worker in the Cloudflare dashboard,
 // paste THIS ENTIRE FILE into its code editor, then:
@@ -14,7 +14,7 @@
 //
 // See ./SYNC_CONTRACT.md for the exact API + schema this implements.
 
-const SERVICE = 'caring-hands-sync';
+const SERVICE = 'mmw-sync';
 const VERSION = '1.6.6';
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
@@ -94,7 +94,7 @@ export default {
           ok: true,
           service: SERVICE,
           version: VERSION,
-          message: 'Caring Hands sync server is running. There is no web page here — connect from the app under Admin -> Cloud. Health check: /health',
+          message: 'Mission Minded sync server is running. There is no web page here — connect from the app under Admin -> Cloud. Health check: /health',
         });
       }
 
@@ -590,7 +590,7 @@ const I18N = {
     consent: 'Consent', signName: 'Your name (for the signature)', relationship: 'Relationship (if for a minor)', relPh: 'Self / Parent / Guardian',
     agree: CONSENT_AGREE_TEXT, sigOpt: 'Signature', sigHint: 'Sign with your finger or a stylus.', clear: 'Clear',
     surgery: 'Surgery Consent', surgeryIntro: 'Because an extraction may be done, please also read and sign this.', teeth: 'Tooth number(s), if known',
-    submit: 'Submit pre-registration', submitting: 'Submitting…', footer: 'Caring Hands Worldwide — free dental care. Your information is shared only with the clinic team.',
+    submit: 'Submit pre-registration', submitting: 'Submitting…', footer: 'Mission Minded Worldwide — free dental care. Your information is shared only with the clinic team.',
     thankYou: 'Thank you, ', done: 'Your pre-registration and consent are complete. Please bring a photo ID — the front desk already has your information.',
     errName: 'Please enter your first and last name.', errDob: 'Please enter your date of birth.', errGender: 'Please choose a gender.',
     errCity: 'Please enter your city.', errState: 'Please enter your state.',
@@ -617,7 +617,7 @@ const I18N = {
     consent: 'Consentimiento', signName: 'Su nombre (para la firma)', relationship: 'Parentesco (si es para un menor)', relPh: 'Yo mismo / Padre / Tutor',
     agree: 'He leído y entiendo lo anterior, y doy mi consentimiento.', sigOpt: 'Firma', sigHint: 'Firme con su dedo o un lápiz óptico.', clear: 'Borrar',
     surgery: 'Consentimiento de Cirugía', surgeryIntro: 'Como podría realizarse una extracción, lea y firme esto también.', teeth: 'Número(s) de diente, si los sabe',
-    submit: 'Enviar pre-registro', submitting: 'Enviando…', footer: 'Caring Hands Worldwide — atención dental gratuita. Su información se comparte solo con el equipo de la clínica.',
+    submit: 'Enviar pre-registro', submitting: 'Enviando…', footer: 'Mission Minded Worldwide — atención dental gratuita. Su información se comparte solo con el equipo de la clínica.',
     thankYou: 'Gracias, ', done: 'Su pre-registro y consentimiento están completos. Por favor traiga una identificación con foto — la recepción ya tiene su información.',
     errName: 'Por favor ingrese su nombre y apellido.', errDob: 'Por favor ingrese su fecha de nacimiento.', errGender: 'Por favor elija un género.',
     errCity: 'Por favor ingrese su ciudad.', errState: 'Por favor ingrese su estado.',
@@ -655,7 +655,7 @@ function checkinErrorPage() {
 function checkinShell(title, inner) {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<title>' + htmlEscape(title) + ' · Caring Hands</title>' +
+    '<title>' + htmlEscape(title) + ' · Mission Minded</title>' +
     '<style>' +
     ':root{--g:#2f8f66;--ink:#12303f;--mut:#5b6b74;--line:#e2e8ec;--bg:#f4f6f7}' +
     '*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}' +
@@ -701,7 +701,7 @@ function checkinFormPage(eventUid, eventName, lang) {
   const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errMedical: L.errMedical, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr };
 
   const inner =
-    '<div class="hero"><div style="display:flex;justify-content:space-between;align-items:center"><div class="ey">Caring Hands · Pre-registration</div>' +
+    '<div class="hero"><div style="display:flex;justify-content:space-between;align-items:center"><div class="ey">Mission Minded · Pre-registration</div>' +
     '<a href="?lang=' + L.switchLang + '" style="color:#fff;font-size:13px;text-decoration:underline">' + htmlEscape(L.switchLabel) + '</a></div>' +
     '<h1>' + htmlEscape(eventName) + '</h1><p>' + htmlEscape(L.heroSub) + '</p></div>' +
     '<form id="f">' +
@@ -793,7 +793,7 @@ function checkinFormPage(eventUid, eventName, lang) {
     "consent_agree:el('cagree').checked,signer_name:val('signer'),relationship:val('relationship'),signature_png:gpad?gpad.data():null," +
     "surgery_agree:el('sagree')?el('sagree').checked:false,surgery_teeth:val('steeth'),surgery_signature_png:spad?spad.data():null};" +
     "var b=el('submit');b.disabled=true;b.textContent=T.submitting;" +
-    "fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(j){if(j&&j.ok){document.querySelector('.wrap').innerHTML='<div class=\"hero\"><div class=\"ey\">Caring Hands</div><h1>'+T.thankYou+fn.replace(/[<>&]/g,'')+'!</h1></div><div class=\"card ok\"><div class=\"big\">✅</div><p>'+T.done+'</p></div>';window.scrollTo(0,0);}else{err.textContent=(j&&j.error)||T.genErr;b.disabled=false;b.textContent=T.submitLabel;}}).catch(function(){err.textContent=T.netErr;b.disabled=false;b.textContent=T.submitLabel;});});" +
+    "fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(j){if(j&&j.ok){document.querySelector('.wrap').innerHTML='<div class=\"hero\"><div class=\"ey\">Mission Minded</div><h1>'+T.thankYou+fn.replace(/[<>&]/g,'')+'!</h1></div><div class=\"card ok\"><div class=\"big\">✅</div><p>'+T.done+'</p></div>';window.scrollTo(0,0);}else{err.textContent=(j&&j.error)||T.genErr;b.disabled=false;b.textContent=T.submitLabel;}}).catch(function(){err.textContent=T.netErr;b.disabled=false;b.textContent=T.submitLabel;});});" +
     '</script>';
   return checkinShell('Pre-register · ' + eventName, inner);
 }
@@ -804,7 +804,7 @@ function checkinFormPage(eventUid, eventName, lang) {
 
 // The clinic key. Uses the CLINIC_KEY secret when set; otherwise falls back to
 // the built-in default so a clinic that just pastes this Worker in is online with
-// zero setup (the Caring Hands app ships with the same default baked in).
+// zero setup (the Mission Minded app ships with the same default baked in).
 const DEFAULT_CLINIC_KEY = 'randy';
 
 function isAuthorized(request, env) {

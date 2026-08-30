@@ -54,12 +54,12 @@ export function renderLogin(ctx) {
     el('strong', {}, [title]),
   ]);
 
-  // Left: branded hero panel (Caring Hands teal — not the reference blue).
+  // Left: branded hero panel — the MMW wordmark on its own ink ground.
   const hero = el('div', { class: 'auth-hero' }, [
     el('div', { class: 'auth-brand' }, [
       el('div', { class: 'auth-brand-badge' }, ['CH']),
       el('div', { class: 'auth-brand-name' }, [
-        el('strong', {}, ['Caring Hands']),
+        el('strong', {}, ['Mission Minded']),
         el('span', {}, ['Worldwide']),
       ]),
     ]),

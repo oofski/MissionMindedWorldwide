@@ -6,6 +6,7 @@ import { patientHistoryPanel } from '../components/patientHistory.js';
 import { bloodThinnerStatus, bloodThinnerText, bpStatus, BP_SYS_MAX, BP_DIA_MAX } from '../medFlags.js';
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
+import { scanBox, wristbandLabel, printWristband } from '../components/wristband.js';
 
 // Route metadata shared by the queue pills, the next-step card and the toasts.
 // 'both' is retained only so legacy records still render a sensible label — the
@@ -110,6 +111,11 @@ export function renderEmt(ctx, params = {}) {
         ]),
         el('button', { class: 'btn btn--ghost btn--sm', onClick: queue }, [icon('refresh', { size: 15 }), 'Refresh']),
       ]),
+      // Scanning the band is the intended way in: it beats hunting a name in a
+      // queue of fifty, and it is the step the paper flow already assumes.
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [
+        scanBox({ onFound: (p) => detail(p.id) }),
+      ]),
       el('div', { class: 'card' }, [
         el('div', { class: 'data-table-wrap' }, [
           el('table', { class: 'data-table' }, [
@@ -137,7 +143,7 @@ export function renderEmt(ctx, params = {}) {
   // not saved would be refused by the guard, which would read as a bug.
   async function doRoute(id, route, pendingVitals) {
     try {
-      if (pendingVitals && (pendingVitals.bp_systolic || pendingVitals.heart_rate)) {
+      if (pendingVitals && (pendingVitals.bp_systolic || pendingVitals.heart_rate || pendingVitals.glucose || pendingVitals.respiration)) {
         await api.saveVitals(id, pendingVitals);
       }
       await api.routePatient(id, route);
@@ -158,6 +164,10 @@ export function renderEmt(ctx, params = {}) {
     const sys = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.bpSys'), value: tr.bp_systolic != null ? tr.bp_systolic : (m.bp_systolic || '') });
     const dia = el('input', { class: 'input', type: 'number', min: '0', max: '200', placeholder: t('intake.bpDia'), value: tr.bp_diastolic != null ? tr.bp_diastolic : (m.bp_diastolic || '') });
     const hr = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.hr'), value: tr.heart_rate != null ? tr.heart_rate : (m.heart_rate || '') });
+    // MMW Clearance also records blood sugar and respiration — the printed
+    // record's band is BP / BS / PULSE / RESP.
+    const glu = el('input', { class: 'input', type: 'number', min: '0', max: '900', placeholder: 'mg/dL', value: tr.glucose != null ? tr.glucose : '' });
+    const resp = el('input', { class: 'input', type: 'number', min: '0', max: '90', placeholder: '/min', value: tr.respiration != null ? tr.respiration : '' });
 
     // Turn the blood-pressure reading RED when it hits hypertensive-crisis levels
     // (systolic over 180 or diastolic over 100). The offending field(s) go red as
@@ -229,6 +239,7 @@ export function renderEmt(ctx, params = {}) {
     function currentVitals() {
       return {
         bp_systolic: sys.value.trim(), bp_diastolic: dia.value.trim(), heart_rate: hr.value.trim(),
+        glucose: glu.value.trim(), respiration: resp.value.trim(),
         bp_rechecks: Array.from(recheckRows.children).map((row) => row._get()).filter((r) => r.bp_systolic || r.bp_diastolic || r.heart_rate),
       };
     }
@@ -350,7 +361,7 @@ export function renderEmt(ctx, params = {}) {
 
     // Whatever is typed in the vitals fields right now — routing saves this
     // first so the vitals gate sees the reading the nurse just took.
-    const pendingVitals = () => ({ bp_systolic: sys.value, bp_diastolic: dia.value, heart_rate: hr.value });
+    const pendingVitals = () => ({ bp_systolic: sys.value, bp_diastolic: dia.value, heart_rate: hr.value, glucose: glu.value, respiration: resp.value });
     const vitalsOnFile = tr.bp_systolic != null || tr.heart_rate != null;
 
     // Next-step card (B2): sign-off defaults to the provider the patient picked
@@ -435,12 +446,28 @@ export function renderEmt(ctx, params = {}) {
 
       patientHistoryPanel(p, [], { open: false }),
 
+      // The band, with a reprint: a torn or missing band otherwise strands the
+      // patient at every later station, which all key off the scan.
+      el('details', { class: 'collapse', style: 'margin-top:var(--space-4)' }, [
+        el('summary', {}, [
+          el('span', {}, [icon('scan', { size: 15 }), ' Wristband']),
+          el('span', { class: 'mono subtle' }, [p.patient_code || '—']),
+        ]),
+        el('div', { class: 'collapse-body' }, [
+          wristbandLabel(p),
+          el('button', { class: 'btn btn--ghost btn--sm', style: 'margin-top:var(--space-3)', onClick: () => printWristband(p) },
+            [icon('print', { size: 15 }), 'Print wristband']),
+        ]),
+      ]),
+
       el('div', { class: 'card', style: 'margin-top:var(--space-4)' }, [
         el('div', { class: 'card-title' }, [icon('syringe', { size: 15 }), t('intake.vitalsTitle')]),
         el('div', { class: 'vitals-grid' }, [
           el('label', { class: 'field' }, [el('span', { class: 'field-label' }, [t('intake.bpSys')]), sys]),
           el('label', { class: 'field' }, [el('span', { class: 'field-label' }, [t('intake.bpDia')]), dia]),
           el('label', { class: 'field' }, [el('span', { class: 'field-label' }, [t('intake.hr')]), hr]),
+          el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Blood sugar']), glu]),
+          el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Respiration']), resp]),
         ]),
         bpWarn,
         recheckSection,

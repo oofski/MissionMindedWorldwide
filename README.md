@@ -1,29 +1,57 @@
-# Caring Hands Worldwide — Practice Management Software
+# Mission Minded Worldwide — Free Clinic Patient Records
 
-An **offline-first** desktop application for free dental clinics operating in
-underserved communities — fairgrounds, rural areas, and international mission
-deployments. It replaces the bilingual 5-page paper packet with a unified
-digital workflow: patient intake, clinical documentation, consent management,
-and reporting.
+An **offline-first** desktop application for Mission Minded Worldwide's free
+dental, medical and vision clinics. It replaces the bilingual paper packet — the
+Patient Record and the Patient Application and Consent for Health Care — with a
+single digital workflow: registration, medical clearance, x-ray triage, dental
+treatment, check-out and reporting.
 
-Built as a Windows desktop app (Electron). **No cloud. No servers. All patient
-data lives on the device** and is only ever copied out by an authorized staff
-member.
+Built as a Windows desktop app (Electron). **No cloud required. All patient data
+lives on the device** and is only ever copied out by an authorized staff member.
+An optional clinic-local sync keeps several laptops at one event in step.
+
+> ### ⚠️ Early preview — v0.0.1
+> This is the first cut. The application is carried over from the Mission Minded
+> codebase and rebranded to MMW, with the MMW flow (wristband IDs, the four
+> Clearance vitals, service selection) built on top. **It has not been used in a
+> live clinic, and the consent wording has not been through legal review.** Treat
+> it as a preview to try and give feedback on, not as a system of record.
+
+---
+
+## The clinic flow
+
+The app follows the MMW EMR flow, and each station starts by scanning the
+patient's wristband rather than searching for a name:
+
+| Step | Station | What happens |
+|---|---|---|
+| 1 | **Registration** | Demographics, services needed (dental / medical / vision), signed waiver. Issues a **6-digit patient ID** and prints a **Code 128 wristband**. |
+| 2 | **Medical Clearance** | Scan the band. Blood pressure, blood sugar, pulse, respiration; allergies, medications, medical history. Routes to cleaning or x-ray. |
+| 3 | **X-ray / Triage** | Scan the band. Number of films, and what is needed — cleaning, extraction, root canal, filling, referral. |
+| 4 | **Dental Treatment** | Odontogram, fillings by surface, extractions (simple / surgical), cleaning, anaesthetic, signed treatment note. |
+| 5 | **Check-out** | Visit summary, record export, and the patient leaves. |
+
+Reporting keeps **de-identified event totals** that survive a patient-data
+purge, so a clinic can answer a grant return after the records are gone.
 
 ---
 
 ## ⬇️ Download the Windows app
 
-Every push builds a fresh Windows `.exe` on GitHub's Windows runners and
-publishes it on the **[Releases](../../releases)** page. Grab the latest build:
+Every push to `main` builds a fresh Windows `.exe` on GitHub's Windows runners
+and publishes it on the **[Releases](../../releases)** page:
 
-- **`Caring-Hands-Setup-1.0.0.exe`** — standard installer (Start-menu + desktop
-  shortcuts).
-- **`Caring-Hands-Portable-1.0.0.exe`** — single portable executable that runs
-  without installing (ideal for a USB stick on shared clinic laptops).
+- **`MMW-Setup-0.0.1.exe`** — standard installer (Start-menu + desktop
+  shortcuts, and required for auto-update).
+- **`MMW-Portable-0.0.1.exe`** — single portable executable that runs without
+  installing (ideal for a USB stick on shared clinic laptops).
 
-You can also download the same files from the **Actions → Build Windows App →
-Artifacts** section of any successful run.
+The same files are on any successful run under **Actions → Build Windows App →
+Artifacts**.
+
+Windows will warn that the publisher is unknown — the build is not code-signed.
+Choose **More info → Run anyway**.
 
 ### Default sign-in accounts
 
@@ -122,4 +150,4 @@ src/renderer/           UI (vanilla ES modules, no bundler)
 - The renderer runs with context isolation, no Node integration, and a strict
   Content-Security-Policy.
 
-_Confidential — Caring Hands Worldwide © 2025–2026._
+_Confidential — Mission Minded Worldwide © 2026._

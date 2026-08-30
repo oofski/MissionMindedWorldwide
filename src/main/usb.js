@@ -12,11 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 
-const FOLDER_RE = /_CaringHands$/i;
+const FOLDER_RE = /_MMW$/i;
 const sanitize = (s) => String(s || '').replace(/[^a-z0-9_]/gi, '');
 
 function baseName(patient) {
-  return `${sanitize(patient.last_name)}_${sanitize(patient.first_name)}_CaringHands`;
+  return `${sanitize(patient.last_name)}_${sanitize(patient.first_name)}_MMW`;
 }
 
 // Candidate removable roots (Windows drive letters) + common folders.
@@ -43,7 +43,7 @@ function writePatientFile(driveDir, patient, jsonStr, pdfBuffer) {
   return { saved: true, path: folder };
 }
 
-// Find and parse every CaringHands patient file on the drive.
+// Find and parse every MMW patient file on the drive.
 function loadPatientFiles(driveDir) {
   if (!driveDir || !fs.existsSync(driveDir)) throw new Error('Drive / folder not found.');
   const found = [];
@@ -64,7 +64,7 @@ function loadPatientFiles(driveDir) {
   return found;
 }
 
-// Delete ONLY the CaringHands per-patient subfolders (never the drive root).
+// Delete ONLY the MMW per-patient subfolders (never the drive root).
 function clearDrive(driveDir) {
   if (!driveDir || !fs.existsSync(driveDir)) throw new Error('Drive / folder not found.');
   let entries;
@@ -74,7 +74,7 @@ function clearDrive(driveDir) {
     if (!e.isDirectory() || !FOLDER_RE.test(e.name)) continue;
     const folder = path.join(driveDir, e.name);
     // Safety: only remove a folder that is directly inside the chosen drive and
-    // matches the CaringHands naming.
+    // matches the MMW naming.
     if (path.dirname(folder) !== path.resolve(driveDir)) continue;
     try { fs.rmSync(folder, { recursive: true, force: true }); cleared++; } catch (err) { /* ignore */ }
   }

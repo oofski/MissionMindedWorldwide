@@ -19,7 +19,7 @@ let lastResult = { pushed: 0, pulled: 0, applied: 0 };
 // Normalize whatever the admin pasted into a usable base URL. Handles the common
 // mistakes: no scheme (workers.dev address pasted bare), a trailing slash, or an
 // accidentally-included path like /health or /v1/pull. Returns the bare origin
-// (e.g. https://caring-hands-sync.acme.workers.dev).
+// (e.g. https://mmw-sync.acme.workers.dev).
 function trimUrl(u) {
   let s = String(u || '').trim();
   if (!s) return '';
@@ -49,7 +49,7 @@ async function testConnection(url, key) {
   const base = trimUrl(url);
   if (!base) throw new Error('Enter the Cloud URL first.');
   const health = await httpJson('GET', base + '/health', null);
-  if (!health || health.ok !== true) throw new Error('That URL did not return a Caring Hands sync server.');
+  if (!health || health.ok !== true) throw new Error('That URL did not return a Mission Minded sync server.');
   // Key check — a bad key returns 401.
   await httpJson('GET', base + '/v1/pull?since=&limit=1', key);
   return { ok: true, service: health.service, version: health.version, time: health.time };

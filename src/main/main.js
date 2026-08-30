@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
 const path = require('path');
 const db = require('./db');
 const ipc = require('./ipc');
@@ -14,10 +14,10 @@ function createWindow() {
     height: 880,
     minWidth: 1024,
     minHeight: 700,
-    backgroundColor: '#eef4f8',
+    backgroundColor: '#f6f7f8',
     show: false,
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'),
-    title: 'Caring Hands',
+    title: 'Mission Minded',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -44,7 +44,7 @@ function buildMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
     {
-      label: 'Caring Hands',
+      label: 'Mission Minded',
       submenu: [
         { role: 'reload' },
         { role: 'toggleDevTools' },
@@ -66,9 +66,23 @@ function buildMenu() {
       label: 'Help',
       submenu: [
         {
-          label: 'About Caring Hands',
-          click: () =>
-            shell.openExternal('https://www.caringhandsworldwide.org'),
+          // Contact details come from the MMW consent form rather than a web
+          // link: the clinic runs offline, so a browser is often unavailable
+          // and the phone number is what a patient actually needs.
+          label: 'About Mission Minded',
+          click: () => dialog.showMessageBox(mainWindow, {
+            type: 'info',
+            title: 'About Mission Minded',
+            message: `Mission Minded Worldwide\nFree Clinics — v${app.getVersion()}`,
+            detail: [
+              '4633 Avenida Rio Del Oro',
+              'Yorba Linda, CA 92886',
+              'Telephone: (951) 317-4968',
+              '',
+              'Offline-first patient records for free dental, medical and vision clinics.',
+            ].join('\n'),
+            buttons: ['Close'],
+          }),
         },
       ],
     },

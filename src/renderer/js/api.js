@@ -35,6 +35,7 @@ export const api = {
   listPatients: (opts) => call('patientsList', opts),
   records: (opts) => call('patientsRecords', opts),
   searchAll: (term) => call('patientsSearchAll', term),
+  findByCode: (code) => call('patientsFindByCode', code),
   newVisit: (sourceId) => call('patientsNewVisit', sourceId),
   patientHistory: (id) => call('patientsHistory', id),
   listIncomplete: () => call('patientsIncomplete'),

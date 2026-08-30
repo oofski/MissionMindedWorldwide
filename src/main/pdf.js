@@ -95,7 +95,7 @@ function header(title, subtitle) {
 
 function footer(p) {
   return `<div class="footer">
-      <span>Caring Hands Worldwide — Confidential Patient Record</span>
+      <span>Mission Minded Worldwide — Confidential Patient Record</span>
       <span>${esc(p.last_name)}, ${esc(p.first_name)} · Generated ${fmtDate(new Date().toISOString())}</span>
     </div>`;
 }
@@ -159,17 +159,17 @@ function referralLabel(key) {
   return REFERRAL_LABELS[key] || String(key);
 }
 
-// F9: EXACT Oregon statutory general-consent language (English authoritative —
-// do not alter). Kept verbatim in sync with i18n strings (consent.oregon).
+// MMW hold-harmless / waiver (English authoritative — do not alter). Kept
+// verbatim in sync with the renderer i18n strings (consent.oregon). The const
+// name is unchanged so every existing caller keeps working.
 const OREGON_CONSENT =
   'I certify that I have read this Consent, or that it has been read to me, and that I understand the above. ' +
   'The nature and purpose of such operation(s), procedure(s), treatment(s), and/or services and the reasons why ' +
-  'the same is (are) considered necessary or advisable has been explained to me. I hereby hold Caring Hands ' +
-  'Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are ' +
-  'provided without compensation and that the provider’s liability is limited and the provider may not be held ' +
+  'the same is (are) considered necessary or advisable has been explained to me. I hereby hold Mission Minded ' +
+  'Worldwide, its volunteer providers and the host facility harmless for the free care provided. Services are ' +
+  'provided without compensation, the provider\u2019s liability is limited, and the provider may not be held ' +
   'liable for any injury, death or other loss arising out of the provision of these services, unless the injury, ' +
-  'death or other loss results from gross negligence. I am also aware of the risk of exposure to COVID during a ' +
-  'dental procedure and I consent to participate in this clinic at my own risk.';
+  'death or other loss results from gross negligence.';
 
 function progressNoteBody(p) {
   const t = p.treatment || {};
