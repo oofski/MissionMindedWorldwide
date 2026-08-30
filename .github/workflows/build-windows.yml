@@ -102,5 +102,12 @@ jobs:
 
             Windows may warn that the publisher is unknown — the build is not code-signed.
             Choose **More info → Run anyway**.
+          # Without this the release is created with a body and no downloads.
+          # latest.yml and the blockmap are what electron-updater reads to offer
+          # an in-app update, so they ship alongside the installers.
+          files: |
+            release/*.exe
+            release/latest.yml
+            release/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
