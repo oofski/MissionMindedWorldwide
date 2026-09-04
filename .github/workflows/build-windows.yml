@@ -67,7 +67,15 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}-build.${{ github.run_number }}
           name: Mission Minded v${{ steps.ver.outputs.version }} (build ${{ github.run_number }})
-          prerelease: true
+          # NOT a prerelease. GitHub excludes prereleases from /releases/latest,
+          # and electron-updater (allowPrerelease defaults to false) asks for
+          # exactly that endpoint — so flagging these as prereleases meant every
+          # install failed its update check with "please ensure a production
+          # release exists". The preview status is communicated in the notes
+          # below, which is the right place for it; the flag silently breaks the
+          # update channel. make_latest is also ignored for prereleases, so it
+          # only starts doing its job here.
+          prerelease: false
           make_latest: true
           body: |
             ## Mission Minded Worldwide — Free Clinic Patient Records (v${{ steps.ver.outputs.version }})
