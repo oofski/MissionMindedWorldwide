@@ -164,6 +164,11 @@ function migrate() {
   addColumn('triage', 'vitals_by', 'INTEGER');
   addColumn('triage', 'vitals_at', 'TEXT');
   // v1.0.6: oral-surgery consent tooth numbers the doctor fills in later.
+  // The MMW consent form carries an explicit YES/NO the patient must answer:
+  // "The deemed notice for HIV, Covid-19, Hepatitis B and C exposure has been
+  // explained to me and I understand it." The app recorded the wording but never
+  // the answer, so a signed consent could not evidence what was agreed.
+  addColumn('consents', 'deemed_consent', 'TEXT');   // 'yes' | 'no' | null
   addColumn('consents', 'tooth_numbers', 'TEXT');
   addColumn('consents', 'amended_by', 'TEXT');
   addColumn('consents', 'amended_at', 'TEXT');
@@ -179,6 +184,12 @@ function migrate() {
   // v1.0.8: EMT confirms blood-thinner use with the patient after vitals.
   // MMW Clearance records four vitals, not three: the printed record's band is
   // BP / BS / PULSE / RESP. Blood sugar and respiration had no column.
+  // The Dental half of the printed Patient Record has two blocks the app had no
+  // home for, so they were being lost to a free-text "other procedure" box:
+  // RESTORATIVE (core build-up, re-cement crown, denture, bridge) and
+  // SERVICES (alveoplasty, buccal, IRM, pulpotomy).
+  addColumn('treatments', 'restorative', "TEXT NOT NULL DEFAULT '{}'");
+  addColumn('treatments', 'services', "TEXT NOT NULL DEFAULT '{}'");
   addColumn('triage', 'glucose', 'INTEGER');        // BS, mg/dL
   addColumn('triage', 'respiration', 'INTEGER');    // breaths per minute
   addColumn('triage', 'blood_thinner', 'TEXT');          // 'yes' | 'no' | null (unasked)
@@ -1068,8 +1079,8 @@ function updatePatient(actor, id, data) {
 
 function addConsent(patientId, c) {
   db.prepare(
-    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at)
-     VALUES (?,?,?,?,?,?,?,?)`
+    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, deemed_consent)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
   ).run(
     patientId,
     c.type,
@@ -1078,7 +1089,12 @@ function addConsent(patientId, c) {
     c.signer_name || '',
     c.relationship || '',
     c.signature_png || '',
-    c.signed_at || now()
+    c.signed_at || now(),
+    // Check-in carries these too: the oral-surgery consent names the teeth it
+    // covers, and the general consent carries the deemed-notice answer. Both
+    // were dropped on this path, which is the one registration actually uses.
+    c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null,
+    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null
   );
 }
 
@@ -1185,6 +1201,8 @@ function getPatient(id) {
         extractions: safeJson(t.extractions, []),
         cleaning: safeJson(t.cleaning, {}),
         anesthetic: safeJson(t.anesthetic, []),
+        restorative: safeJson(t.restorative, {}),
+        services: safeJson(t.services, {}),
       }
     : null;
   p.xrays = db.prepare('SELECT id, station, note, created_at FROM xrays WHERE patient_id = ?').all(id);
@@ -1346,12 +1364,13 @@ function addPatientConsent(actor, patientId, consent) {
   if (c.type !== 'general' && c.type !== 'oral_surgery') throw new Error('Unknown consent type.');
   const teeth = c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null;
   db.prepare(
-    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, amended_by, amended_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, amended_by, amended_at, deemed_consent)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     patientId, c.type, c.version || `${c.type}-${c.language || 'en'}-chairside-v1`, c.language || 'en',
     c.signer_name || '', c.relationship || '', c.signature_png || '', c.signed_at || now(),
-    teeth, teeth ? (actor ? actor.full_name : null) : null, teeth ? now() : null
+    teeth, teeth ? (actor ? actor.full_name : null) : null, teeth ? now() : null,
+    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null
   );
   audit(actor, 'consent_add', 'patient', patientId, c.type + (teeth ? ' · teeth ' + teeth : ''));
   return getPatient(patientId);
@@ -1638,6 +1657,7 @@ function saveTreatment(actor, patientId, data, finalize) {
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
+         restorative=?, services=?,
          other_procedures=?, clinical_notes=?, provider_name=?, provider_signature=?,
          locked=?, completed_by=?, completed_at=?
        WHERE patient_id=?`
@@ -1646,6 +1666,8 @@ function saveTreatment(actor, patientId, data, finalize) {
       JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}),
       JSON.stringify(d.anesthetic || []),
+      JSON.stringify(d.restorative || {}),
+      JSON.stringify(d.services || {}),
       d.other_procedures || null,
       d.clinical_notes || null,
       d.provider_name || null,
@@ -1658,11 +1680,13 @@ function saveTreatment(actor, patientId, data, finalize) {
   } else {
     db.prepare(
       `INSERT INTO treatments (patient_id, fillings, extractions, cleaning, anesthetic,
+          restorative, services,
           other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       patientId, JSON.stringify(d.fillings || []), JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}), JSON.stringify(d.anesthetic || []),
+      JSON.stringify(d.restorative || {}), JSON.stringify(d.services || {}),
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
       complete ? (actor ? actor.id : null) : null, complete ? now() : null

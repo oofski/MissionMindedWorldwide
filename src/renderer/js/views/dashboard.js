@@ -90,8 +90,78 @@ export function renderDashboard(ctx) {
       { label: t('dash.waiting'), value: stats.waiting_triage, ic: 'syringe', warn: stats.waiting_triage > 0, kind: 'vitals' },
       { label: t('dash.triaged'), value: stats.triaged, ic: 'clipboard', kind: 'ready' },
       { label: t('dash.inTreatment'), value: stats.in_treatment, ic: 'tooth', kind: 'treatment' },
-      { label: 'Checked out', value: checkedOut, ic: 'checkCircle', kind: 'done' },
     ];
+
+    /* ---- Patient journey ----
+       Where everyone on the floor is RIGHT NOW, per station — the question a
+       clinic lead asks all day and that five separate KPI tiles do not answer.
+       Counts are the live occupancy of each stage, not a running total, so they
+       sum to the patients currently in the clinic plus those already finished. */
+    const journeySteps = [
+      { name: 'Registered', n: stats.total, kind: 'all' },
+      { name: 'Clearance', n: stats.waiting_triage, kind: 'vitals' },
+      { name: 'Ready', n: stats.triaged, kind: 'ready' },
+      { name: 'Treatment', n: stats.in_treatment, kind: 'treatment' },
+      { name: 'Checked out', n: checkedOut, kind: 'done' },
+    ];
+    // The furthest stage that actually has someone in it drives the fill; the
+    // bar should reflect how far the clinic has got, not just be decorative.
+    const lastActive = journeySteps.reduce((acc, st, i) => (st.n > 0 ? i : acc), 0);
+    const fillPct = journeySteps.length > 1 ? (lastActive / (journeySteps.length - 1)) * 100 : 0;
+
+    const journey = el('div', { class: 'journey' }, [
+      el('div', { class: 'journey-title' }, ['Patient journey']),
+      el('ol', { class: 'steps' }, [
+        el('div', { class: 'steps-fill', style: `width:${(fillPct * 0.8).toFixed(1)}%` }),
+        ...journeySteps.map((st, i) => {
+          const cls = 'step'
+            + (i < lastActive ? ' step--done' : '')
+            + (i === lastActive ? ' step--now' : '')
+            + (st.n === 0 ? ' step--empty' : '');
+          const target = navFor(st.kind);
+          const kids = [
+            el('span', { class: 'step-dot' }),
+            el('span', { class: 'step-name' }, [st.name]),
+            el('span', { class: 'step-n' }, [String(st.n)]),
+          ];
+          return target
+            ? el('li', { class: cls }, [el('button', {
+                class: 'step-btn', title: `Open ${st.name}`, onClick: () => ctx.navigate(target),
+              }, kids)])
+            : el('li', { class: cls }, kids);
+        }),
+      ]),
+    ]);
+
+    /* ---- Completion ring ----
+       Same number the "Visits finished" reporting uses, drawn rather than
+       written: at a glance across a room it reads faster than a percentage. */
+    const finishedPct = stats.total ? Math.round((checkedOut / stats.total) * 100) : 0;
+    const R = 19, CIRC = 2 * Math.PI * R;
+    const ringSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    ringSvg.setAttribute('viewBox', '0 0 44 44');
+    ringSvg.setAttribute('class', 'ring');
+    ringSvg.setAttribute('aria-hidden', 'true');
+    for (const [cls, pct] of [['ring-bg', 1], ['ring-fg', finishedPct / 100]]) {
+      const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      c.setAttribute('class', cls); c.setAttribute('cx', '22'); c.setAttribute('cy', '22'); c.setAttribute('r', String(R));
+      if (cls === 'ring-fg') {
+        c.setAttribute('stroke-dasharray', String(CIRC));
+        c.setAttribute('stroke-dashoffset', String(CIRC * (1 - pct)));
+      }
+      ringSvg.append(c);
+    }
+    const ringKids = [
+      el('div', { class: 'ring-text' }, [
+        el('div', { class: 'stat-value' }, [`${finishedPct}%`]),
+        el('div', { class: 'stat-label' }, ['Visits finished']),
+      ]),
+      el('div', { class: 'ring-wrap' }, [ringSvg, el('div', { class: 'ring-label' }, [String(checkedOut)])]),
+    ];
+    const ringTarget = navFor('done');
+    const ringCard = ringTarget
+      ? el('button', { class: 'stat-card stat-card--ring stat-card--link', title: `${checkedOut} of ${stats.total} visits finished`, onClick: () => ctx.navigate(ringTarget) }, ringKids)
+      : el('div', { class: 'stat-card stat-card--ring', title: `${checkedOut} of ${stats.total} visits finished` }, ringKids);
 
     // Route "open" to a view the current role may actually see.
     function openByStatus(p) {
@@ -234,7 +304,9 @@ export function renderDashboard(ctx) {
         return target
           ? el('button', { class: 'stat-card stat-card--link', title: `Open ${s.label}`, onClick: () => ctx.navigate(target) }, kids)
           : el('div', { class: 'stat-card' }, kids);
-      })),
+      }).concat([ringCard])),
+
+      journey,
 
       el('div', { class: 'section-title-row' }, [
         el('h2', { class: 'section-title' }, ['Patient flow']),

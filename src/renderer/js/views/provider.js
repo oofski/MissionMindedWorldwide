@@ -345,6 +345,88 @@ export function renderProvider(ctx, params = {}) {
     anesFromStored(tx.anesthetic).forEach((a) => addAnes(a));
     if (!anesRows.children.length && !locked) addAnes({ agent: 'lidocaine' });
 
+    /* ---------- Restorative & Services ----------
+       The two blocks on the printed Patient Record that the app had no home for,
+       so everything here used to be typed into "Other procedure" as prose and
+       could not be counted in a report. Field names and options follow the form
+       exactly, so a volunteer working from paper finds them where they expect. */
+    const rst = tx.restorative || {};
+    const svc = tx.services || {};
+
+    const chk = (on, label, onChange) => {
+      const box = el('input', { type: 'checkbox', checked: !!on, disabled: locked });
+      box.addEventListener('change', () => onChange(box.checked));
+      return el('label', { class: 'form-check' }, [box, el('span', {}, [label])]);
+    };
+    const toothIn = (val, ph = 'Tooth #') =>
+      el('input', { class: 'input input--sm tooth-in', value: val || '', placeholder: ph, disabled: locked, list: TEETH_LIST_ID });
+    const pick = (val, opts, onChange) => {
+      const row = el('div', { class: 'chip-row' });
+      opts.forEach((o) => {
+        const b = el('button', {
+          type: 'button', class: 'chip-btn' + (val === o ? ' chip-btn--on' : ''), disabled: locked,
+          onClick: () => {
+            val = val === o ? '' : o;
+            Array.from(row.children).forEach((c, i) => c.classList.toggle('chip-btn--on', opts[i] === val));
+            onChange(val);
+          },
+        }, [o]);
+        row.append(b);
+      });
+      return row;
+    };
+
+    const rState = {
+      core_buildup: { on: !!(rst.core_buildup && rst.core_buildup.on), tooth: (rst.core_buildup || {}).tooth || '' },
+      recement: { on: !!(rst.recement && rst.recement.on), tooth: (rst.recement || {}).tooth || '' },
+      denture: { on: !!(rst.denture && rst.denture.on), kind: (rst.denture || {}).kind || '', action: (rst.denture || {}).action || '' },
+      bridge: { on: !!(rst.bridge && rst.bridge.on), action: (rst.bridge || {}).action || '' },
+    };
+    const sState = {
+      alveoplasty: svc.alveoplasty || '', buccal: svc.buccal || '',
+      irm: svc.irm || '', pulpotomy: svc.pulpotomy || '',
+    };
+
+    const cbTooth = toothIn(rState.core_buildup.tooth);
+    cbTooth.addEventListener('input', () => { rState.core_buildup.tooth = cbTooth.value.trim(); });
+    const rcTooth = toothIn(rState.recement.tooth);
+    rcTooth.addEventListener('input', () => { rState.recement.tooth = rcTooth.value.trim(); });
+
+    const restorativeCard = el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon('tooth', { size: 15 }), 'Restorative']),
+      el('div', { class: 'proc-grid' }, [
+        el('div', { class: 'proc-row' }, [
+          chk(rState.core_buildup.on, 'Core build-up for crown', (v) => { rState.core_buildup.on = v; }), cbTooth,
+        ]),
+        el('div', { class: 'proc-row' }, [
+          chk(rState.recement.on, 'Re-cement crown', (v) => { rState.recement.on = v; }), rcTooth,
+        ]),
+        el('div', { class: 'proc-row proc-row--wrap' }, [
+          chk(rState.denture.on, 'Denture', (v) => { rState.denture.on = v; }),
+          pick(rState.denture.kind, ['Partial', 'Full'], (v) => { rState.denture.kind = v.toLowerCase(); }),
+          pick(rState.denture.action, ['Repair', 'Reline', 'New'], (v) => { rState.denture.action = v.toLowerCase(); }),
+        ]),
+        el('div', { class: 'proc-row proc-row--wrap' }, [
+          chk(rState.bridge.on, 'Bridge', (v) => { rState.bridge.on = v; }),
+          pick(rState.bridge.action, ['Repair', 'New'], (v) => { rState.bridge.action = v.toLowerCase(); }),
+        ]),
+      ]),
+    ]);
+
+    const svcInputs = {};
+    const servicesCard = el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Services']),
+      el('p', { class: 'subtle small', style: 'margin:-6px 0 12px' }, ['Record the number performed, as on the paper record.']),
+      el('div', { class: 'proc-grid proc-grid--2' }, [
+        ...[['alveoplasty', 'Alveoplasty'], ['irm', 'IRM'], ['buccal', 'Buccal'], ['pulpotomy', 'Pulpotomy']].map(([k, label]) => {
+          const inp = el('input', { class: 'input input--sm svc-in', type: 'number', min: '0', max: '99', value: sState[k], disabled: locked, placeholder: '0' });
+          inp.addEventListener('input', () => { sState[k] = inp.value.trim(); });
+          svcInputs[k] = inp;
+          return el('label', { class: 'proc-row' }, [el('span', { class: 'proc-label' }, [label]), inp]);
+        }),
+      ]),
+    ]);
+
     /* ---------- Notes ---------- */
     const otherProc = textarea(tx.other_procedures || '', 'Other procedure', 2, locked);
     const dentalNotes = textarea(tx.clinical_notes || '', 'Dental notes', 4, locked);
@@ -702,6 +784,8 @@ export function renderProvider(ctx, params = {}) {
         extractions,
         cleaning: { ...cleanState, quad_detail: quadDetail.value.trim() },
         anesthetic,
+        restorative: rState,
+        services: sState,
         other_procedures: otherProc.get(),
         clinical_notes: dentalNotes.get(),
         provider_name: providerName.value.trim(),
@@ -869,6 +953,11 @@ export function renderProvider(ctx, params = {}) {
           el('label', { class: 'field', style: 'flex:1;margin:0' }, [el('span', { class: 'field-label' }, ['Other']), extOther]),
           el('label', { class: 'field', style: 'margin:0;max-width:90px' }, [el('span', { class: 'field-label' }, ['Tooth #']), extOtherTooth]),
         ])),
+
+      // Restorative and Services sit between the chairside work and the
+      // anaesthetic, mirroring the order of the printed Patient Record.
+      restorativeCard,
+      servicesCard,
 
       // Anesthetic supports the extractions/fillings above — kept adjacent.
       panel('syringe', 'Anesthetic administered',

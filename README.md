@@ -12,7 +12,7 @@ nothing configured, and records leave the machine only when an authorized staff
 member exports them, or when an administrator deliberately connects the clinic
 to a sync server it deploys and controls itself.
 
-> ### ⚠️ Early preview — v0.0.3
+> ### ⚠️ Early preview — v0.0.4
 >
 > **v0.0.3 severs an inherited cloud connection.** Builds up to and including
 > v0.0.2 shipped a hard-coded sync server and key belonging to the organisation
@@ -52,9 +52,9 @@ purge, so a clinic can answer a grant return after the records are gone.
 Every push to `main` builds a fresh Windows `.exe` on GitHub's Windows runners
 and publishes it on the **[Releases](../../releases)** page:
 
-- **`MMW-Setup-0.0.3.exe`** — standard installer (Start-menu + desktop
+- **`MMW-Setup-0.0.4.exe`** — standard installer (Start-menu + desktop
   shortcuts, and required for auto-update).
-- **`MMW-Portable-0.0.3.exe`** — single portable executable that runs without
+- **`MMW-Portable-0.0.4.exe`** — single portable executable that runs without
   installing (ideal for a USB stick on shared clinic laptops).
 
 The same files are on any successful run under **Actions → Build Windows App →

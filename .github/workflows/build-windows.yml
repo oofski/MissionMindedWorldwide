@@ -89,42 +89,33 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### ⚠️ Security — read before installing
-            Builds **up to and including v0.0.2** shipped a hard-coded sync server
-            and key belonging to the organisation this app was forked from, and
-            connected to it automatically at startup. Those installs exchanged
-            patient records with another clinic's database in both directions.
-
-            v0.0.3 removes the built-in server entirely, refuses that endpoint
-            outright, and on first launch erases any records an affected machine is
-            holding — returning it to first-run setup. **Stop using v0.0.1/v0.0.2.**
-
             ### New in this build
-            - **No built-in cloud.** Sync is off and unconfigured until an
-              administrator connects a server this clinic deploys and controls.
-              Cloud settings fail closed: no address or no key means no sync.
-            - **Reset this computer** under Admin → Backup & Export erases every
-              patient, account, event and audit entry and returns to setup.
-            - **UI polish** — card depth, focus rings on every control, entrance
-              motion, busy spinners on async actions, and skeleton loading states.
-              All motion respects `prefers-reduced-motion`.
-            - **Fixed:** the live queue refresh was dead on the Clearance, Dental
-              and Cleanings screens — their scan box holds focus, and the refresh
-              skipped whenever any field was focused.
-            - **Fixed:** scroll position was thrown away on every background sync,
-              yanking a half-read queue back to the top.
-            - **Fixed:** the patient record PDF was still headed "CARING HANDS
-              WORLDWIDE".
+            - **Modernised across every screen.** Softer geometry, layered
+              elevation, roomier spacing and pill controls, applied at the token
+              level so all thirteen screens move together. All motion still
+              respects `prefers-reduced-motion`.
+            - **Patient journey** on the dashboard: where everyone on the floor is
+              right now — Registered, Clearance, Ready, Treatment, Checked out —
+              with a completion ring replacing the old checked-out tile.
+            - **The printed forms now map onto the app.** The Dental half of the
+              Patient Record gains its missing **Restorative** (core build-up,
+              re-cement crown, denture, bridge) and **Services** (alveoplasty,
+              IRM, buccal, pulpotomy) blocks, which previously had nowhere to go
+              but a free-text box and so could never be counted in a report.
+            - **The HIV / Hepatitis B & C deemed-consent answer is now recorded.**
+              The consent showed the wording but never captured the patient's
+              Yes/No, so a signed consent could not evidence what was agreed. It
+              is asked at registration and required before signing.
+            - **Fixed:** consents signed at check-in silently dropped their tooth
+              numbers, so an oral-surgery consent did not record which teeth it
+              covered. Consents added later at the chair were unaffected.
 
-            ### Also in the app
-            - **Registration** issues a 6-digit patient ID and prints a **Code 128
-              wristband**. Every later station starts by scanning that band.
-            - **Clearance** records blood pressure, blood sugar, pulse and
-              respiration, then routes to cleaning or x-ray.
-            - **Dental** covers triage, the odontogram, fillings, extractions,
-              cleanings and anaesthetic, with a signed treatment note.
-            - **Check-out**, **Records** and **Reports**, including de-identified
-              event totals that survive a patient-data purge.
+            ### From v0.0.3 — security
+            Builds up to and including v0.0.2 shipped a hard-coded sync server and
+            key belonging to the organisation this app was forked from, and
+            connected to it at startup. v0.0.3 removed it, refuses that endpoint,
+            and erases any records an affected machine is holding on first launch.
+            **Do not keep using v0.0.1 or v0.0.2.**
 
             ### Downloads
             - **MMW-Setup-${{ steps.ver.outputs.version }}.exe** — installer (recommended; required for auto-update).

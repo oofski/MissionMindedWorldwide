@@ -502,9 +502,35 @@ export function renderKiosk(ctx) {
       ru: 'Подпись необязательна — вы можете расписаться стилусом/на сенсорном экране или оставить поле пустым.',
     });
 
+    /* The MMW consent carries an explicit YES/NO the patient must answer before
+       signing — highlighted on the paper form. Ticking "I agree" is not the same
+       answer, so it is asked separately and is required. */
+    let deemed = '';
+    const deemedBtns = ['yes', 'no'].map((v) => el('button', {
+      type: 'button', class: 'chip-btn', 'aria-pressed': 'false',
+      onClick: () => {
+        deemed = v;
+        deemedRow.querySelectorAll('.chip-btn').forEach((b, i) => {
+          const on = ['yes', 'no'][i] === deemed;
+          b.classList.toggle('chip-btn--on', on);
+          b.setAttribute('aria-pressed', String(on));
+        });
+      },
+    }, [v === 'yes' ? t('common.yes') : t('common.no')]));
+    const deemedRow = el('div', { class: 'chip-row' }, deemedBtns);
+    const deemedField = el('div', { class: 'deemed-field' }, [
+      el('span', { class: 'field-label' }, [L({
+        en: 'The deemed notice for HIV, Covid-19, Hepatitis B and C exposure has been explained to me and I understand it.',
+        es: 'Se me ha explicado el aviso de consentimiento presunto para la exposición al VIH, Covid-19 y Hepatitis B y C, y lo entiendo.',
+        ru: 'Мне разъяснено уведомление о предполагаемом согласии на тестирование на ВИЧ, Covid-19 и гепатит B и C, и я это понимаю.',
+      })]),
+      deemedRow,
+    ]);
+
     const node = el('div', { class: 'consent-screen' }, [
       minor ? el('div', { class: 'minor-banner' }, [icon('alert', { size: 16 }), ' ' + t('intake.minorNotice')]) : null,
       sections,
+      deemedField,
       el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]),
       el('div', { class: 'form-grid' }, [signer.node, rel.node]),
       sigPad.node,
@@ -516,12 +542,21 @@ export function renderKiosk(ctx) {
       node,
       collect: () => {
         if (!agree.checked) { toast(t('consent.agree'), 'error'); return false; }
+        if (!deemed) {
+          toast(L({
+            en: 'Please answer Yes or No to the HIV / Hepatitis notice.',
+            es: 'Responda Sí o No al aviso sobre VIH / Hepatitis.',
+            ru: 'Ответьте «Да» или «Нет» на уведомление о ВИЧ / гепатите.',
+          }), 'error');
+          return false;
+        }
         if (!signer.get()) { toast(t('common.required') + ': ' + t('intake.signerName'), 'error'); return false; }
         // A5: signature is optional — a missing signature does not block submission.
         upsertConsent('general', {
           signer_name: signer.get(), relationship: rel.get(),
           signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
-          version: `general-oregon-${getLang()}-v1+covid`,
+          deemed_consent: deemed,
+          version: `mmw-general-${getLang()}-v1`,
         });
         return true;
       },

@@ -308,6 +308,9 @@ async function main() {
   log(/Consent|Consentimiento/i.test($('.kiosk-step-label').textContent), 'on consent step');
   log(/Mission Minded Worldwide \(MMW\)/i.test($('.kiosk-body').textContent) && /patient waiver/i.test($('.kiosk-body').textContent) && /501\(c\)3/i.test($('.kiosk-body').textContent), 'general consent shows the full MMW wording at check-in');
   const agree = $('.big-check'); if (agree) { agree.checked = true; agree.dispatchEvent(new window.Event('change', { bubbles: true })); }
+  // v0.0.4: the consent carries a required YES/NO for the HIV / Hepatitis
+  // deemed notice, exactly as the printed MMW consent does. Answer it.
+  const deemedYes = $('.deemed-field .chip-btn'); if (deemedYes) deemedYes.click();
   const signer = $all('.kiosk-body input').find((i) => /name/i.test(i.placeholder || '') || true);
   // signer is the first text input on consent step
   const consentInputs = $all('.kiosk-body input').filter((i) => i.type === 'text' || !i.type);
@@ -2094,6 +2097,46 @@ async function main() {
     const after = db.getSyncMeta();
     log(!after.url && !after.key && after.mode === 'offline' && !after.enabled,
       'MMW severance: disconnect clears the server, key and cursor and pins offline');
+  }
+
+  /* ========== MMW v0.0.4 — the printed forms, reflected in the app ==========
+     Each MMW document maps to a step: the Patient Application and Consent for
+     Health Care to registration, the Consent for Oral Surgery to the surgery
+     gate, and the Dental half of the Patient Record to the dentist view. */
+  {
+    // Registration must RECORD the deemed-consent answer, not merely display
+    // the paragraph — a signed consent has to evidence what was agreed.
+    // Queried straight from the table: listPatients is scoped to the ACTIVE
+    // event, and earlier blocks move it, so the check-in patient is not
+    // necessarily in scope by the time this runs.
+    const cdb = rawDb();
+    const gen = cdb.prepare("SELECT * FROM consents WHERE type = 'general' AND version LIKE 'mmw-general-%' ORDER BY id DESC LIMIT 1").get();
+    log(!!gen, 'MMW forms: registration records the general consent');
+    log(!!gen && (gen.deemed_consent === 'yes' || gen.deemed_consent === 'no'),
+      'MMW forms: the HIV / Hepatitis deemed-consent answer is stored with it');
+    cdb.close();
+
+    // The Dental blocks that previously had nowhere to go but free text.
+    const evF = db.createEvent(currentUser, { name: 'Forms Clinic' });
+    db.setActiveEvent(currentUser, evF.id);
+    const fp = db.createPatient(currentUser, { first_name: 'Form', last_name: 'Check' });
+    db.saveTreatment(currentUser, fp.id, {
+      restorative: { core_buildup: { on: true, tooth: '14' }, denture: { on: true, kind: 'partial', action: 'new' } },
+      services: { alveoplasty: '2', irm: '1', buccal: '', pulpotomy: '3' },
+    });
+    const tx = db.getPatient(fp.id).treatment;
+    log(tx.restorative.core_buildup.on === true && tx.restorative.core_buildup.tooth === '14',
+      'MMW forms: the dentist view records Restorative (core build-up, tooth)');
+    log(tx.restorative.denture.kind === 'partial' && tx.restorative.denture.action === 'new',
+      'MMW forms: denture type and action are captured as on the paper record');
+    log(tx.services.alveoplasty === '2' && tx.services.pulpotomy === '3',
+      'MMW forms: the Services counts (alveoplasty, IRM, buccal, pulpotomy) are captured');
+
+    // Oral surgery consent still carries its tooth numbers.
+    db.addPatientConsent(currentUser, fp.id, { type: 'oral_surgery', signer_name: 'Form Check', signature_png: 'data:,', tooth_numbers: '18,19' });
+    const os2 = db.getPatient(fp.id).consents.find((c) => c.type === 'oral_surgery');
+    log(!!os2 && os2.tooth_numbers === '18,19',
+      'MMW forms: the oral surgery consent records the tooth numbers it covers');
   }
 
   await tick();
