@@ -24,7 +24,8 @@ const CHANNELS = [
   'app:version', 'update:check', 'update:install',
   'update:onlineAvailable', 'update:checkOnline', 'update:downloadOnline', 'update:installOnline',
   'app:openExternal',
-  'cloud:config', 'cloud:test', 'cloud:status', 'cloud:syncNow', 'cloud:resync',
+  'cloud:config', 'cloud:test', 'cloud:status', 'cloud:syncNow', 'cloud:resync', 'cloud:disconnect',
+  'data:reset',
 ];
 
 const api = {

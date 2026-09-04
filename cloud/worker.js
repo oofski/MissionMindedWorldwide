@@ -802,15 +802,16 @@ function checkinFormPage(eventUid, eventName, lang) {
 // Auth
 // ---------------------------------------------------------------------------
 
-// The clinic key. Uses the CLINIC_KEY secret when set; otherwise falls back to
-// the built-in default so a clinic that just pastes this Worker in is online with
-// zero setup (the Mission Minded app ships with the same default baked in).
-const DEFAULT_CLINIC_KEY = 'randy';
-
+// The clinic key comes from the CLINIC_KEY secret and nowhere else.
+//
+// This used to fall back to a built-in default so a freshly-pasted Worker was
+// online with zero setup. That default was a single shared bearer token, the
+// same one compiled into the desktop app, guarding an untenanted table — so
+// anyone holding it could read and write every clinic's records. A sync server
+// with no key configured now serves nobody rather than serving everybody.
 function isAuthorized(request, env) {
-  const expected = (env && typeof env.CLINIC_KEY === 'string' && env.CLINIC_KEY.length)
-    ? env.CLINIC_KEY
-    : DEFAULT_CLINIC_KEY;
+  const expected = (env && typeof env.CLINIC_KEY === 'string') ? env.CLINIC_KEY : '';
+  if (!expected.length) return false;   // fail closed: no secret, no access
 
   const provided = extractBearer(request);
   if (provided == null) return false;

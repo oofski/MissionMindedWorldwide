@@ -107,8 +107,13 @@ if (api.onCloudChanged) {
     // Never repaint over an open patient detail/chart (whether reached by nav or
     // an internal detail() call), or someone typing, or with a dialog open.
     if (detailOpen || (lastNav.params && lastNav.params.id)) return;
+    // Only hold off when there is something to LOSE. This used to skip whenever
+    // any field had focus, which silently killed live refresh on the three
+    // station queues: their scan box autofocuses, so a parked, empty cursor
+    // looked identical to someone mid-sentence.
     const ae = document.activeElement;
-    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+    const hasDraft = ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && String(ae.value || '').trim() !== '';
+    if (hasDraft) return;
     if (document.querySelector('.modal-overlay, .modal')) return;
     const view = VIEWS[lastNav.name];
     if (view && view.roles.includes(store.user.role)) renderShell(lastNav.name, view.render(ctx, lastNav.params));
@@ -128,6 +133,13 @@ function initials(name) {
 let shellActive = 'dashboard';
 let shellContent = null;
 function renderShell(active, contentNode) {
+  // A background refresh repaints the whole shell. Without this the queue you
+  // were part-way down jumps back to the top every few seconds.
+  const prevScroll = (() => {
+    const el0 = appRoot.querySelector('.main-scroll');
+    return el0 ? el0.scrollTop : 0;
+  })();
+  const sameView = shellActive === active;
   clear(appRoot);
   appRoot.className = 'app-shell';
   shellActive = active; shellContent = contentNode;
@@ -221,6 +233,13 @@ function renderShell(active, contentNode) {
 
   const main = el('main', { class: 'main' }, [topbar, el('div', { class: 'main-scroll' }, [contentNode])]);
   appRoot.append(sidebar, main);
+
+  // Restore only when staying on the same screen — navigating somewhere new
+  // should start at the top, as it would in any application.
+  if (sameView && prevScroll) {
+    const scroller = main.querySelector('.main-scroll');
+    if (scroller) scroller.scrollTop = prevScroll;
+  }
 
   // Silent offline update check once per session; patches the labels in place.
   if (store.user && !appInfo.checked) refreshAppInfo(true).then(updateVersionUI);

@@ -110,6 +110,8 @@ export const api = {
   cloudTest: (url, key) => call('cloudTest', { url, key }),
   cloudSyncNow: () => call('cloudSyncNow'),
   cloudResync: () => call('cloudResync'),
+  cloudDisconnect: () => call('cloudDisconnect'),
+  resetAllData: () => call('dataReset'),
   onCloudChanged: (cb) => window.api.onCloudChanged(cb),
 
   openExternal: (url) => window.api.appOpenExternal(url),

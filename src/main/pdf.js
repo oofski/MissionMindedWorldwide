@@ -88,7 +88,7 @@ function styles() {
 function header(title, subtitle) {
   return `
     <div class="hdr">
-      <div class="brand">CARING HANDS<small>WORLDWIDE</small></div>
+      <div class="brand">MISSION MINDED<small>FREE CLINICS</small></div>
       <div class="doc-title">${esc(title)}<small>${esc(subtitle || '')}</small></div>
     </div>`;
 }

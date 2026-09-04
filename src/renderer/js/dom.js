@@ -77,13 +77,20 @@ export function modal({ title, body, confirmText = 'OK', cancelText = null, dang
   });
 }
 
-// Spinner-wrapped async action with optional button disabling.
+/**
+ * Run an async action with the button showing a spinner and refusing further
+ * clicks — the guard against a double-submit on a slow save.
+ *
+ * It deliberately does not touch the button's contents: buttons here are built
+ * as [icon, label], and the old implementation stashed textContent and wrote it
+ * back, which flattened the icon away the first time a button was used. The
+ * .is-busy CSS hides the children and draws the spinner instead.
+ */
 export async function withBusy(button, fn) {
-  const prev = button ? button.textContent : null;
   if (button) { button.disabled = true; button.classList.add('is-busy'); }
   try {
     return await fn();
   } finally {
-    if (button) { button.disabled = false; button.classList.remove('is-busy'); if (prev != null) button.textContent = prev; }
+    if (button) { button.disabled = false; button.classList.remove('is-busy'); }
   }
 }

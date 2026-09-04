@@ -397,7 +397,13 @@ export function renderAdmin(ctx, params = {}) {
   /* ---- Data / backup ---- */
   async function dataTab(body) {
     const incomplete = await api.listIncomplete().catch(() => []);
+    const cst = await api.cloudStatus().catch(() => null);
     clear(body);
+
+    // Describes what is actually true right now rather than a fixed claim.
+    const cloudConnItem = (cst && cst.configured)
+      ? connItem('Clinic cloud', `Sharing one live queue with ${(() => { try { return new URL(cst.url).host; } catch (_) { return cst.url; } })()}.`, 'blue')
+      : connItem('Local only', 'No sync server. Records stay on this computer.', 'green');
     if (incomplete.length) {
       body.append(el('div', { class: 'card card--alert' }, [
         el('div', { class: 'card-title' }, [icon('alert', { size: 15 }), 'Incomplete records']),
@@ -518,10 +524,52 @@ export function renderAdmin(ctx, params = {}) {
           connItem('Fully offline', 'All core features work with zero internet.', 'green'),
           connItem('USB export', 'Post-event backup & archiving to USB / encrypted drive.', 'blue'),
           connItem('Local network print', 'Print to a wireless laser printer on the same network.', 'teal'),
-          // This used to read "No cloud — data never leaves this device", which
-          // stopped being true when sync became always-on. Saying it on the page
-          // about handling patient data was actively misleading.
-          connItem('Clinic cloud', 'Stations share one live queue. Turn it off under Admin → Cloud.', 'green'),
+          // Reflects the ACTUAL connection state. A fixed claim here has been
+          // wrong in both directions before — first "no cloud, data never leaves
+          // this device" while sync was always-on, then "stations share one live
+          // queue" while the server belonged to another organisation.
+          cloudConnItem,
+        ]),
+      ]),
+
+      /* ---- Reset this computer ----
+         The blunt instrument, kept last and behind a typed confirmation. It is
+         what an administrator needs when a machine holds records that are not
+         this clinic's — which is exactly the state every v0.0.x install was left
+         in by the inherited sync server. */
+      el('div', { class: 'card card--alert' }, [
+        el('div', { class: 'card-title' }, [icon('alert', { size: 15 }), 'Reset this computer']),
+        el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+          'Permanently erases every patient record, staff account, event and audit entry on this computer, disconnects any sync server, and returns the app to first-run setup. Export anything you need first — this cannot be undone.',
+        ]),
+        el('div', { class: 'action-row' }, [
+          el('button', {
+            class: 'btn btn--danger',
+            onClick: async () => {
+              const field = el('input', { class: 'input', placeholder: 'RESET' });
+              const ok = await modal({
+                title: 'Erase everything on this computer?',
+                body: el('div', {}, [
+                  el('p', { style: 'margin:0 0 var(--space-3);' }, [
+                    'This deletes every patient record, staff account, event and audit entry stored here, and returns the app to first-run setup. It cannot be undone.',
+                  ]),
+                  el('label', { class: 'field' }, [
+                    el('span', { class: 'field-label' }, ['Type RESET to confirm']),
+                    field,
+                  ]),
+                ]),
+                confirmText: 'Erase everything', cancelText: 'Cancel', danger: true,
+              });
+              if (!ok) return;
+              if (field.value.trim().toUpperCase() !== 'RESET') { toast('Not reset — the confirmation did not match.', 'info'); return; }
+              try {
+                await api.resetAllData();
+                toast('This computer has been reset.', 'success');
+                // Every account is gone, so the only valid destination is setup.
+                ctx.navigate('setup');
+              } catch (e) { toast(e.message, 'error'); }
+            },
+          }, [icon('alert', { size: 16 }), 'Erase everything and start over']),
         ]),
       ]),
     );
@@ -553,13 +601,17 @@ export function renderAdmin(ctx, params = {}) {
      key baked in. This tab is ONE switch — the clinic is Online (default) or, if
      there's no wifi, Run offline. Advanced users can still override the server,
      but it's tucked away in a closed drawer most clinics never open. */
+  /* ---- Cloud sync ----
+     Off and unconfigured unless this clinic deploys its own sync server and an
+     administrator enters its address and key. Earlier builds shipped a server
+     and key baked in and connected at boot with no user action, which is how
+     this app ended up exchanging patient records with another organisation's
+     clinic. There is no built-in server now, and none is implied here. */
   async function cloudTab(body) {
     clear(body);
 
-    // We deliberately do NOT subscribe to onCloudChanged here: an auto-repaint
-    // would wipe the Advanced URL/key the admin is typing. Status refreshes when
-    // the tab is (re)opened and after "Sync now". Drop any leftover listener so
-    // an earlier subscription can't leak or fire against a stale tab.
+    // Deliberately no onCloudChanged subscription: an auto-repaint would wipe
+    // the address/key an administrator is part-way through typing.
     if (cloudUnsub) { try { cloudUnsub(); } catch (_) { /* ignore */ } cloudUnsub = null; }
 
     let st;
@@ -573,157 +625,117 @@ export function renderAdmin(ctx, params = {}) {
       return;
     }
 
-    body.append(el('p', { class: 'view-sub', style: 'margin:0 0 var(--space-4);' }, [
-      'Your clinic is connected to the cloud so patients sync across every station in real time. Turn this off only if this location has no internet.',
-    ]));
-
-    /* --- Cloud status --- */
-    let pill; let statusNote;
-    if (!st.online) {
-      pill = el('span', { class: 'pill pill--neutral' }, ['Offline — running locally']);
-      statusNote = null;
-    } else if (st.lastError) {
-      pill = el('span', { class: 'pill pill--amber' }, [icon('alert', { size: 12 }), 'Reconnecting…']);
-      statusNote = el('span', { class: 'muted small' }, [st.lastError]);
-    } else {
-      pill = el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Online']);
-      statusNote = el('span', { class: 'muted small' }, [st.lastOk ? `Synced ${new Date(st.lastOk).toLocaleTimeString()}` : 'Connecting…']);
+    /* ---------- Not connected: the default state ---------- */
+    if (!st.configured) {
+      body.append(
+        el('p', { class: 'view-sub', style: 'margin:0 0 var(--space-4);' }, [
+          'This clinic is not connected to a sync server. Every record stays on this computer.',
+        ]),
+        el('div', { class: 'card' }, [
+          el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'Local only']),
+          el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+            'Patients checked in here are visible on this computer only. Connect a sync server to share one live queue across several laptops at the same clinic.',
+          ]),
+          el('p', { class: 'subtle small', style: 'margin:0;' }, [
+            'Mission Minded does not run a shared server. Your clinic deploys its own — see docs/CLOUD_SETUP.md — and only then are the address and key below filled in.',
+          ]),
+        ]),
+      );
     }
 
-    // "Sync now" is only meaningful while online — disable it when running local.
-    const syncNowBtn = el('button', {
-      class: 'btn btn--ghost',
-      disabled: !st.online,
-      onClick: async () => {
-        try {
-          const r = await api.cloudSyncNow();
-          if (r && r.ok) toast(`Synced — pushed ${r.pushed}, pulled ${r.pulled}, applied ${r.applied}`, 'success');
-          else toast((r && r.error) || 'Sync failed', 'error');
-          paint();
-        } catch (e) { toast(e.message, 'error'); }
-      },
-    }, [icon('refresh', { size: 16 }), 'Sync now']);
-
-    body.append(el('div', { class: 'card' }, [
-      el('h3', { class: 'card-title' }, [icon('globe', { size: 15 }), 'Cloud status']),
-      el('div', {
-        class: 'inline-row',
-        style: 'margin:0; align-items:center; justify-content:space-between; gap:var(--space-4); flex-wrap:wrap;',
-      }, [
-        el('div', { style: 'display:flex; flex-direction:column; gap:6px;' }, [
-          el('div', { class: 'inline-row', style: 'margin:0; align-items:center; gap:var(--space-2);' }, [pill, statusNote]),
-          el('div', { class: 'subtle small' }, [`pushed ${st.pushed} · pulled ${st.pulled} · applied ${st.applied}`]),
-        ]),
-        syncNowBtn,
-      ]),
-    ]));
-
-    /* --- The main switch --- */
-    const onlineToggle = el('input', {
-      type: 'checkbox', checked: st.online,
-      style: 'width:22px; height:22px; accent-color:var(--accent); cursor:pointer; flex:0 0 auto;',
-      onChange: async (ev) => {
-        const on = ev.target.checked;
-        try {
-          await api.cloudConfig({ online: on });
-          toast(on ? 'Cloud sync on — this station is online' : 'Now running offline — will re-sync when you turn it back on', 'success');
-          paint();
-        } catch (e) {
-          ev.target.checked = !on;
-          toast(e.message, 'error');
-        }
-      },
-    });
-
-    body.append(el('div', { class: 'card' }, [
-      el('label', {
-        class: 'inline-row',
-        style: 'margin:0 0 var(--space-3); align-items:center; gap:var(--space-3); cursor:pointer;',
-      }, [
-        onlineToggle,
-        el('strong', { style: 'color:var(--text-strong); font-size:var(--fs-h3);' }, ['This clinic is online']),
-      ]),
-      el('p', { class: 'muted small', style: 'margin:0;' }, [
-        'Leave this on. Switch it off only when there’s no wifi at the clinic; the app keeps working locally and re-syncs automatically when you turn it back on.',
-      ]),
-    ]));
-
-    /* --- Recovery: re-read the whole clinic from the cloud --- */
-    const resyncBtn = el('button', {
-      class: 'btn btn--ghost',
-      onClick: async () => {
-        const ok = await modal({
-          title: 'Re-sync everything?',
-          body: 'This station will re-read every patient and record from the clinic cloud, and re-apply any deletions made on the other computers. Nothing is duplicated, and nothing you have here that the cloud does not know about is lost — use it if this computer is out of step with the others. It can take a minute on a big clinic.',
-          confirmText: 'Re-sync everything',
-          cancelText: 'Cancel',
-        });
-        if (!ok) return;
-        resyncBtn.disabled = true;
-        try {
-          const r = await api.cloudResync();
-          // Deletions used to be counted as records "brought in", which read as
-          // the opposite of what had happened.
-          const brought = r.applied || 0, removed = r.deleted || 0;
-          toast(`Re-synced — ${brought} record(s) brought in${removed ? `, ${removed} removed` : ''}`, 'success');
-          paint();
-        } catch (e) { toast(e.message, 'error'); }
-        finally { resyncBtn.disabled = false; }
-      },
-    }, [icon('refresh', { size: 16 }), 'Re-sync everything']);
-
-    body.append(el('div', { class: 'card' }, [
-      el('h3', { class: 'card-title' }, ['Missing patients on this computer?']),
-      el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
-        'If a patient shows on another computer but not on this one, re-sync to re-read the whole clinic from the cloud. Safe to run any time.',
-      ]),
-      resyncBtn,
-    ]));
-
-    /* --- Advanced (rarely needed: point at a different server) --- */
+    /* ---------- Connect / change the server ---------- */
     const urlInput = el('input', {
-      class: 'input', type: 'text', value: st.url || '',
-      placeholder: 'https://mmw-sync.<subdomain>.workers.dev',
+      class: 'input', type: 'url', value: st.url || '',
+      placeholder: 'https://mmw-sync.<your-subdomain>.workers.dev',
     });
     const keyInput = el('input', {
       class: 'input', type: 'password',
-      placeholder: 'Leave blank to keep the current key',
+      placeholder: st.hasKey ? 'Leave blank to keep the saved key' : 'Clinic key',
     });
-    const saveServerBtn = el('button', {
+
+    const connectBtn = el('button', {
       class: 'btn btn--primary',
       onClick: async () => {
+        const url = urlInput.value.trim();
+        if (!url) { toast('Enter the address of your clinic\'s sync server.', 'error'); return; }
+        if (!st.hasKey && !keyInput.value) { toast('Enter the clinic key for this server.', 'error'); return; }
         try {
-          // Send the key only when one was typed, so a blank field keeps the baked-in / saved key.
-          await api.cloudConfig({ url: urlInput.value.trim(), key: keyInput.value ? keyInput.value : undefined });
-          toast('Saved', 'success');
+          await api.cloudTest(url, keyInput.value);
+          await api.cloudConfig({ url, key: keyInput.value ? keyInput.value : undefined, online: true });
+          toast('Connected.', 'success');
           paint();
         } catch (e) { toast(e.message, 'error'); }
       },
-    }, [icon('checkCircle', { size: 16 }), 'Save server']);
+    }, [icon('globe', { size: 16 }), st.configured ? 'Save server' : 'Connect']);
 
-    body.append(el('details', { class: 'collapse' }, [
-      el('summary', {}, [
-        el('span', { style: 'display:flex; align-items:center; gap:9px;' }, [icon('lock', { size: 16 }), 'Advanced']),
+    body.append(el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon('globe', { size: 15 }), st.configured ? 'Sync server' : 'Connect a sync server']),
+      el('div', { class: 'form-grid' }, [
+        el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Server address']), urlInput]),
+        el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key']), keyInput]),
       ]),
-      el('div', { class: 'collapse-body' }, [
-        el('p', { class: 'muted small', style: 'margin:0 0 var(--space-4);' }, [
-          'Most clinics never need this. Only change it if you’ve been given a different sync server to point at.',
-        ]),
-        el('div', { class: 'form-grid' }, [
-          el('label', { class: 'field span-2' }, [
-            el('span', { class: 'field-label' }, ['Cloud server URL']),
-            urlInput,
-            el('span', { class: 'field-hint' }, [st.usingDefaultCloud ? 'Using the built-in clinic cloud.' : 'Custom server.']),
-          ]),
-          el('label', { class: 'field span-2' }, [
-            el('span', { class: 'field-label' }, ['Clinic key']),
-            keyInput,
-          ]),
-        ]),
-        el('div', { class: 'action-row', style: 'margin-top:var(--space-2);' }, [saveServerBtn]),
-        el('div', { class: 'subtle small', style: 'margin-top:var(--space-3);' }, [`Device ID: ${st.deviceId}`]),
-      ]),
+      el('div', { class: 'action-row' }, [connectBtn]),
     ]));
+
+    /* ---------- Connected: status and controls ---------- */
+    if (st.configured) {
+      let host = st.url;
+      try { host = new URL(st.url).host; } catch (_) { /* show it raw */ }
+
+      const pill = !st.online
+        ? el('span', { class: 'pill pill--neutral' }, ['Sync paused — running locally'])
+        : st.lastError
+          ? el('span', { class: 'pill pill--amber' }, [icon('alert', { size: 12 }), 'Reconnecting…'])
+          : el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Online']);
+
+      const toggle = el('button', {
+        class: 'btn btn--ghost',
+        onClick: async () => {
+          try { await api.cloudConfig({ online: !st.online }); paint(); }
+          catch (e) { toast(e.message, 'error'); }
+        },
+      }, [icon('refresh', { size: 16 }), st.online ? 'Pause sync (no internet)' : 'Resume sync']);
+
+      const syncNowBtn = el('button', {
+        class: 'btn btn--ghost', disabled: !st.online,
+        onClick: async () => {
+          try {
+            const r = await api.cloudSyncNow();
+            if (r && r.ok) toast(`Synced — pushed ${r.pushed}, pulled ${r.pulled}, applied ${r.applied}`, 'success');
+            else toast('Sync skipped.', 'info');
+            paint();
+          } catch (e) { toast(e.message, 'error'); }
+        },
+      }, [icon('refresh', { size: 16 }), 'Sync now']);
+
+      const disconnectBtn = el('button', {
+        class: 'btn btn--danger',
+        onClick: async () => {
+          const ok = await modal({
+            title: 'Disconnect from this server?',
+            body: `This computer will stop syncing with ${host}. Records already on this computer are kept — nothing is deleted.`,
+            confirmText: 'Disconnect', cancelText: 'Cancel', danger: true,
+          });
+          if (!ok) return;
+          try { await api.cloudDisconnect(); toast('Disconnected.', 'success'); paint(); }
+          catch (e) { toast(e.message, 'error'); }
+        },
+      }, [icon('logout', { size: 16 }), 'Disconnect']);
+
+      body.append(el('div', { class: 'card' }, [
+        el('div', { class: 'card-head-row' }, [
+          el('div', { class: 'card-title' }, [icon('globe', { size: 15 }), 'Connection']),
+          pill,
+        ]),
+        el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+          'Sharing one live queue with ', el('strong', {}, [host]), '.',
+          st.lastOk ? ` Last synced ${new Date(st.lastOk).toLocaleTimeString()}.` : '',
+        ]),
+        st.lastError ? el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [st.lastError]) : null,
+        el('div', { class: 'action-row' }, [toggle, syncNowBtn, disconnectBtn]),
+        el('div', { class: 'subtle small', style: 'margin-top:var(--space-3);' }, [`Device ID: ${st.deviceId || '—'}`]),
+      ]));
+    }
   }
 
   /* ---- Audit ---- */

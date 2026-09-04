@@ -81,30 +81,42 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
+            ### ⚠️ Security — read before installing
+            Builds **up to and including v0.0.2** shipped a hard-coded sync server
+            and key belonging to the organisation this app was forked from, and
+            connected to it automatically at startup. Those installs exchanged
+            patient records with another clinic's database in both directions.
+
+            v0.0.3 removes the built-in server entirely, refuses that endpoint
+            outright, and on first launch erases any records an affected machine is
+            holding — returning it to first-run setup. **Stop using v0.0.1/v0.0.2.**
+
             ### New in this build
-            - **First-run setup.** There is no shipped `admin/admin` any more. The
-              first person to open the app creates the administrator and chooses the
-              password; a second laptop picks **Join a clinic already set up**, points
-              at the same clinic cloud, and everyone signs in with their own account.
-            - **MMW colours and type.** The palette is sampled from the printed
-              Patient Record — cyan `#00BBD0`, Clearance magenta `#C356A0`, Dental
-              green `#8DC63F` — and the lockup is set in Copperplate Gothic, the
-              letterhead face from MMW's consent form, with Arial for everything else.
+            - **No built-in cloud.** Sync is off and unconfigured until an
+              administrator connects a server this clinic deploys and controls.
+              Cloud settings fail closed: no address or no key means no sync.
+            - **Reset this computer** under Admin → Backup & Export erases every
+              patient, account, event and audit entry and returns to setup.
+            - **UI polish** — card depth, focus rings on every control, entrance
+              motion, busy spinners on async actions, and skeleton loading states.
+              All motion respects `prefers-reduced-motion`.
+            - **Fixed:** the live queue refresh was dead on the Clearance, Dental
+              and Cleanings screens — their scan box holds focus, and the refresh
+              skipped whenever any field was focused.
+            - **Fixed:** scroll position was thrown away on every background sync,
+              yanking a half-read queue back to the top.
+            - **Fixed:** the patient record PDF was still headed "CARING HANDS
+              WORLDWIDE".
 
             ### Also in the app
             - **Registration** issues a 6-digit patient ID and prints a **Code 128
               wristband**. Every later station starts by scanning that band.
-            - **Clearance** records the four vitals from the printed MMW record —
-              blood pressure, blood sugar, pulse and respiration — plus allergies,
-              medications and medical history, then routes to cleaning or x-ray.
+            - **Clearance** records blood pressure, blood sugar, pulse and
+              respiration, then routes to cleaning or x-ray.
             - **Dental** covers triage, the odontogram, fillings, extractions,
               cleanings and anaesthetic, with a signed treatment note.
             - **Check-out**, **Records** and **Reports**, including de-identified
               event totals that survive a patient-data purge.
-            - MMW's own **consent wording** — the Patient Application and Consent for
-              Health Care, and the Consent for Oral Surgery.
-            - Optional **cloud sync** between laptops at the same clinic, and offline
-              USB update/transfer when there is no network.
 
             ### Downloads
             - **MMW-Setup-${{ steps.ver.outputs.version }}.exe** — installer (recommended; required for auto-update).

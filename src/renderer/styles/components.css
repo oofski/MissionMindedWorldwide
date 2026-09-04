@@ -650,3 +650,85 @@
   .wristband--print{ border:none; padding:0; max-width:none; }
   .wristband--print .wb-code svg{ width:auto; }
 }
+
+/* ============================================================
+   MMW v0.0.3 — polish pass
+   Depth, focus, entrance motion and loading states. Deliberately
+   restrained: this is a clinical tool used by volunteers on laptops,
+   so nothing here delays input or moves content under a cursor.
+   Everything is disabled by the reduced-motion block in theme.css.
+   ============================================================ */
+
+/* ---- Depth ----
+   Cards were flat outlines while the shadow tokens went unused. A single
+   hairline shadow separates a card from the canvas without the drop-shadow
+   heaviness that dates an interface. */
+.card{
+  box-shadow:var(--shadow-xs);
+  transition:box-shadow var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.data-table-wrap{ box-shadow:var(--shadow-xs); }
+
+/* ---- Focus ----
+   Only three controls defined a focus ring; keyboard users lost the caret
+   everywhere else. :focus-visible keeps it off mouse clicks. */
+.nav-item:focus-visible,
+.nav-group:focus-visible,
+.ver-chip:focus-visible{ outline:none; box-shadow:var(--focus-ring-inverse); }
+.chip-btn:focus-visible,
+.chip-select:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible,
+.collapse > summary:focus-visible,
+a:focus-visible{ outline:none; box-shadow:var(--focus-ring); border-radius:var(--radius-sm); }
+.data-table tbody tr:focus-visible{ outline:none; box-shadow:inset 0 0 0 2px var(--cyan); }
+
+/* ---- Entrance ----
+   One short fade-and-rise on the view body, so a screen change reads as a
+   change rather than a flicker. 8px, not 24 — enough to notice, not enough
+   to feel like it is loading twice. */
+@keyframes view-in{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:none; } }
+.main-scroll > *{ animation:view-in var(--dur-slow) var(--ease-out) both; }
+
+@keyframes toast-in{ from{ opacity:0; transform:translateY(10px) scale(.98); } to{ opacity:1; transform:none; } }
+.toast{ animation:toast-in var(--dur) var(--ease-out) both; }
+
+@keyframes modal-in{ from{ opacity:0; transform:translateY(8px) scale(.99); } to{ opacity:1; transform:none; } }
+.modal-card{ animation:modal-in var(--dur) var(--ease-out) both; }
+.modal-overlay{ animation:view-in var(--dur-fast) var(--ease) both; }
+
+/* ---- Rows ----
+   Hover was instant and shadeless; a short fade makes a long queue feel
+   responsive under the cursor rather than strobing. */
+.data-table tbody tr{ transition:background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+.stat-card{ transition:box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease); }
+.stat-card:hover{ box-shadow:var(--shadow-sm); }
+
+/* ---- Busy ----
+   Async actions gave no feedback and could be double-fired. withBusy() adds
+   .is-busy; this makes that visible with a spinner in place of the icon. */
+@keyframes spin{ to{ transform:rotate(360deg); } }
+/* Not .55 like :disabled — a button mid-save is working, not unavailable, and
+   dimming a black primary to 55% just reads as a grey box. */
+.btn.is-busy{ position:relative; color:transparent !important; pointer-events:none; opacity:1; }
+.btn.is-busy > *{ visibility:hidden; }
+.btn.is-busy::after{
+  content:''; position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px 0 0 -7px;
+  border:2px solid currentColor; border-right-color:transparent; border-radius:var(--radius-full);
+  color:var(--text-on-accent); opacity:.9; animation:spin 600ms linear infinite;
+}
+.btn--ghost.is-busy::after,.btn--danger.is-busy::after,.btn--soft.is-busy::after{ color:var(--text-muted); }
+
+/* ---- Skeletons ----
+   Views mounted an empty box and popped in, so every screen change flashed
+   blank then shifted. A skeleton holds the space at roughly the right size. */
+@keyframes sk-sweep{ from{ background-position:100% 0; } to{ background-position:-100% 0; } }
+.sk{
+  background:linear-gradient(90deg, var(--surface-sunken) 25%, var(--surface-hover) 37%, var(--surface-sunken) 63%);
+  background-size:400% 100%; animation:sk-sweep 1.4s ease-in-out infinite;
+  border-radius:var(--radius-sm);
+}
+.sk-line{ height:12px; margin-bottom:10px; }
+.sk-line:last-child{ margin-bottom:0; }
+.sk-row{ height:var(--row-height); margin-bottom:2px; border-radius:0; }
+.sk-block{ height:96px; }

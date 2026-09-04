@@ -69,7 +69,14 @@ export function renderProvider(ctx, params = {}) {
 
   async function detail(id) {
     ctx.setDetail && ctx.setDetail(true);
-    const p = await api.getPatient(id);
+    // Three independent reads that used to run back to back, so opening a chart
+    // cost three round-trips before a single pixel was painted. They do not
+    // depend on each other; the history is optional and must not block the rest.
+    const [p, initialXrays, priorVisits] = await Promise.all([
+      api.getPatient(id),
+      api.listXrays(id),
+      api.patientHistory(id).catch(() => []),
+    ]);
     const tr = p.triage || {};
     const tx = p.treatment || {};
     const locked = tx.locked;
@@ -79,8 +86,7 @@ export function renderProvider(ctx, params = {}) {
     const teethDatalist = el('datalist', { id: TEETH_LIST_ID },
       [...Array.from({ length: 32 }, (_, i) => String(i + 1)), ...'ABCDEFGHIJKLMNOPQRST'.split('')]
         .map((n) => el('option', { value: n })));
-    let xrays = await api.listXrays(id);
-    const priorVisits = await api.patientHistory(id).catch(() => []);
+    let xrays = initialXrays;
 
     // medical flags
     // Blood thinners get their own dedicated danger banner + vitals-strip line, so

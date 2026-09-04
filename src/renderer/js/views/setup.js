@@ -10,7 +10,7 @@
 //           at the same clinic cloud; the staff accounts sync down and everyone
 //           signs in with the account they already have.
 
-import { el, toast } from '../dom.js';
+import { el, toast, withBusy } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
@@ -42,14 +42,13 @@ export function renderSetup(ctx) {
       if (password.value.length < 8) return fail('Password must be at least 8 characters.');
       if (password.value !== confirm.value) return fail('The two passwords do not match.');
 
-      submitBtn.disabled = true;
       try {
-        const user = await api.setupAdmin({
+        const user = await withBusy(submitBtn, () => api.setupAdmin({
           full_name: fullName.value.trim(),
           username: username.value.trim(),
           password: password.value,
           clinic_name: clinic.value.trim(),
-        });
+        }));
         // setupAdmin signs the new administrator in, so go straight to work
         // rather than making them retype the password they just chose.
         store.setUser(user);
@@ -60,7 +59,6 @@ export function renderSetup(ctx) {
         ctx.navigate('dashboard');
       } catch (e) {
         fail(e.message || 'Could not complete setup.');
-        submitBtn.disabled = false;
       }
     }
 
@@ -101,8 +99,8 @@ export function renderSetup(ctx) {
     async function join() {
       error.style.display = 'none';
       if (!url.value.trim()) return fail('Enter the clinic address your administrator gave you.');
-      joinBtn.disabled = true;
       try {
+        await withBusy(joinBtn, async () => {
         say('Checking the clinic address…');
         await api.cloudTest(url.value.trim(), key.value);
 
@@ -115,14 +113,13 @@ export function renderSetup(ctx) {
         const { needsSetup } = await api.needsSetup();
         if (needsSetup) {
           fail('Connected, but no staff accounts came down yet. Ask your administrator to sign in on the first computer so its accounts sync, then try again.');
-          joinBtn.disabled = false;
           return;
         }
         toast('Clinic downloaded. Sign in with your own account.', 'success');
         ctx.navigate('login');
+        });
       } catch (e) {
         fail(e.message || 'Could not reach that clinic.');
-        joinBtn.disabled = false;
       }
     }
 

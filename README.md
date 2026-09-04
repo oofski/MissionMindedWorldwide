@@ -6,11 +6,21 @@ Patient Record and the Patient Application and Consent for Health Care — with 
 single digital workflow: registration, medical clearance, x-ray triage, dental
 treatment, check-out and reporting.
 
-Built as a Windows desktop app (Electron). **No cloud required. All patient data
-lives on the device** and is only ever copied out by an authorized staff member.
-An optional clinic-local sync keeps several laptops at one event in step.
+Built as a Windows desktop app (Electron). **All patient data lives on the
+device.** There is no built-in server: the app ships with sync switched off and
+nothing configured, and records leave the machine only when an authorized staff
+member exports them, or when an administrator deliberately connects the clinic
+to a sync server it deploys and controls itself.
 
-> ### ⚠️ Early preview — v0.0.2
+> ### ⚠️ Early preview — v0.0.3
+>
+> **v0.0.3 severs an inherited cloud connection.** Builds up to and including
+> v0.0.2 shipped a hard-coded sync server and key belonging to the organisation
+> this app was forked from, and connected to it automatically at startup. Those
+> installs exchanged records with another clinic's database. v0.0.3 removes the
+> built-in server entirely, refuses that endpoint outright, and on first launch
+> erases any records an affected machine is holding, returning it to first-run
+> setup. **Do not keep using a v0.0.1 or v0.0.2 build.**
 > This is the first cut. The application is carried over from the Mission Minded
 > codebase and rebranded to MMW, with the MMW flow (wristband IDs, the four
 > Clearance vitals, service selection) built on top. **It has not been used in a
@@ -42,9 +52,9 @@ purge, so a clinic can answer a grant return after the records are gone.
 Every push to `main` builds a fresh Windows `.exe` on GitHub's Windows runners
 and publishes it on the **[Releases](../../releases)** page:
 
-- **`MMW-Setup-0.0.2.exe`** — standard installer (Start-menu + desktop
+- **`MMW-Setup-0.0.3.exe`** — standard installer (Start-menu + desktop
   shortcuts, and required for auto-update).
-- **`MMW-Portable-0.0.2.exe`** — single portable executable that runs without
+- **`MMW-Portable-0.0.3.exe`** — single portable executable that runs without
   installing (ideal for a USB stick on shared clinic laptops).
 
 The same files are on any successful run under **Actions → Build Windows App →
@@ -98,7 +108,7 @@ Mirrors the six modules of the product map:
    **audit log**.
 6. **Data & Connectivity** — embedded **SQLite** database, USB / drive backup
    (single-file `.db`), JSON event export, returning-patient lookup across
-   events. Zero network calls for any core function.
+   events. No core function makes a network call.
 
 ---
 
@@ -111,7 +121,8 @@ Mirrors the six modules of the product map:
   step-by-step wizard a patient can finish in a few minutes.
 - **Clinical simplicity** — provider screens mirror the paper Progress Note
   (checklists, not complex data entry).
-- **Data sovereignty** — no cloud, no third-party servers; data stays on the
+- **Data sovereignty** — no third-party servers; unless this clinic connects
+  a sync server of its own, data stays on the
   device.
 
 ---

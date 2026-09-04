@@ -32,6 +32,8 @@ const PERMS = {
   'users:update': ['admin'],
   'users:delete': ['admin'],
   'users:clearEventStaff': ['admin'],
+  'cloud:disconnect': ['admin'],
+  'data:reset': ['admin'],
   'events:create': ['admin'],
   'events:update': ['admin'],
   'events:setActive': ['admin'],
@@ -169,6 +171,25 @@ function register(getMainWindow) {
   handle('cloud:syncNow', () => cloud.syncOnce());
   handle('cloud:resync', () => cloud.resyncAll());
 
+  // Unhook this station from any sync server: endpoint, key and cursor all go.
+  // Records are untouched — disconnecting is not erasing.
+  handle('cloud:disconnect', () => {
+    const r = db.disconnectCloud();
+    cloud.applyConfig({});          // stops the timer via restartTimer()
+    db.audit(currentUser, 'cloud.disconnect', 'settings', null, 'Cloud sync disconnected');
+    return r;
+  });
+
+  // Erase every clinic record on this computer and return it to first-run setup.
+  // Destructive and irreversible, so the renderer confirms by typed phrase; the
+  // audit line is written before the wipe because the log is cleared too.
+  handle('data:reset', () => {
+    db.audit(currentUser, 'data.reset', null, null, 'Full reset of this computer');
+    cloud.applyConfig({});          // stop syncing before deleting anything
+    const r = db.resetClinicData();
+    currentUser = null;             // the account that asked no longer exists
+    return r;
+  });
   /* ---- Clinic export / restore / purge (v1.6.0) ---- */
   // Two files: a readable workbook, and the backup that can actually put the
   // clinic back (signatures and x-ray images cannot live in a spreadsheet).

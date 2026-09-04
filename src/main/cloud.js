@@ -1,9 +1,14 @@
 'use strict';
 
-// v1.1.0 — Cloud sync engine (main process). Drives the row-level sync in db.js
-// against the Cloudflare Worker (see cloud/SYNC_CONTRACT.md). Offline-first:
-// nothing runs unless an admin has entered a URL + key and enabled sync. All
-// network failures are swallowed into a status field so the app keeps working.
+// Cloud sync engine (main process). Drives the row-level sync in db.js against
+// a Cloudflare Worker the clinic deploys itself (see cloud/SYNC_CONTRACT.md).
+//
+// Offline-first, and now actually so: nothing runs unless an administrator has
+// entered BOTH a URL and a key and left sync switched on. That was the stated
+// contract from v1.1.0 but it stopped being true in v1.2.3, which baked in a
+// server and key and connected every install at boot; getSyncMeta() fails
+// closed again, and this module never invents an endpoint. All network failures
+// are swallowed into a status field so the app keeps working.
 
 const db = require('./db');
 
@@ -111,9 +116,20 @@ async function pullOnce(base, key) {
 }
 
 // One full push+pull cycle. Never throws — records status instead.
+// The Worker this app was forked from. Blocked outright: an install that still
+// carries it in settings must not resume talking to another clinic's database.
+const SEVERED_HOSTS = ['little-block-222a.randy-982.workers.dev'];
+function isSeveredEndpoint(url) {
+  try { return SEVERED_HOSTS.includes(new URL(String(url)).host); } catch { return false; }
+}
+
 async function syncOnce() {
   const meta = db.getSyncMeta();
   if (!meta.enabled || !meta.url || !meta.key) return { ok: false, skipped: true };
+  if (isSeveredEndpoint(meta.url)) {
+    db.setSyncMeta({ lastError: 'This server belongs to another organisation and is no longer used.' });
+    return { ok: false, skipped: true };
+  }
   if (running) return { ok: false, busy: true };
   running = true;
   const base = trimUrl(meta.url);
@@ -145,7 +161,7 @@ function status() {
   const m = db.getSyncMeta();
   return {
     enabled: m.enabled, mode: m.mode, online: m.mode === 'online',
-    url: m.url, hasKey: !!m.key, usingDefaultCloud: m.usingDefaultCloud,
+    url: m.url, hasKey: !!m.key, configured: m.configured,
     deviceId: m.deviceId, cursor: m.cursor,
     lastOk: m.lastOk, lastPush: m.lastPush, lastError: m.lastError,
     running, ...lastResult,
@@ -155,6 +171,12 @@ function status() {
 function applyConfig({ url, key, enabled, mode, online }) {
   const patch = {};
   if (url !== undefined) patch.url = trimUrl(url);
+  // A key must travel with a server change. Letting a new URL inherit the
+  // stored key is how a clinic could end up pointing at its own server while
+  // still authenticating with somebody else's credential.
+  if (url !== undefined && trimUrl(url) !== trimUrl(db.getSyncMeta().url) && !key) {
+    throw new Error('Enter the clinic key for this server as well as its address.');
+  }
   if (key !== undefined) patch.key = key;
   // Accept mode ('online'|'offline'), an `online` boolean, or legacy `enabled`.
   if (mode !== undefined) patch.mode = mode === 'offline' ? 'offline' : 'online';

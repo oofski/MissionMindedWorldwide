@@ -279,6 +279,85 @@ function migrate() {
     setSetting('cloud_pending', '[]');
     setSetting('cloud_cursor_heal', 'v1');
   }
+
+  // ONE-TIME SEVERING (v0.0.3). Until now this app shipped a hard-coded sync
+  // server and bearer key belonging to the organisation it was forked from, and
+  // connected to it at boot with no user action. Any install that ran a v0.0.x
+  // build therefore holds records pulled from that clinic — patients, and staff
+  // accounts complete with password hashes — and pushed its own up in return.
+  //
+  // None of that data is this clinic's to keep, and a synced-in account is a
+  // live credential, so the whole local database is reset and the machine
+  // returns to first-run setup. It runs before cloud.start(), so nothing is
+  // re-pulled afterwards. Marked done so a clinic that has since set itself up
+  // is never wiped a second time.
+  if (getSetting('cloud_severed_v1') !== 'done') {
+    const hadInheritedCloud =
+      // Ran with the baked-in default (nothing saved), or saved it explicitly.
+      !(getSetting('cloud_url') || '').trim() ||
+      (getSetting('cloud_url') || '').includes('little-block-222a.randy-982.workers.dev');
+    const hasAnyData =
+      db.prepare('SELECT COUNT(*) AS n FROM patients').get().n > 0 ||
+      db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0;
+    // A clinic that had pointed itself at its OWN server is left alone — it was
+    // never coupled to the other organisation, so there is nothing to sever.
+    if (hadInheritedCloud) {
+      if (hasAnyData) resetClinicData();   // also clears the cloud settings
+      else disconnectCloud();              // nothing to erase; just unhook it
+    }
+    setSetting('cloud_severed_v1', 'done');
+  }
+}
+
+
+/**
+ * Erase every clinic record on this machine and return it to first-run setup.
+ *
+ * Used by the one-time severing migration below and by Admin -> Reset this
+ * computer. Deliberately NOT built out of deletePatient/purgeEventPatients/
+ * deleteEvent: those record tombstones, which are themselves synced rows, so a
+ * reset built on them would broadcast "delete all of this" to whatever server
+ * the station is pointed at — including, historically, another organisation's.
+ * Direct SQL only, and the tombstone table is emptied rather than added to.
+ *
+ * Order follows the foreign keys (patients.event_id -> events(id) has no
+ * cascade). PRAGMA foreign_keys is toggled OUTSIDE the transaction because
+ * SQLite silently ignores it inside one.
+ */
+function resetClinicData() {
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      // Sync bookkeeping first, so nothing here can resurrect a record later.
+      // A leftover tombstone also blocks a legitimate re-import of the same uid.
+      for (const t of ['undeletes', 'tombstones', 'event_reports',
+                       'xrays', 'consents', 'treatments', 'triage', 'patients',
+                       'audit_log',   // detail carries patient names
+                       'users', 'events']) {
+        db.prepare(`DELETE FROM ${t}`).run();
+      }
+      // Named keys only. A bare DELETE FROM settings would be worse than doing
+      // nothing: with cloud_mode absent the old code read that as "online".
+      for (const k of ['active_event_id',
+                       'cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
+                       'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error',
+                       'xray_import_dir', 'xray_folder_locked', 'xray_clear_after_import']) {
+        db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+      }
+      // Written, never deleted — absent must not mean online.
+      setSetting('cloud_mode', 'offline');
+      // cloud_cursor_heal stays at 'v1': clearing it re-fires the one-time heal
+      // on the next boot, which blanks the cursor and forces a full re-read.
+      // cloud_last_stamp stays too — it is the monotonic clock guarding against
+      // a wall-clock rewind, and rewinding it would make future local edits lose
+      // last-write-wins against older rows.
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+  // Reclaim the pages so purged records are not recoverable from free space.
+  try { db.exec('VACUUM'); } catch (_) { /* non-fatal */ }
+  return { ok: true };
 }
 
 const ROLES = ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'];
@@ -2493,25 +2572,26 @@ function applyRemoteRows(remoteRows) {
 }
 
 // Cloud config/state lives in the settings table under a cloud_ prefix.
-// v1.2.3: the app ships ALWAYS-ONLINE. Every install auto-connects to the clinic
-// cloud below with zero setup; the only thing a clinic ever changes is the simple
-// Online / Run-offline switch (cloud_mode). Advanced users can still override the
-// URL/key, and those saved values win over these baked defaults.
-const DEFAULT_CLOUD = {
-  url: 'https://little-block-222a.randy-982.workers.dev',
-  key: 'randy',
-};
+//
+// There is NO built-in server. Earlier versions shipped a hard-coded Worker URL
+// and bearer key and connected to it at boot with no user action — which, after
+// this app was forked from another organisation's, meant two unrelated clinics
+// were reading and writing each other's patient records over one shared key.
+// Nothing is baked in now: an endpoint exists only if an administrator typed it
+// in, and this function FAILS CLOSED — no URL or no key means no sync, whatever
+// cloud_mode happens to say.
 function getSyncMeta() {
-  const savedUrl = (getSetting('cloud_url') || '').trim();
-  const savedKey = (getSetting('cloud_key') || '').trim();
-  const url = savedUrl || DEFAULT_CLOUD.url;
-  const key = savedKey || DEFAULT_CLOUD.key;
-  // Online unless the clinic explicitly chose to run offline (no wifi).
-  const mode = getSetting('cloud_mode') === 'offline' ? 'offline' : 'online';
+  const url = (getSetting('cloud_url') || '').trim();
+  const key = (getSetting('cloud_key') || '').trim();
+  const configured = !!url && !!key;
+  // Offline unless a clinic both configured a server AND left sync switched on.
+  // Defaulting an unconfigured install to 'online' is what made the old
+  // always-on behaviour possible, so the default flips when nothing is set up.
+  const mode = configured && getSetting('cloud_mode') !== 'offline' ? 'online' : 'offline';
   return {
     url, key, mode,
-    enabled: mode === 'online' && !!url && !!key,
-    usingDefaultCloud: !savedUrl,
+    enabled: configured && mode === 'online',
+    configured,
     deviceId: getSetting('cloud_device_id') || '',
     cursor: getSetting('cloud_cursor') || '',
     lastPush: getSetting('cloud_last_push') || '',
@@ -2533,6 +2613,26 @@ function setSyncMeta(patch) {
 // clinic from the cloud on the next sync. Used by Admin -> Cloud -> "Re-sync
 // everything" when a station is missing patients the others can see. Applying
 // rows is idempotent (last-write-wins), so nothing local is lost or duplicated.
+/**
+ * Forget the cloud entirely: endpoint, key, and every trace of where this
+ * station had got to. Used by Admin -> Cloud -> Disconnect and by the severing
+ * migration. Deliberately does NOT delete clinic records — disconnecting is not
+ * the same as erasing, and the two are separate, separately-confirmed actions.
+ *
+ * cloud_cursor_heal is intentionally left at its current value: clearing it
+ * makes migrate()'s one-time heal re-fire on the next boot, which blanks the
+ * cursor and forces a full re-read from whatever server is configured next.
+ */
+function disconnectCloud() {
+  for (const k of ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
+                   'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error']) {
+    db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+  }
+  // Written, not deleted: an absent cloud_mode is not treated as offline.
+  setSetting('cloud_mode', 'offline');
+  return { ok: true };
+}
+
 function resetSyncCursor() {
   setSetting('cloud_cursor', '');
   setSetting('cloud_pending', '[]');
@@ -2583,7 +2683,7 @@ module.exports = {
   exportClinicBundle, importClinicBundle, buildEventSummary, captureEventSummary, rebuildSummaryFromBundle,
   mergeSummaries, reportRollup,
   purgeEventPatients, finishEvent, listEventReports,
-  getSetting, setSetting,
+  getSetting, setSetting, disconnectCloud, resetClinicData,
   // v1.1.0 cloud sync
   collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
   getSyncPending, setSyncPending, resetSyncCursor,

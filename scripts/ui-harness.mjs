@@ -17,6 +17,7 @@ const DB_PATH = db.init(tmp);
 
 // v0.0.2: nothing is seeded any more — the harness bootstraps through the same
 // first-run setup path a real clinic uses, so that path is covered by every run.
+const fileURLToPathSev = (u) => decodeURIComponent(u.pathname).replace(/^\/([A-Za-z]:)/, '$1');
 const SETUP_ADMIN = { full_name: 'Harness Admin', username: 'harness.admin', password: 'harness-pw-2026' };
 const signInAdmin = () => db.login(SETUP_ADMIN.username, SETUP_ADMIN.password);
 db.createFirstAdmin(SETUP_ADMIN);
@@ -154,9 +155,9 @@ window.api = {
   updateInstall: async () => ({ ok: true, data: { launched: true } }),
   appOpenExternal: async () => ({ ok: true }),
   // v1.2.3 cloud sync — always-online by default
-  cloudStatus: async () => ({ ok: true, data: { enabled: true, mode: 'online', online: true, url: 'https://little-block-222a.randy-982.workers.dev', hasKey: true, usingDefaultCloud: true, deviceId: 'test-device', cursor: '', lastOk: '', lastPush: '', lastError: '', running: false, pushed: 0, pulled: 0, applied: 0 } }),
-  cloudConfig: async () => ({ ok: true, data: { enabled: true, mode: 'online', online: true, url: 'https://little-block-222a.randy-982.workers.dev', hasKey: true, usingDefaultCloud: true } }),
-  cloudTest: async () => ({ ok: true, data: { service: 'caring-hands-sync', version: '1.1.0' } }),
+  cloudStatus: async () => ({ ok: true, data: { enabled: true, mode: 'online', online: true, url: 'https://example.invalid/mmw-sync', hasKey: true, configured: true, deviceId: 'test-device', cursor: '', lastOk: '', lastPush: '', lastError: '', running: false, pushed: 0, pulled: 0, applied: 0 } }),
+  cloudConfig: async () => ({ ok: true, data: { enabled: true, mode: 'online', online: true, url: 'https://example.invalid/mmw-sync', hasKey: true, configured: true } }),
+  cloudTest: async () => ({ ok: true, data: { service: 'mmw-sync', version: '1.1.0' } }),
   cloudSyncNow: async () => ({ ok: true, data: { ok: true, pushed: 0, pulled: 0, applied: 0 } }),
   onCloudChanged: () => () => {},
 };
@@ -704,10 +705,23 @@ async function main() {
   // ---- v1.5.15: patient pre-registration (public link → routed into the event) ----
   {
     currentUser = signInAdmin();
-    // Every event exposes a per-event pre-registration link on its current cloud.
-    const evs = db.listEvents();
-    const activeEv = evs.find((e) => e.active) || evs[0];
-    log(!!activeEv && typeof activeEv.prereg_url === 'string' && /\/checkin\//.test(activeEv.prereg_url) && activeEv.prereg_url.includes(activeEv.uid), 'v1.5.15: each event exposes a unique /checkin/<event-uid> pre-registration link');
+    // The pre-registration link is built from the configured sync server, so it
+    // only exists once a clinic has connected one. It used to be published
+    // unconditionally because a server was baked in — which meant every event
+    // advertised a public URL pointing at another organisation's Worker.
+    let evs = db.listEvents();
+    let activeEv = evs.find((e) => e.active) || evs[0];
+    log(!!activeEv && activeEv.prereg_url === null,
+      'MMW: no pre-registration link is published while no sync server is configured');
+
+    // With a server configured, each event gets its own /checkin/<uid> link.
+    db.setSetting('cloud_url', 'https://example.invalid/mmw-sync');
+    db.setSetting('cloud_key', 'test-key');
+    evs = db.listEvents();
+    activeEv = evs.find((e) => e.active) || evs[0];
+    log(!!activeEv && typeof activeEv.prereg_url === 'string' && /\/checkin\//.test(activeEv.prereg_url) && activeEv.prereg_url.includes(activeEv.uid),
+      'v1.5.15: each event exposes a unique /checkin/<event-uid> pre-registration link');
+    db.setSetting('cloud_url', ''); db.setSetting('cloud_key', '');
 
     // Simulate what the Worker writes when a patient pre-registers: a checked-in
     // patient row scoped to the event, applied through the normal sync path.
@@ -2033,6 +2047,53 @@ async function main() {
     log(r.clinicNamed, 'MMW setup: the clinic name given at setup is applied to the event');
     log(r.uid !== '00000000-0000-4000-8000-000000000002',
       'MMW setup: the first administrator does not reuse the shared admin sync identity');
+  }
+
+  /* ================= MMW v0.0.3 — severing the inherited cloud ===============
+     Builds up to v0.0.2 shipped another organisation's Worker URL and bearer key
+     and connected at boot with no user action. These guard the severance. */
+  {
+    const SEVERED = 'little-block-222a.randy-982.workers.dev';
+
+    // Nothing is baked in: an unconfigured install has no endpoint and no key.
+    const m = db.getSyncMeta();
+    log(!m.url && !m.key, 'MMW severance: an unconfigured install has no server or key');
+    log(m.enabled === false && m.mode === 'offline',
+      'MMW severance: sync fails closed — offline and disabled until configured');
+    log(m.configured === false, 'MMW severance: status reports the clinic as not configured');
+
+    // The constant is gone from the source, not merely unused.
+    const { readFileSync } = await import('node:fs');
+    const dbSrc = readFileSync(fileURLToPathSev(new URL('../src/main/db.js', import.meta.url)), 'utf8');
+    const workerSrc = readFileSync(fileURLToPathSev(new URL('../cloud/worker.js', import.meta.url)), 'utf8');
+    // The hostname may still appear — the severing migration matches on it to
+    // spot an affected install, and cloud.js blocklists it. What must be gone is
+    // any use of it as a DEFAULT: a fallback the app would connect to on its own.
+    const defaultUses = dbSrc.split('\n').filter((l) => l.includes(SEVERED) && !l.includes('includes('));
+    log(!/DEFAULT_CLOUD/.test(dbSrc) && defaultUses.length === 0,
+      'MMW severance: the endpoint survives only as a detector, never as a default');
+    const cloudSrc = readFileSync(fileURLToPathSev(new URL('../src/main/cloud.js', import.meta.url)), 'utf8');
+    log(/SEVERED_HOSTS/.test(cloudSrc) && cloudSrc.includes(SEVERED),
+      'MMW severance: the sync engine blocklists the inherited host');
+    log(!/DEFAULT_CLINIC_KEY/.test(workerSrc),
+      'MMW severance: the sync Worker has no fallback key and fails closed without a secret');
+
+    // Even if the endpoint reappears in settings, it is refused.
+    const cloudMod = await import('../src/main/cloud.js');
+    const cloud = cloudMod.default || cloudMod;
+    db.setSetting('cloud_url', `https://${SEVERED}`);
+    db.setSetting('cloud_key', 'randy');
+    db.setSetting('cloud_mode', 'online');
+    const r = await cloud.syncOnce();
+    log(r && r.skipped === true, 'MMW severance: the inherited endpoint is refused even if it reappears in settings');
+    log((db.getSyncMeta().lastError || '').includes('another organisation'),
+      'MMW severance: refusing it records a plain reason rather than failing silently');
+
+    // Disconnect clears the endpoint and pins the mode to offline.
+    db.disconnectCloud();
+    const after = db.getSyncMeta();
+    log(!after.url && !after.key && after.mode === 'offline' && !after.enabled,
+      'MMW severance: disconnect clears the server, key and cursor and pins offline');
   }
 
   await tick();
