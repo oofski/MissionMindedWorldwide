@@ -72,10 +72,25 @@ jobs:
           retention-days: 30
 
   # ------------------------------------------------------------------ macOS --
+  # ONE JOB PER ARCHITECTURE, on purpose.
+  #
+  # Both architectures in a single job shared node_modules, and @electron/rebuild
+  # did not redo better-sqlite3 for the second one: build 13 shipped an arm64 app
+  # whose native SQLite module was x86_64, which crashes on launch on every Apple
+  # Silicon Mac. A separate job per arch gets a clean npm install and cannot
+  # inherit the other's binary. It also puts the two hdiutil runs on different
+  # machines, so they can no longer collide over a mounted volume.
   macos:
-    # macos-latest is Apple Silicon. Both architectures are built from it:
-    # Xcode's clang cross-compiles the x64 slice, and @electron/rebuild builds
-    # better-sqlite3 for each target arch in turn.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            expect: x86_64
+            volume: Mission Minded Intel
+          - arch: arm64
+            expect: arm64
+            volume: Mission Minded Apple Silicon
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -91,11 +106,6 @@ jobs:
       # 3.12 — which is older than the runner's default python3. Building the
       # x64 slice of better-sqlite3 from source therefore dies before it
       # compiles anything. 3.11 is the last release that still ships distutils.
-      #
-      # This is needed for the x64 build specifically: the arm64 slice matches
-      # the runner's own architecture and npm install satisfies it from a
-      # prebuilt binary, which is why an earlier run got all the way to hdiutil
-      # before failing and this one did not get past rebuild.
       - name: Pin Python 3.11 for node-gyp
         uses: actions/setup-python@v5
         with:
@@ -110,69 +120,57 @@ jobs:
       - name: Run UI harness
         run: node scripts/ui-harness.mjs
 
-      # Each architecture separately, and each allowed to exit non-zero.
+      # A non-zero exit is tolerated: electron-builder writes the image AND its
+      # blockmap, then fails on "hdiutil detach" of its own temporary volume,
+      # which on a headless runner has no Finder session to release it. That is
+      # cleanup failing after the artifact exists. The checks below are what
+      # actually decide whether this job passed.
       #
-      # electron-builder finishes the DMG — the image and its blockmap are both
-      # written — and THEN fails on "hdiutil detach" of its own temporary
-      # volume, which on a headless runner has no Finder session to release it.
-      # That is a cleanup step failing after the artifact exists, so failing the
-      # build on it would throw away a perfectly good DMG. The check below is
-      # what actually decides whether this job passed: no DMG, no release.
-      #
-      # There is no Apple Developer ID for this project. Without
-      # CSC_IDENTITY_AUTO_DISCOVERY=false, electron-builder searches the
-      # runner's keychain, finds nothing, and reports a signing error rather
-      # than the deliberate choice it is. The app is still ad-hoc signed, which
-      # Apple Silicon requires in order to launch a binary at all.
-      - name: Build macOS DMG (Intel x64)
-        run: npm run dist:mac:x64 || echo "electron-builder exited non-zero — the DMG check below decides"
+      # CSC_IDENTITY_AUTO_DISCOVERY=false: there is no Apple Developer ID here,
+      # and without it electron-builder searches the runner's keychain, finds
+      # nothing, and reports a signing error rather than the deliberate choice
+      # it is. The app is still ad-hoc signed, which Apple Silicon requires in
+      # order to launch a binary at all.
+      - name: Build macOS DMG (${{ matrix.arch }})
+        run: npm run dist:mac:${{ matrix.arch }} || echo "electron-builder exited non-zero — the checks below decide"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      # Force off anything the previous build left mounted, so the next one
-      # cannot collide with it. Distinct volume titles make this belt-and-braces.
       - name: Release any volume left mounted
         if: always()
-        run: |
-          hdiutil detach -force "/Volumes/Mission Minded Intel" 2>/dev/null || true
-          hdiutil detach -force "/Volumes/Mission Minded Apple Silicon" 2>/dev/null || true
-          ls /Volumes
+        run: hdiutil detach -force "/Volumes/${{ matrix.volume }}" 2>/dev/null || true
 
-      - name: Build macOS DMG (Apple Silicon arm64)
-        run: npm run dist:mac:arm64 || echo "electron-builder exited non-zero — the DMG check below decides"
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-
-      - name: Release any volume left mounted (again)
-        if: always()
+      # The real gate. Existence, integrity, and — the one that caught build 13 —
+      # that the app AND its native module are both the architecture this DMG
+      # claims to be.
+      - name: Verify the DMG
         run: |
-          hdiutil detach -force "/Volumes/Mission Minded Intel" 2>/dev/null || true
-          hdiutil detach -force "/Volumes/Mission Minded Apple Silicon" 2>/dev/null || true
-
-      # Both DMGs, or the job fails. The two architectures are built by separate
-      # electron-builder invocations into the same output directory, so a
-      # regression that clobbered one would otherwise ship a release that
-      # silently excludes every Intel Mac.
-      - name: Check both DMGs were produced
-        run: |
-          ls -la release/
+          set -euo pipefail
           V=$(node -p "require('./package.json').version")
-          test -s "release/MMW-$V-x64.dmg"   || { echo "::error::Intel DMG missing"; exit 1; }
-          test -s "release/MMW-$V-arm64.dmg" || { echo "::error::Apple Silicon DMG missing"; exit 1; }
-          # A truncated image would mount as a corrupt disk on a clinic laptop.
-          hdiutil verify "release/MMW-$V-x64.dmg"
-          hdiutil verify "release/MMW-$V-arm64.dmg"
+          DMG="release/MMW-$V-${{ matrix.arch }}.dmg"
+          ls -la release/
+          test -s "$DMG" || { echo "::error::$DMG missing or empty"; exit 1; }
+          hdiutil verify "$DMG"
 
-      # Only the DMGs. The zip and latest-mac.yml exist for Squirrel.Mac
-      # auto-update, which an ad-hoc-signed build cannot use — see
-      # src/main/autoupdate.js — so publishing them would put two more 80MB
-      # downloads on the release page that nothing ever reads.
-      - name: Upload macOS build
+          MP=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$DMG"
+          APP="$MP/Mission Minded.app"
+          BIN="$APP/Contents/MacOS/Mission Minded"
+          NODE=$(find "$APP" -name 'better_sqlite3.node' | head -1)
+          echo "app:    $(file -b "$BIN")"
+          echo "sqlite: $(file -b "$NODE")"
+          rc=0
+          file -b "$BIN"  | grep -q '${{ matrix.expect }}' || { echo "::error::app binary is not ${{ matrix.expect }}"; rc=1; }
+          file -b "$NODE" | grep -q '${{ matrix.expect }}' || { echo "::error::better_sqlite3.node is not ${{ matrix.expect }} — this build would crash on launch"; rc=1; }
+          test -n "$NODE" || { echo "::error::no native module found in the bundle"; rc=1; }
+          hdiutil detach -force "$MP" >/dev/null 2>&1 || true
+          exit $rc
+
+      - name: Upload macOS build (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: macos
-          path: |
-            release/*.dmg
+          name: macos-${{ matrix.arch }}
+          path: release/*.dmg
           if-no-files-found: error
           retention-days: 30
 
@@ -222,7 +220,14 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### Fixed in this build — admin / admin now works on an existing install
+            ### Fixed in this build — the Apple Silicon download was broken
+            The arm64 DMG in build 13 contained an Intel build of the database
+            module, so it crashed the moment it opened on an M-series Mac. Each
+            architecture is now built on its own machine, and the build refuses
+            to publish a DMG whose contents do not match the Mac it is for. The
+            Intel DMG and both Windows downloads were unaffected.
+
+            ### Also fixed — admin / admin now works on an existing install
             v0.0.5 only created the `admin` account on a machine with an **empty**
             database, so anyone updating over an existing install never got it and
             signing in with `admin` / `admin` failed. This build creates it once on
