@@ -150,6 +150,12 @@ jobs:
           DMG="release/MMW-$V-${{ matrix.arch }}.dmg"
           ls -la release/
           test -s "$DMG" || { echo "::error::$DMG missing or empty"; exit 1; }
+          # Exactly one. Pinning arch in the build config made a single
+          # invocation build both and race itself in hdiutil, keeping whichever
+          # finished first — so this job could emit the other architecture's
+          # image under its own name.
+          n=$(ls release/*.dmg | wc -l | tr -d ' ')
+          test "$n" = "1" || { echo "::error::expected one DMG from this job, found $n"; ls release/*.dmg; exit 1; }
           hdiutil verify "$DMG"
 
           MP=$(mktemp -d)
