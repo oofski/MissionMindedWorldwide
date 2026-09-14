@@ -90,25 +90,25 @@ jobs:
             > rely on it for patient records until it has.
 
             ### New in this build
-            - **Modernised across every screen.** Softer geometry, layered
-              elevation, roomier spacing and pill controls, applied at the token
-              level so all thirteen screens move together. All motion still
-              respects `prefers-reduced-motion`.
-            - **Patient journey** on the dashboard: where everyone on the floor is
-              right now — Registered, Clearance, Ready, Treatment, Checked out —
-              with a completion ring replacing the old checked-out tile.
-            - **The printed forms now map onto the app.** The Dental half of the
-              Patient Record gains its missing **Restorative** (core build-up,
-              re-cement crown, denture, bridge) and **Services** (alveoplasty,
-              IRM, buccal, pulpotomy) blocks, which previously had nowhere to go
-              but a free-text box and so could never be counted in a report.
-            - **The HIV / Hepatitis B & C deemed-consent answer is now recorded.**
-              The consent showed the wording but never captured the patient's
-              Yes/No, so a signed consent could not evidence what was agreed. It
-              is asked at registration and required before signing.
-            - **Fixed:** consents signed at check-in silently dropped their tooth
-              numbers, so an oral-surgery consent did not record which teeth it
-              covered. Consents added later at the chair were unaffected.
+            - **The app now comes with an administrator already set up.** A
+              fresh install signs in with **`admin` / `admin`** — no setup
+              screen to walk through first. Add your team under
+              **Admin → Staff & roles**.
+            - **Change that password before the clinic sees real patients.** It
+              is the same on every copy and it is published here, so anyone who
+              reaches the laptop can open every patient record on it. The app
+              names it on the sign-in screen and carries a warning across every
+              screen until it is changed — both disappear the moment you change
+              it.
+            - **Joining a second laptop** to a clinic that already exists is now
+              reached from the bottom of the sign-in screen, since setup no
+              longer opens on its own.
+
+            ### From v0.0.4
+            - Modernised across every screen, a patient journey stepper on the
+              dashboard, and the printed forms mapped onto the app: the
+              Restorative and Services blocks on the dentist view, and the
+              HIV / Hepatitis deemed-consent answer recorded at registration.
 
             ### From v0.0.3 — security
             Builds up to and including v0.0.2 shipped a hard-coded sync server and

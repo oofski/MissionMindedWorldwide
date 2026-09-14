@@ -15,8 +15,14 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 
-export function renderSetup(ctx) {
-  let mode = 'start';   // 'start' | 'join'
+export function renderSetup(ctx, params = {}) {
+  // Reached two ways now. A machine with no account at all still lands here on
+  // 'start'; a normal install, which ships with an administrator already, only
+  // gets here from the sign-in screen's "Join a clinic" button — so honour the
+  // mode the caller asked for and keep the Start form out of its way, since
+  // createFirstAdmin would refuse it anyway once an account exists.
+  let mode = params.mode === 'join' ? 'join' : 'start';
+  const joinOnly = params.mode === 'join';
 
   const root = el('div', { class: 'auth-split' });
 
@@ -136,8 +142,11 @@ export function renderSetup(ctx) {
       error,
       joinBtn,
       el('div', { class: 'login-divider' }, [el('span', {}, ['or'])]),
-      el('button', { class: 'btn btn--ghost btn--block', onClick: () => { mode = 'start'; paint(); } },
-        [icon('plus', { size: 16 }), 'This is the first computer — set it up']),
+      joinOnly
+        ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => ctx.navigate('login') },
+            [icon('chevron', { size: 16 }), 'Back to sign in'])
+        : el('button', { class: 'btn btn--ghost btn--block', onClick: () => { mode = 'start'; paint(); } },
+            [icon('plus', { size: 16 }), 'This is the first computer — set it up']),
     ]);
   }
 

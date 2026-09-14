@@ -18,6 +18,28 @@ export function renderLogin(ctx) {
   const remember = el('input', { type: 'checkbox', class: 'auth-check', id: 'auth-remember' });
   remember.checked = !!saved.user;
   const error = el('div', { class: 'login-error', style: 'display:none' });
+  // Filled in below, only while the shipped admin/admin is still in place. A
+  // credential that is documented in the release notes anyway is more useful
+  // printed on the screen than remembered wrongly — and stating it here is what
+  // makes its disappearance, once the password is changed, meaningful.
+  const defaultHint = el('div', { class: 'login-default', style: 'display:none' });
+
+  api.needsSetup().then((r) => {
+    const d = r && r.defaultAdmin;
+    if (!d) return;
+    defaultHint.style.display = '';
+    defaultHint.replaceChildren(
+      icon('lock', { size: 16 }),
+      el('div', {}, [
+        el('strong', {}, ['Sign in with ', el('code', {}, [d.username]), ' / ', el('code', {}, [d.password])]),
+        el('small', {}, ['This is the password every copy ships with. Change it under Admin \u2192 Staff & roles before the clinic sees real patients.']),
+      ]),
+    );
+    // Fill the fields so the first sign-in is one click, but never remember
+    // them: the whole point is that this account stops existing in this form.
+    if (!username.value) username.value = d.username;
+    if (!password.value) password.value = d.password;
+  }).catch(() => { /* hint is a convenience; sign-in works without it */ });
 
   async function submit() {
     error.style.display = 'none';
@@ -78,6 +100,7 @@ export function renderLogin(ctx) {
   const panel = el('div', { class: 'auth-panel' }, [
     el('div', { class: 'auth-form' }, [
       el('h2', { class: 'auth-title' }, ['Sign in']),
+      defaultHint,
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, [t('login.username')]), username]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, [t('login.password')]), password]),
       el('label', { class: 'auth-remember', for: 'auth-remember' }, [remember, el('span', {}, ['Remember me on this device'])]),
@@ -92,6 +115,13 @@ export function renderLogin(ctx) {
         ]),
       ]),
       el('p', { class: 'auth-foot' }, ['New here? Your administrator sets up your account.']),
+      // The clinic runs on several laptops. Setup no longer opens on its own now
+      // that an administrator ships with the app, so this is the way to the
+      // join-an-existing-clinic flow.
+      el('button', {
+        class: 'btn btn--ghost btn--block',
+        onClick: () => ctx.navigate('setup', { mode: 'join' }),
+      }, [icon('globe', { size: 16 }), 'Join a clinic already set up']),
     ]),
   ]);
 

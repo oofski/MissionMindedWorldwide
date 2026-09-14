@@ -1,8 +1,8 @@
 {
   "name": "mission-minded-worldwide",
   "productName": "Mission Minded",
-  "version": "0.0.4",
-  "description": "Mission Minded Worldwide \u2014 offline-first patient records for free dental, medical and vision clinics.",
+  "version": "0.0.5",
+  "description": "Mission Minded Worldwide — offline-first patient records for free dental, medical and vision clinics.",
   "author": {
     "name": "Mission Minded Worldwide",
     "email": "info@missionmindedworldwide.org"
@@ -27,7 +27,7 @@
   "build": {
     "appId": "org.missionmindedworldwide.clinic",
     "productName": "Mission Minded",
-    "copyright": "Copyright \u00a9 2026 Mission Minded Worldwide",
+    "copyright": "Copyright © 2026 Mission Minded Worldwide",
     "asar": true,
     "publish": [
       {

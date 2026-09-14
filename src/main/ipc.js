@@ -133,7 +133,15 @@ function register(getMainWindow) {
   // definition there is no account yet — so they are left out of PERMS. The
   // real protection is in db.createFirstAdmin, which refuses outright once any
   // account exists, so this can never become a way to add a second admin.
-  handle('auth:needsSetup', () => ({ needsSetup: db.needsSetup() }));
+  // defaultAdmin rides along so the sign-in screen can name the shipped
+  // credential while it is still live, and stop naming it the moment the
+  // password is changed. Safe to answer before sign-in: it reveals only
+  // whether a documented default is still in place, which is exactly what
+  // anyone standing at the machine could discover by typing it in.
+  handle('auth:needsSetup', () => ({
+    needsSetup: db.needsSetup(),
+    defaultAdmin: db.defaultAdminActive() ? { username: db.DEFAULT_ADMIN_USERNAME, password: db.DEFAULT_ADMIN_PASSWORD } : null,
+  }));
   handle('auth:setupAdmin', (payload) => {
     const user = db.createFirstAdmin(payload || {});
     currentUser = user;   // sign the new administrator straight in

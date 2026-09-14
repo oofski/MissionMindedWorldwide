@@ -145,6 +145,20 @@
 .login-title{ text-align:center; font-size:var(--fs-h1); }
 .login-sub{ text-align:center; color:var(--text-muted); margin:4px 0 22px; font-size:var(--fs-sm); }
 .login-error{ background:var(--danger-soft); color:var(--danger); border:1px solid var(--danger-border); padding:9px 12px; border-radius:var(--radius-sm); font-size:var(--fs-sm); margin-bottom:12px; }
+
+/* The shipped admin/admin, named on the sign-in screen while it is still live.
+   Warning-coloured rather than informational: it is a real exposure, and it
+   should look like one so nobody settles into leaving it in place. */
+.login-default{ display:flex; gap:10px; align-items:flex-start; background:var(--warning-soft); border:1px solid var(--warning-border); color:var(--text); padding:11px 13px; border-radius:var(--radius-md); margin-bottom:16px; }
+.login-default .icon{ flex:none; margin-top:1px; color:var(--warning); }
+.login-default strong{ display:block; font-size:var(--fs-sm); font-weight:var(--fw-medium); }
+.login-default code{ font-family:ui-monospace, Consolas, monospace; background:var(--surface-sunken); border:var(--border-line); border-radius:4px; padding:0 5px; }
+.login-default small{ display:block; margin-top:4px; color:var(--text-muted); font-size:var(--fs-xs); line-height:1.45; }
+
+/* The same warning, carried on every screen inside the app until it is fixed. */
+.default-pw-banner{ margin-bottom:var(--space-5); }
+.default-pw-banner span{ flex:1; font-weight:var(--fw-regular); }
+.default-pw-banner .btn{ flex:none; }
 .login-divider{ text-align:center; position:relative; margin:18px 0; color:var(--text-subtle); font-size:var(--fs-xs); }
 .login-divider::before{ content:''; position:absolute; top:50%; left:0; right:0; height:1px; background:var(--border); }
 .login-divider span{ background:var(--surface); padding:0 12px; position:relative; }

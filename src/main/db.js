@@ -466,6 +466,22 @@ const DEFAULT_EVENT_UID = '00000000-0000-4000-8000-000000000001';
 // 'admin' rows (one per laptop). Real, admin-created accounts keep their own
 // unique uid and sync normally.
 const DEFAULT_ADMIN_UID = '00000000-0000-4000-8000-000000000002';
+// The bootstrap administrator seeded onto a fresh install. Well known on
+// purpose — see seed() — and surfaced by defaultAdminActive() so the UI can keep
+// asking for it to be changed rather than letting it quietly become permanent.
+const DEFAULT_ADMIN_USERNAME = 'admin';
+const DEFAULT_ADMIN_PASSWORD = 'admin';
+
+/**
+ * True while the bootstrap administrator is still signed in with its shipped
+ * password. Drives the sign-in hint and the standing warning inside the app;
+ * goes false the moment the password is changed, so neither outlives its use.
+ */
+function defaultAdminActive() {
+  const row = db.prepare('SELECT salt, hash, active FROM users WHERE username = ? AND role = ?')
+    .get(DEFAULT_ADMIN_USERNAME, 'admin');
+  return !!row && !!row.active && verifyPassword(DEFAULT_ADMIN_PASSWORD, row.salt, row.hash);
+}
 
 // Ensure this device's default clinic event uses the shared identity above, and
 // that the active event points at it — so cloud-synced patients are visible.
@@ -570,9 +586,26 @@ function createFirstAdmin(data) {
 function seed() {
   const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
   if (userCount === 0) {
-    // No account is seeded. A well-known admin/admin on every install is a real
-    // exposure for a machine holding patient records, so the first person to
-    // open the app creates the administrator themselves (see createFirstAdmin).
+    // A fresh install comes with the bootstrap administrator already in place:
+    // username 'admin', password 'admin'. Requested so a laptop can be handed to
+    // a volunteer and signed into immediately, without somebody first walking
+    // through a setup screen.
+    //
+    // This is a known credential on a machine that holds patient records, so it
+    // is deliberately NOT quiet about itself: the sign-in screen names it while
+    // it is still in place, and the app nags on every sign-in until the password
+    // is changed (see defaultAdminActive). Change it at the first clinic.
+    //
+    // No uid is set here on purpose. convergeSeedAdmin(), which runs a few lines
+    // below, assigns the shared DEFAULT_ADMIN_UID *and* back-dates the row so a
+    // freshly imaged laptop always loses last-write-wins to one whose admin
+    // password was actually set. Seeding the uid directly here would skip that
+    // and let a new install reset the clinic's real admin password on sync.
+    const { salt, hash } = hashPassword(DEFAULT_ADMIN_PASSWORD);
+    db.prepare(
+      `INSERT INTO users (username, full_name, role, salt, hash, active, created_at)
+       VALUES (?,?,?,?,?,1,?)`
+    ).run(DEFAULT_ADMIN_USERNAME, 'Administrator', 'admin', salt, hash, now());
   } else {
     // One-time cleanup for databases seeded by an earlier version: disable the
     // old demo doctor/triage accounts if they still use the default password.
@@ -2693,7 +2726,8 @@ function close() {
 module.exports = {
   init, close,
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
-  needsSetup, createFirstAdmin,
+  needsSetup, createFirstAdmin, defaultAdminActive,
+  DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,
   createPatient, startVisitFromExisting, updatePatient, deletePatient, getPatient, listPatients, searchAllPatients, patientHistory,
   findPatientByCode,

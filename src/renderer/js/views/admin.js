@@ -254,6 +254,9 @@ export function renderAdmin(ctx, params = {}) {
         await api.updateUser({ id: u.id, full_name: name.value.trim(), role: role.value, password: pass.value || undefined });
       }
       toast('Saved', 'success'); paint();
+      // A password change here may have retired the shipped admin/admin, which
+      // the standing warning is watching for.
+      if (ctx.refreshSecurity) ctx.refreshSecurity();
     } catch (e) { toast(e.message, 'error'); }
   }
 

@@ -63,24 +63,32 @@ Artifacts**.
 Windows will warn that the publisher is unknown — the build is not code-signed.
 Choose **More info → Run anyway**.
 
-### First run — setting up a computer
+### First run — signing in
 
-There are **no default accounts**. The first time the app opens on a machine it
-shows a setup screen with two ways through:
+A fresh install comes with an administrator already in place:
 
-**Set up this computer** — you are the first person. Enter your name, choose a
-username and password (8+ characters), and optionally name the clinic. That
-creates the clinic's administrator and signs you straight in. Add the rest of
-your team under **Admin → Staff & roles**.
+| Username | Password |
+| --- | --- |
+| `admin` | `admin` |
 
-**Join a clinic already set up** — the clinic already exists on another laptop.
-Enter the clinic address and key from **Admin → Cloud** on the first machine.
-This computer downloads the clinic, including its staff accounts, and everyone
-signs in with the account they already have.
+Sign in and add the rest of your team under **Admin → Staff & roles**.
 
-> There is no password recovery. Write the administrator password down and keep
-> it somewhere safe — if it is lost, the only way back in is a fresh install,
-> which starts with an empty database.
+> **Change that password before the clinic sees real patients.** It is the same
+> on every copy of the app and it is written down here, so anyone who gets to
+> the laptop can open every patient record on it. The app says so on the
+> sign-in screen and on a banner across every screen until you change it, and
+> both disappear once you do. Change it under **Admin → Staff & roles → admin →
+> Edit**.
+>
+> There is no password recovery. Write the new password down and keep it
+> somewhere safe — if it is lost, the only way back in is **Admin → Reset this
+> computer**, which empties the database and returns to `admin` / `admin`.
+
+**Joining a clinic already set up** — if the clinic exists on another laptop,
+use **Join a clinic already set up** at the bottom of the sign-in screen. Enter
+the clinic address and key from **Admin → Cloud** on the first machine. This
+computer downloads the clinic, including its staff accounts, and everyone signs
+in with the account they already have.
 
 ---
 

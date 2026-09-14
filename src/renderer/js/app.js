@@ -61,6 +61,9 @@ function saveNavGroupsState(s) { try { window.localStorage.setItem(NAV_STATE_KEY
 let detailOpen = false;
 const ctx = {
   navigate,
+  // Lets the staff screen clear the shipped-password warning the moment it is
+  // no longer true, instead of leaving it up until the next sign-in.
+  refreshSecurity: () => refreshSecurity(),
   toast: (m, k) => toast(m, k),
   store,
   // Closing a patient detail also has to clear the id we navigated in with.
@@ -76,6 +79,19 @@ const ctx = {
 
 // App version + offline-update state, shown in any view.
 const appInfo = { version: '', hasUpdate: false, latest: null, checked: false };
+// Whether the machine is still on the password it shipped with. Re-read after
+// sign-in and on every repaint request, so the warning below disappears as soon
+// as somebody actually changes it rather than lingering until a restart.
+const security = { defaultAdmin: false };
+async function refreshSecurity() {
+  try {
+    const r = await api.needsSetup();
+    const was = security.defaultAdmin;
+    security.defaultAdmin = !!(r && r.defaultAdmin);
+    // Repaint only on a change, so this never fights with a view mid-edit.
+    if (was !== security.defaultAdmin && store.user) navigate(lastNav.name, lastNav.params);
+  } catch (_) { /* leave the last known state */ }
+}
 
 let lastNav = { name: 'dashboard', params: {} };
 // Queue/list screens safe to auto-refresh when cloud sync pulls new data. Detail
@@ -84,7 +100,7 @@ let lastNav = { name: 'dashboard', params: {} };
 const LIVE_VIEWS = new Set(['dashboard', 'emt', 'provider', 'hygienist', 'checkout', 'records', 'management']);
 
 function navigate(name, params = {}) {
-  if (name === 'setup') return renderFullscreen(renderSetup(ctx));
+  if (name === 'setup') return renderFullscreen(renderSetup(ctx, params));
   if (name === 'login') return renderFullscreen(renderLogin(ctx));
   if (name === 'kiosk') return renderFullscreen(renderKiosk(ctx));
 
@@ -231,7 +247,24 @@ function renderShell(active, contentNode) {
     ]),
   ]);
 
-  const main = el('main', { class: 'main' }, [topbar, el('div', { class: 'main-scroll' }, [contentNode])]);
+  // The app ships with a known administrator password so a laptop is usable out
+  // of the box. That is a real exposure on a machine holding patient records, so
+  // it says so on every screen until it is fixed — administrators get the route
+  // to the fix, everyone else gets something to escalate.
+  const defaultPwWarning = security.defaultAdmin
+    ? el('div', { class: 'banner banner--alert default-pw-banner' }, [
+        icon('lock', { size: 16 }),
+        el('span', {}, ['This computer is still using the administrator password it shipped with. Anyone who knows it can open every patient record here.']),
+        store.user.role === 'admin'
+          ? el('button', { class: 'btn btn--sm', onClick: () => navigate('staff') }, ['Change it'])
+          : null,
+      ])
+    : null;
+
+  const main = el('main', { class: 'main' }, [
+    topbar,
+    el('div', { class: 'main-scroll' }, [defaultPwWarning, contentNode].filter(Boolean)),
+  ]);
   appRoot.append(sidebar, main);
 
   // Restore only when staying on the same screen — navigating somewhere new
@@ -379,12 +412,13 @@ async function logout() {
 }
 
 // Expose for the login view to trigger an update-info refresh after sign-in.
-ctx.afterLogin = async () => { await refreshAppInfo(true); updateVersionUI(); };
+ctx.afterLogin = async () => { await Promise.all([refreshAppInfo(true), refreshSecurity()]); updateVersionUI(); };
 
-// Boot. A machine with no account has to run setup before anything else — the
-// app no longer ships a default administrator to fall back on. If the check
-// itself fails, fall through to sign-in rather than stranding the user on a
-// blank screen.
+// Boot. A fresh install ships with the bootstrap administrator already seeded,
+// so this normally goes straight to sign-in. Setup is still the destination for
+// a machine that genuinely has no account — one reset with Admin > Reset this
+// computer and not yet restarted. If the check itself fails, fall through to
+// sign-in rather than stranding the user on a blank screen.
 setLang('en');
 api.needsSetup()
   .then((r) => navigate(r && r.needsSetup ? 'setup' : 'login'))

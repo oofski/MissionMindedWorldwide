@@ -15,12 +15,13 @@ const db = require('../src/main/db.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uih-'));
 const DB_PATH = db.init(tmp);
 
-// v0.0.2: nothing is seeded any more — the harness bootstraps through the same
-// first-run setup path a real clinic uses, so that path is covered by every run.
+// v0.0.5: the bootstrap administrator is seeded again, so the harness signs in
+// with the shipped credential rather than creating one — which means every run
+// proves an installer's out-of-the-box sign-in actually works. The first-run
+// setup path is still covered, in the child-process probe further down.
 const fileURLToPathSev = (u) => decodeURIComponent(u.pathname).replace(/^\/([A-Za-z]:)/, '$1');
-const SETUP_ADMIN = { full_name: 'Harness Admin', username: 'harness.admin', password: 'harness-pw-2026' };
+const SETUP_ADMIN = { full_name: 'Administrator', username: 'admin', password: 'admin' };
 const signInAdmin = () => db.login(SETUP_ADMIN.username, SETUP_ADMIN.password);
-db.createFirstAdmin(SETUP_ADMIN);
 // A second handle on the same file, for the handful of checks that have to
 // forge history (back-date a visit) or read a column the API does not expose.
 const rawDb = () => new (require('better-sqlite3'))(DB_PATH);
@@ -1976,50 +1977,97 @@ async function main() {
       'MMW: the services chosen at registration are kept on the record');
   }
 
-  /* ================= MMW v0.0.2 — first-run administrator setup ==============
-     The app no longer ships admin/admin, so these cover both halves: that the
-     backdoor is really gone, and that the one call able to create an account
-     without being signed in cannot be used twice. */
+  /* ======= MMW v0.0.5 — the shipped administrator, and setup after a reset ===
+     A fresh install signs in with admin / admin. That is a known credential on a
+     machine holding patient records, so these cover three things: that it works
+     out of the box, that the app can still tell it is in place (which is what
+     drives the warnings), and that it stops being reported the moment it is
+     changed. The first-run setup path still exists for a machine that has been
+     reset, so it is exercised too. */
   {
-    // On THIS database an administrator already exists (created at startup).
-    log(db.needsSetup() === false, 'MMW setup: an installed machine does not ask for setup again');
-    log(!db.login('admin', 'admin'), 'MMW setup: the old admin/admin account no longer exists');
+    // On THIS database the seeded administrator is what the harness signed in
+    // with at startup, so its working is already implied — assert it directly
+    // anyway, because it is the single thing an installer has to get right.
+    log(!!db.login('admin', 'admin'), 'MMW admin: a fresh install signs in with admin / admin');
+    log(db.needsSetup() === false, 'MMW admin: an install with an account does not ask for setup');
+    log(db.defaultAdminActive() === true, 'MMW admin: the app knows the shipped password is still in place');
+
+    // The seeded admin carries the shared sync identity, and is back-dated so a
+    // freshly imaged laptop always LOSES last-write-wins to one whose password
+    // was actually set. Without that, installing the app on a new laptop and
+    // syncing would reset the clinic's real administrator password.
+    {
+      const raw = rawDb();
+      const row = raw.prepare("SELECT uid, updated_at FROM users WHERE username = 'admin'").get();
+      raw.close();
+      log(row.uid === '00000000-0000-4000-8000-000000000002',
+        'MMW admin: the seeded administrator uses the shared sync identity, not one per laptop');
+      log(String(row.updated_at || '').startsWith('0000-01-01'),
+        'MMW admin: the untouched seeded administrator is back-dated so it loses to a real password');
+    }
 
     // The security property: createFirstAdmin is reachable without signing in,
     // so it must refuse outright once any account exists.
     let blocked = false;
     try { db.createFirstAdmin({ full_name: 'Mallory', username: 'mallory', password: 'password123' }); }
     catch (_) { blocked = true; }
-    log(blocked, 'MMW setup: a second administrator cannot be created through setup');
+    log(blocked, 'MMW admin: a second administrator cannot be created through setup');
 
-    // Fresh-install behaviour needs a database with no accounts at all, which
-    // means a separate process — the data layer holds one connection.
+    // Everything else needs databases in states this one cannot reach (a fresh
+    // install, and a reset one), which means a separate process — the data layer
+    // holds a single connection.
     const { execFileSync } = await import('node:child_process');
     const probe = `
       const os=require('os'),fs=require('fs'),path=require('path');
       const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mmwsetup-'));
-      const db=require(process.argv[2]); db.init(dir);
+      const dbmod=process.argv[2];
+      const db=require(dbmod); const file=db.init(dir);
       const out={};
-      out.needsSetup = db.needsSetup();
-      out.noBackdoor = !db.login('admin','admin');
+
+      /* --- a brand new install --- */
+      out.freshSignsIn = !!db.login('admin','admin');
+      out.freshNoSetup = db.needsSetup() === false;
+      out.freshDefaultFlag = db.defaultAdminActive() === true;
+      out.freshRole = (db.login('admin','admin')||{}).role === 'admin';
+      out.wrongPwFails = !db.login('admin','wrong');
+
+      /* --- once the password is changed, the app stops reporting it --- */
+      const admin = db.login('admin','admin');
+      db.updateUser(admin, admin.id, { password: 'a-real-clinic-password' });
+      out.changedFlagClears = db.defaultAdminActive() === false;
+      out.changedSignsIn = !!db.login('admin','a-real-clinic-password');
+      out.oldPwDead = !db.login('admin','admin');
+
+      /* --- a wiped machine: setup until it is restarted, then seeded again --- */
+      db.resetClinicData();
+      out.resetNeedsSetup = db.needsSetup() === true;
       out.rejects = [];
       for (const bad of [{},{full_name:'A'},{full_name:'A',username:'ab'},{full_name:'A',username:'anna',password:'short'}]) {
         try { db.createFirstAdmin(bad); out.rejects.push(false); } catch(e){ out.rejects.push(true); }
       }
-      const u = db.createFirstAdmin({full_name:'Anna Reed',username:'Anna.Reed',password:'clinic2026',clinic_name:'Yorba Linda Clinic'});
+      const u = db.createFirstAdmin({full_name:'Anna Reed',username:'Anna.Reed',password:'clinic2026'});
       out.role = u.role;
       out.lowercased = u.username === 'anna.reed';
       out.signsIn = !!db.login('anna.reed','clinic2026');
-      out.wrongPwFails = !db.login('anna.reed','nope');
       out.setupDone = db.needsSetup() === false;
-      out.clinicNamed = db.getActiveEvent().name === 'Yorba Linda Clinic';
-      // Must NOT reuse the legacy shared admin uid: two laptops each set up
-      // independently would then share one sync identity, and last-write-wins
-      // would overwrite one administrator's password.
-      const raw = new (require('better-sqlite3'))(require('path').join(dir,'mission-minded.db'));
-      out.uid = raw.prepare('SELECT uid FROM users').get().uid;
+      // Must NOT reuse the shared seeded-admin uid: two laptops each set up by
+      // hand would then share one sync identity, and last-write-wins would
+      // overwrite one administrator's password.
+      const raw = new (require('better-sqlite3'))(file);
+      out.uid = raw.prepare("SELECT uid FROM users WHERE username='anna.reed'").get().uid;
       raw.close();
       db.close(); fs.rmSync(dir,{recursive:true,force:true});
+
+      /* --- a wipe followed by the restart the app actually does --- */
+      const dir2=fs.mkdtempSync(path.join(os.tmpdir(),'mmwreset-'));
+      db.init(dir2);
+      db.resetClinicData();
+      db.close();
+      db.init(dir2);   // the restart
+      out.reseedsAfterRestart = !!db.login('admin','admin');
+      out.reseedEvent = !!db.getActiveEvent();
+      db.close(); fs.rmSync(dir2,{recursive:true,force:true});
+
       process.stdout.write(JSON.stringify(out));
     `;
     // fileURLToPath, not URL.pathname: on Windows the latter yields
@@ -2041,15 +2089,21 @@ async function main() {
     } finally {
       fs.rmSync(probeFile, { force: true });
     }
-    log(r.needsSetup, 'MMW setup: a fresh install asks for setup');
-    log(r.noBackdoor, 'MMW setup: a fresh install has no default account to sign in with');
+    log(r.freshSignsIn && r.freshRole, 'MMW admin: a brand new install signs in as an administrator with admin / admin');
+    log(r.freshNoSetup, 'MMW admin: a brand new install goes straight to sign-in, not setup');
+    log(r.freshDefaultFlag, 'MMW admin: a brand new install reports the shipped password as still in place');
+    log(r.wrongPwFails, 'MMW admin: a wrong password is still refused');
+    log(r.changedFlagClears, 'MMW admin: changing the password clears the shipped-password warning');
+    log(r.changedSignsIn && r.oldPwDead, 'MMW admin: the new password works and admin / admin stops working');
+    log(r.resetNeedsSetup, 'MMW admin: a wiped machine has no account until it is restarted');
+    log(r.reseedsAfterRestart, 'MMW admin: restarting after a reset puts admin / admin back, so the laptop is never stranded');
+    log(r.reseedEvent, 'MMW admin: the reset machine also gets its clinic event back on restart');
     log(r.rejects.every(Boolean), 'MMW setup: blank name, short username and weak password are all refused');
     log(r.role === 'admin' && r.lowercased, 'MMW setup: the first account is an administrator, username normalised');
-    log(r.signsIn && r.wrongPwFails, 'MMW setup: the chosen password works and a wrong one does not');
+    log(r.signsIn, 'MMW setup: the chosen password works');
     log(r.setupDone, 'MMW setup: setup does not run again once an account exists');
-    log(r.clinicNamed, 'MMW setup: the clinic name given at setup is applied to the event');
     log(r.uid !== '00000000-0000-4000-8000-000000000002',
-      'MMW setup: the first administrator does not reuse the shared admin sync identity');
+      'MMW setup: an administrator created by hand does not reuse the shared admin sync identity');
   }
 
   /* ================= MMW v0.0.3 — severing the inherited cloud ===============
