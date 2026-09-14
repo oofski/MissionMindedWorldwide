@@ -19,7 +19,9 @@ function baseName(patient) {
   return `${sanitize(patient.last_name)}_${sanitize(patient.first_name)}_MMW`;
 }
 
-// Candidate removable roots (Windows drive letters) + common folders.
+// Candidate removable roots + common folders. Windows exposes removable media
+// as drive letters; macOS mounts them under /Volumes, where the startup disk
+// also appears and is deliberately skipped so it is not offered as a "drive".
 function listDrives() {
   const out = [];
   if (process.platform === 'win32') {
@@ -27,6 +29,19 @@ function listDrives() {
       const root = `${String.fromCharCode(c)}:\\`;
       try { if (fs.existsSync(root)) out.push({ path: root, label: `${String.fromCharCode(c)}: drive` }); } catch (e) { /* ignore */ }
     }
+  } else if (process.platform === 'darwin') {
+    try {
+      // /Volumes/Macintosh HD is a symlink to /, i.e. the startup disk — a
+      // patient export written there would go on the clinic's own laptop
+      // rather than the stick they meant to hand over.
+      for (const name of fs.readdirSync('/Volumes')) {
+        const root = path.join('/Volumes', name);
+        try {
+          if (fs.realpathSync(root) === '/') continue;
+          if (fs.statSync(root).isDirectory()) out.push({ path: root, label: name });
+        } catch (e) { /* unreadable mount — skip */ }
+      }
+    } catch (e) { /* no /Volumes — skip */ }
   }
   try { const d = app.getPath('downloads'); out.push({ path: d, label: 'Downloads' }); } catch (e) { /* ignore */ }
   return out;

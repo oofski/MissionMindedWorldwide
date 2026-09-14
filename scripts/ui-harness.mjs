@@ -2058,6 +2058,46 @@ async function main() {
       raw.close();
       db.close(); fs.rmSync(dir,{recursive:true,force:true});
 
+      /* --- upgrading a machine that was ALREADY set up on an older build ---
+         seed() only fires on an empty database, so before the one-time
+         bootstrap migration these installs never got admin/admin — which is
+         exactly what was reported from a real install. */
+      const B=require('better-sqlite3');
+      const dirU=fs.mkdtempSync(path.join(os.tmpdir(),'mmwupg-'));
+      const fileU=db.init(dirU);
+      db.createUser(db.login('admin','admin'),{username:'anna',full_name:'Anna Reed',role:'admin',password:'annapw1234'});
+      db.close();
+      let ru=new B(fileU);
+      ru.prepare("DELETE FROM audit_log").run();
+      ru.prepare("DELETE FROM users WHERE username='admin'").run();          // an older build had no such row
+      ru.prepare("DELETE FROM settings WHERE key='bootstrap_admin_v1'").run(); // and no migration flag
+      ru.close();
+      db.init(dirU);                                    // the upgraded launch
+      out.upgradeSignsIn = !!db.login('admin','admin');
+      out.upgradeKeepsExisting = !!db.login('anna','annapw1234');
+      db.close(); fs.rmSync(dirU,{recursive:true,force:true});
+
+      /* --- an 'admin' account that exists with some OTHER password --- */
+      const dirO=fs.mkdtempSync(path.join(os.tmpdir(),'mmwother-'));
+      const fileO=db.init(dirO);
+      const ao=db.login('admin','admin');
+      db.updateUser(ao, ao.id, { password: 'somethingelse' });
+      db.close();
+      let ro=new B(fileO); ro.prepare("DELETE FROM settings WHERE key='bootstrap_admin_v1'").run(); ro.close();
+      db.init(dirO);
+      out.repairsWrongPassword = !!db.login('admin','admin');
+      db.close(); fs.rmSync(dirO,{recursive:true,force:true});
+
+      /* --- but a deliberate password change must NOT be undone on restart --- */
+      const dirK=fs.mkdtempSync(path.join(os.tmpdir(),'mmwkeep-'));
+      db.init(dirK);
+      const ak=db.login('admin','admin');
+      db.updateUser(ak, ak.id, { password: 'a-real-clinic-password' });
+      db.close();
+      db.init(dirK);
+      out.keepsChangedPassword = !db.login('admin','admin') && !!db.login('admin','a-real-clinic-password');
+      db.close(); fs.rmSync(dirK,{recursive:true,force:true});
+
       /* --- a wipe followed by the restart the app actually does --- */
       const dir2=fs.mkdtempSync(path.join(os.tmpdir(),'mmwreset-'));
       db.init(dir2);
@@ -2095,6 +2135,10 @@ async function main() {
     log(r.wrongPwFails, 'MMW admin: a wrong password is still refused');
     log(r.changedFlagClears, 'MMW admin: changing the password clears the shipped-password warning');
     log(r.changedSignsIn && r.oldPwDead, 'MMW admin: the new password works and admin / admin stops working');
+    log(r.upgradeSignsIn, 'MMW admin: upgrading a machine that was already set up gets admin / admin too');
+    log(r.upgradeKeepsExisting, 'MMW admin: upgrading does not disturb the account that was already there');
+    log(r.repairsWrongPassword, 'MMW admin: an admin account left on some other password is repaired once');
+    log(r.keepsChangedPassword, 'MMW admin: a deliberately changed password is never forced back to admin');
     log(r.resetNeedsSetup, 'MMW admin: a wiped machine has no account until it is restarted');
     log(r.reseedsAfterRestart, 'MMW admin: restarting after a reset puts admin / admin back, so the laptop is never stranded');
     log(r.reseedEvent, 'MMW admin: the reset machine also gets its clinic event back on restart');

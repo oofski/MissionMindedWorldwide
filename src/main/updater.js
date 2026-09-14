@@ -29,7 +29,8 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-// Candidate roots to scan: Windows removable drive letters + common folders.
+// Candidate roots to scan for an installer carried in on a stick: Windows
+// removable drive letters, macOS mounts under /Volumes, plus common folders.
 function candidateRoots(extraDir) {
   const roots = [];
   if (extraDir) roots.push(extraDir);
@@ -37,6 +38,10 @@ function candidateRoots(extraDir) {
     for (let c = 'D'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
       roots.push(`${String.fromCharCode(c)}:\\`);
     }
+  } else if (process.platform === 'darwin') {
+    try {
+      for (const name of fs.readdirSync('/Volumes')) roots.push(path.join('/Volumes', name));
+    } catch (e) { /* no /Volumes — skip */ }
   }
   try { roots.push(app.getPath('downloads')); } catch (e) { /* ignore */ }
   try { roots.push(path.dirname(app.getPath('exe'))); } catch (e) { /* ignore */ }

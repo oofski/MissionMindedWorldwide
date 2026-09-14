@@ -473,6 +473,50 @@ const DEFAULT_ADMIN_USERNAME = 'admin';
 const DEFAULT_ADMIN_PASSWORD = 'admin';
 
 /**
+ * Guarantee the bootstrap administrator exists, ONCE, on a machine that was
+ * already set up before this version shipped.
+ *
+ * seed() only creates it when the database has no users at all, which covers a
+ * fresh install and nothing else. Every machine upgrading from v0.0.2–v0.0.5
+ * already had the account its owner made on the old setup screen, so seed()
+ * skipped, and admin / admin did not work there — which is exactly what was
+ * reported. This closes that gap.
+ *
+ * Keyed on a settings flag so it happens exactly once. That matters in both
+ * directions: an administrator who later changes the password or deletes the
+ * account does not get it forced back on the next launch.
+ *
+ * If an account called 'admin' already exists with a different password, this
+ * resets it. That is deliberate — the alternative is that the documented
+ * credential silently does not work on precisely the machines most likely to
+ * try it. No clinic is running on this yet, and the password is meant to be
+ * changed on arrival anyway.
+ */
+function ensureBootstrapAdmin() {
+  if (getSetting('bootstrap_admin_v1') === 'done') return;
+  const row = db.prepare('SELECT * FROM users WHERE username = ?').get(DEFAULT_ADMIN_USERNAME);
+  if (row && row.active && row.role === 'admin' && verifyPassword(DEFAULT_ADMIN_PASSWORD, row.salt, row.hash)) {
+    setSetting('bootstrap_admin_v1', 'done');   // already correct (fresh install)
+    return;
+  }
+  const { salt, hash } = hashPassword(DEFAULT_ADMIN_PASSWORD);
+  if (row) {
+    // Clear the sync stamps so the repaired row propagates to the clinic's
+    // other laptops rather than being treated as unchanged.
+    db.prepare(
+      `UPDATE users SET salt = ?, hash = ?, active = 1, role = 'admin', updated_at = ?,
+       synced_rev = NULL, content_rev = NULL WHERE id = ?`
+    ).run(salt, hash, now(), row.id);
+  } else {
+    db.prepare(
+      `INSERT INTO users (username, full_name, role, salt, hash, active, created_at)
+       VALUES (?,?,?,?,?,1,?)`
+    ).run(DEFAULT_ADMIN_USERNAME, 'Administrator', 'admin', salt, hash, now());
+  }
+  setSetting('bootstrap_admin_v1', 'done');
+}
+
+/**
  * True while the bootstrap administrator is still signed in with its shipped
  * password. Drives the sign-in hint and the standing warning inside the app;
  * goes false the moment the password is changed, so neither outlives its use.
@@ -630,6 +674,9 @@ function seed() {
   // Existing installs (or after any event change): make sure the default event is
   // the shared, cross-device identity and the queue is pointed at it.
   convergeDefaultEvent();
+  // Upgrades: seed() above only fires on an empty database, so a machine that
+  // was already set up needs this to get the shipped administrator. One-time.
+  ensureBootstrapAdmin();
   convergeSeedAdmin();
   // Align this laptop's active event with the clinic-wide selection (synced).
   resolveActiveEvent();

@@ -42,14 +42,71 @@ function createWindow() {
 
 function buildMenu() {
   const isMac = process.platform === 'darwin';
+
+  const about = {
+    // Contact details come from the MMW consent form rather than a web
+    // link: the clinic runs offline, so a browser is often unavailable
+    // and the phone number is what a patient actually needs.
+    label: 'About Mission Minded',
+    click: () => dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'About Mission Minded',
+      message: `Mission Minded Worldwide\nFree Clinics — v${app.getVersion()}`,
+      detail: [
+        '4633 Avenida Rio Del Oro',
+        'Yorba Linda, CA 92886',
+        'Telephone: (951) 317-4968',
+        '',
+        'Offline-first patient records for free dental, medical and vision clinics.',
+      ].join('\n'),
+      buttons: ['Close'],
+    }),
+  };
+
   const template = [
+    // macOS puts the application menu first and expects the standard roles in
+    // it — About and Quit live here, not under Help, and Cmd+Q comes from the
+    // quit role rather than working by itself.
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        about,
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    }] : []),
     {
-      label: 'Mission Minded',
+      label: isMac ? 'File' : 'Mission Minded',
       submenu: [
         { role: 'reload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: isMac ? 'close' : 'quit' },
+      ],
+    },
+    // Not optional on macOS. Chromium gives Windows and Linux cut/copy/paste
+    // for free, but on macOS those accelerators are driven BY the menu — with
+    // no Edit menu, Cmd+C, Cmd+V, Cmd+X, Cmd+Z and Cmd+A do nothing anywhere
+    // in the app, which makes every form in the clinic painful to fill in.
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        ...(isMac ? [{ role: 'pasteAndMatchStyle' }] : []),
+        { role: 'delete' },
+        { type: 'separator' },
+        { role: 'selectAll' },
       ],
     },
     {
@@ -62,30 +119,14 @@ function buildMenu() {
         { role: 'togglefullscreen' },
       ],
     },
-    {
+    // Printing a wristband or a patient record opens the system print dialog,
+    // which on macOS is a sheet on the window — a minimised window hides it,
+    // so the window controls belong in the menu bar there.
+    ...(isMac ? [{ role: 'windowMenu' }] : []),
+    ...(isMac ? [] : [{
       label: 'Help',
-      submenu: [
-        {
-          // Contact details come from the MMW consent form rather than a web
-          // link: the clinic runs offline, so a browser is often unavailable
-          // and the phone number is what a patient actually needs.
-          label: 'About Mission Minded',
-          click: () => dialog.showMessageBox(mainWindow, {
-            type: 'info',
-            title: 'About Mission Minded',
-            message: `Mission Minded Worldwide\nFree Clinics — v${app.getVersion()}`,
-            detail: [
-              '4633 Avenida Rio Del Oro',
-              'Yorba Linda, CA 92886',
-              'Telephone: (951) 317-4968',
-              '',
-              'Offline-first patient records for free dental, medical and vision clinics.',
-            ].join('\n'),
-            buttons: ['Close'],
-          }),
-        },
-      ],
-    },
+      submenu: [about],
+    }]),
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

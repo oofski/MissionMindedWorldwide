@@ -1,7 +1,7 @@
 {
   "name": "mission-minded-worldwide",
   "productName": "Mission Minded",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Mission Minded Worldwide — offline-first patient records for free dental, medical and vision clinics.",
   "author": {
     "name": "Mission Minded Worldwide",
@@ -13,7 +13,9 @@
     "start": "electron .",
     "icon": "node scripts/make-icon.js",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "dist:win": "electron-builder --win --x64",
+    "dist:mac": "electron-builder --mac --arm64 --x64"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
@@ -75,6 +77,40 @@
     },
     "portable": {
       "artifactName": "MMW-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "assets/icon.png",
+      "category": "public.app-category.medical",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "artifactName": "MMW-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "MMW-${version}-${arch}.${ext}",
+      "title": "Mission Minded ${version}",
+      "contents": [
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     }
   }
 }

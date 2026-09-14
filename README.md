@@ -47,21 +47,45 @@ purge, so a clinic can answer a grant return after the records are gone.
 
 ---
 
-## ⬇️ Download the Windows app
+## ⬇️ Download
 
-Every push to `main` builds a fresh Windows `.exe` on GitHub's Windows runners
-and publishes it on the **[Releases](../../releases)** page:
+Every push to `main` builds Windows and macOS on GitHub's runners and publishes
+both on the **[Releases](../../releases)** page.
 
-- **`MMW-Setup-0.0.4.exe`** — standard installer (Start-menu + desktop
+**Windows**
+
+- **`MMW-Setup-<version>.exe`** — standard installer (Start-menu + desktop
   shortcuts, and required for auto-update).
-- **`MMW-Portable-0.0.4.exe`** — single portable executable that runs without
-  installing (ideal for a USB stick on shared clinic laptops).
+- **`MMW-Portable-<version>.exe`** — single portable executable that runs
+  without installing (ideal for a USB stick on shared clinic laptops).
 
-The same files are on any successful run under **Actions → Build Windows App →
+**macOS** — check  → About This Mac and take the matching one:
+
+- **`MMW-<version>-arm64.dmg`** — Apple Silicon (M1/M2/M3/M4).
+- **`MMW-<version>-x64.dmg`** — Intel.
+
+The same files are on any successful run under **Actions → Build Desktop Apps →
 Artifacts**.
 
-Windows will warn that the publisher is unknown — the build is not code-signed.
-Choose **More info → Run anyway**.
+### Getting past the "unknown publisher" warning
+
+Neither build is code-signed, so both systems will warn on first launch.
+
+**Windows** — "Windows protected your PC" → **More info → Run anyway**.
+
+**macOS** — open the DMG and drag **Mission Minded** onto Applications, then
+launch it from Applications. macOS refuses the first time, saying it *"cannot be
+opened because Apple cannot check it for malicious software"*. Click **Done**,
+open  **→ System Settings → Privacy & Security**, scroll to the bottom, and
+press **Open Anyway** next to the Mission Minded message. Confirm once and it
+opens normally from then on.
+
+> **macOS does not auto-update.** Applying an update to a Mac app requires an
+> Apple-signed build, and these are not signed — so the app tells Mac users to
+> download the new version rather than failing partway through an update.
+> Download the new DMG and drag it over the old copy; patient records live
+> outside the app bundle and are not touched. Windows continues to update itself
+> in place.
 
 ### First run — signing in
 

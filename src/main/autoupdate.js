@@ -11,6 +11,23 @@
 
 const { app } = require('electron');
 
+// In-place update is Windows-only here.
+//
+// Updating a macOS app goes through Squirrel.Mac, which verifies the new build's
+// code signature against the running app's before it will swap them. These
+// builds are ad-hoc signed (enough for macOS to launch them, nothing more), so
+// that check can never pass — electron-updater would download the whole update
+// and then fail at the last step with a signature error that looks like a bug.
+//
+// So macOS is told plainly that it updates by downloading, rather than being
+// walked into a failure. Signing with an Apple Developer ID is what would change
+// this, and nothing in the app can substitute for it.
+const UPDATES_SUPPORTED = process.platform !== 'darwin';
+const MAC_REASON = 'Automatic updates are not available on macOS for this build. '
+  + 'Download the latest version from the Mission Minded releases page and drag it '
+  + 'to Applications, replacing the old copy. Your patient records are kept '
+  + 'separately and are not affected.';
+
 let autoUpdater = null;
 let getWin = () => null;
 const state = { status: 'idle', currentVersion: null, version: null, percent: 0, error: null };
@@ -64,15 +81,17 @@ function emit(status) {
 
 function init(winGetter) {
   getWin = winGetter || getWin;
+  if (!UPDATES_SUPPORTED) return;   // never wire up a updater that cannot finish
   load();
 }
 
 function available() {
   // Online updates require the packaged app + internet.
-  return app.isPackaged && !!load();
+  return UPDATES_SUPPORTED && app.isPackaged && !!load();
 }
 
 async function check() {
+  if (!UPDATES_SUPPORTED) return { supported: false, reason: MAC_REASON };
   if (!app.isPackaged) return { supported: false, reason: 'Online updates work in the installed app only (not in dev / portable run).' };
   const u = load();
   if (!u) return { supported: false, reason: 'Updater unavailable.' };
@@ -90,6 +109,7 @@ async function check() {
 }
 
 async function download() {
+  if (!UPDATES_SUPPORTED) throw new Error(MAC_REASON);
   const u = load();
   if (!u) throw new Error('Updater unavailable.');
   await withRetry(() => u.downloadUpdate());
@@ -97,6 +117,7 @@ async function download() {
 }
 
 function quitAndInstall() {
+  if (!UPDATES_SUPPORTED) throw new Error(MAC_REASON);
   const u = load();
   if (!u) throw new Error('Updater unavailable.');
   setImmediate(() => u.quitAndInstall(false, true));
@@ -105,6 +126,7 @@ function quitAndInstall() {
 
 // Silent check shortly after launch; result is pushed to the renderer.
 function checkSilently() {
+  if (!UPDATES_SUPPORTED) return;
   if (!app.isPackaged) return;
   const u = load();
   if (u) { try { withRetry(() => u.checkForUpdates(), 5, 4000).catch(() => {}); } catch (e) { /* ignore */ } }

@@ -1,4 +1,8 @@
-name: Build Windows App
+# Filename kept as build-windows.yml although this now builds macOS too:
+# renaming it would start a NEW workflow whose github.run_number restarts at 1,
+# and the release tag is v<version>-build.<run_number>. Tags would go backwards
+# past the ones already published.
+name: Build Desktop Apps
 
 on:
   push:
@@ -12,11 +16,14 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ---------------------------------------------------------------- Windows --
+  windows:
     # Pinned to windows-2022 (Visual Studio 2022). "windows-latest" rolled to a
     # newer image whose Visual Studio 18 isn't recognized by node-gyp, which
     # broke the native better-sqlite3 build during npm install.
     runs-on: windows-2022
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,28 +52,101 @@ jobs:
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Build Windows installer + portable exe
-        run: npm run dist
+        run: npm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List build output
         shell: bash
-        run: ls -la release/ || dir release
+        run: ls -la release/
 
-      - name: Upload build artifacts
+      - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: MMW-Windows-${{ steps.ver.outputs.version }}
+          name: windows
           path: |
             release/*.exe
+            release/latest.yml
+            release/*.blockmap
           if-no-files-found: error
           retention-days: 30
+
+  # ------------------------------------------------------------------ macOS --
+  macos:
+    # macos-latest is Apple Silicon. Both architectures are built from it:
+    # Xcode's clang cross-compiles the x64 slice, and @electron/rebuild builds
+    # better-sqlite3 for each target arch in turn.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      # Run the gate here too. It exercises the data layer and the whole
+      # renderer, so it is also the only thing standing between a macOS-specific
+      # path bug and a shipped DMG.
+      - name: Run UI harness
+        run: node scripts/ui-harness.mjs
+
+      - name: Build macOS DMG (arm64 + x64)
+        run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no Apple Developer ID for this project. Without this,
+          # electron-builder searches the runner's keychain, finds nothing, and
+          # the failure is reported as a signing error rather than as the
+          # deliberate choice it is. The app is still ad-hoc signed, which
+          # Apple Silicon requires in order to launch it at all.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: List build output
+        run: ls -la release/
+
+      # Only the DMGs. The zip and latest-mac.yml exist for Squirrel.Mac
+      # auto-update, which an ad-hoc-signed build cannot use — see
+      # src/main/autoupdate.js — so publishing them would put two more 80MB
+      # downloads on the release page that nothing ever reads.
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            release/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  # ----------------------------------------------------------------- Release --
+  # Separate job so ONE release carries both platforms. Two build jobs each
+  # publishing to the same tag would race, and a half-published release (Windows
+  # up, macOS still building) is worse than none. `needs` both means a failure
+  # on either platform publishes nothing.
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # Both artifacts flattened into one directory, so the glob below is
+          # a single list rather than per-platform paths.
+          merge-multiple: true
+
+      - name: List everything being published
+        run: ls -la dist/
 
       - name: Publish downloadable release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.ver.outputs.version }}-build.${{ github.run_number }}
-          name: Mission Minded v${{ steps.ver.outputs.version }} (build ${{ github.run_number }})
+          tag_name: v${{ needs.windows.outputs.version }}-build.${{ github.run_number }}
+          name: Mission Minded v${{ needs.windows.outputs.version }} (build ${{ github.run_number }})
           # NOT a prerelease. GitHub excludes prereleases from /releases/latest,
           # and electron-updater (allowPrerelease defaults to false) asks for
           # exactly that endpoint — so flagging these as prereleases meant every
@@ -78,37 +158,62 @@ jobs:
           prerelease: false
           make_latest: true
           body: |
-            ## Mission Minded Worldwide — Free Clinic Patient Records (v${{ steps.ver.outputs.version }})
+            ## Mission Minded Worldwide — Free Clinic Patient Records (v${{ needs.windows.outputs.version }})
 
             Offline-first patient records for MMW's free dental, medical and vision
-            clinics. Windows desktop app. **Download the installer once — it
-            auto-updates from here on.**
+            clinics. **Download once — Windows auto-updates from here on.**
 
-            > **Early preview (v${{ steps.ver.outputs.version }}).** Carried over from the Caring
+            > **Early preview (v${{ needs.windows.outputs.version }}).** Carried over from the Caring
             > Hands codebase and rebranded to MMW. It has not yet been used in a live
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### New in this build
-            - **The app now comes with an administrator already set up.** A
-              fresh install signs in with **`admin` / `admin`** — no setup
-              screen to walk through first. Add your team under
-              **Admin → Staff & roles**.
-            - **Change that password before the clinic sees real patients.** It
-              is the same on every copy and it is published here, so anyone who
-              reaches the laptop can open every patient record on it. The app
-              names it on the sign-in screen and carries a warning across every
-              screen until it is changed — both disappear the moment you change
-              it.
-            - **Joining a second laptop** to a clinic that already exists is now
-              reached from the bottom of the sign-in screen, since setup no
-              longer opens on its own.
+            ### Fixed in this build — admin / admin now works on an existing install
+            v0.0.5 only created the `admin` account on a machine with an **empty**
+            database, so anyone updating over an existing install never got it and
+            signing in with `admin` / `admin` failed. This build creates it once on
+            those machines too, without disturbing the account that is already
+            there. If an account called `admin` exists on some other password, it
+            is reset to `admin` this once.
 
-            ### From v0.0.4
-            - Modernised across every screen, a patient journey stepper on the
-              dashboard, and the printed forms mapped onto the app: the
-              Restorative and Services blocks on the dentist view, and the
-              HIV / Hepatitis deemed-consent answer recorded at registration.
+            ### Signing in
+            Every install now comes with an administrator already set up:
+
+            | Username | Password |
+            | --- | --- |
+            | `admin` | `admin` |
+
+            **Change that password before the clinic sees real patients.** It is
+            the same on every copy and it is written here, so anyone who reaches
+            the laptop can open every patient record on it. The app says so on the
+            sign-in screen and on a banner across every screen until you change it
+            — both disappear once you do. Change it under **Admin → Staff & roles**.
+
+            ### Downloads
+
+            **Windows**
+            - **MMW-Setup-${{ needs.windows.outputs.version }}.exe** — installer (recommended; required for auto-update).
+            - **MMW-Portable-${{ needs.windows.outputs.version }}.exe** — portable, runs without installing.
+
+            **macOS** — pick the one that matches your Mac ( → About This Mac):
+            - **MMW-${{ needs.windows.outputs.version }}-arm64.dmg** — Apple Silicon (M1/M2/M3/M4).
+            - **MMW-${{ needs.windows.outputs.version }}-x64.dmg** — Intel.
+
+            ### Opening the app the first time
+            Neither build is code-signed, so both operating systems will warn you.
+
+            **Windows** — "Windows protected your PC" → **More info → Run anyway**.
+
+            **macOS** — open the DMG, drag **Mission Minded** to Applications, then
+            launch it from Applications. macOS will say it *"cannot be opened
+            because Apple cannot check it for malicious software"*. Click **Done**,
+            then go to  **→ System Settings → Privacy & Security**, scroll down,
+            and press **Open Anyway** beside the Mission Minded message. Confirm
+            once more and it opens normally from then on.
+
+            > macOS auto-update is **not** available — updating a Mac app requires
+            > an Apple-signed build. Mac users download each new version from this
+            > page. Windows continues to update itself in place.
 
             ### From v0.0.3 — security
             Builds up to and including v0.0.2 shipped a hard-coded sync server and
@@ -116,19 +221,12 @@ jobs:
             connected to it at startup. v0.0.3 removed it, refuses that endpoint,
             and erases any records an affected machine is holding on first launch.
             **Do not keep using v0.0.1 or v0.0.2.**
-
-            ### Downloads
-            - **MMW-Setup-${{ steps.ver.outputs.version }}.exe** — installer (recommended; required for auto-update).
-            - **MMW-Portable-${{ steps.ver.outputs.version }}.exe** — portable, runs without installing (no auto-update).
-
-            Windows may warn that the publisher is unknown — the build is not code-signed.
-            Choose **More info → Run anyway**.
-          # Without this the release is created with a body and no downloads.
-          # latest.yml and the blockmap are what electron-updater reads to offer
+          # latest.yml and the blockmaps are what electron-updater reads to offer
           # an in-app update, so they ship alongside the installers.
           files: |
-            release/*.exe
-            release/latest.yml
-            release/*.blockmap
+            dist/*.exe
+            dist/*.dmg
+            dist/latest.yml
+            dist/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
