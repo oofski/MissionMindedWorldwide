@@ -46,6 +46,19 @@ function migrate() {
       created_at   TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS exit_surveys (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id        INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      version           TEXT NOT NULL,
+      language          TEXT,
+      answers           TEXT NOT NULL DEFAULT '{}',
+      declined          INTEGER NOT NULL DEFAULT 0,
+      completed_at      TEXT,
+      completed_by      INTEGER REFERENCES users(id),
+      completed_by_name TEXT,
+      created_at        TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS events (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       name         TEXT NOT NULL,
@@ -214,7 +227,7 @@ function migrate() {
   // columns let accountability survive across devices without syncing accounts.
   // v1.4.4: staff accounts sync too, so a team created on one laptop appears on
   // every laptop. The users table gets the same sync bookkeeping columns.
-  for (const tbl of ['events', 'patients', 'triage', 'treatments', 'consents', 'xrays', 'users']) {
+  for (const tbl of ['events', 'patients', 'triage', 'treatments', 'consents', 'xrays', 'users', 'exit_surveys']) {
     addColumn(tbl, 'uid', 'TEXT');
     addColumn(tbl, 'updated_at', 'TEXT');
     addColumn(tbl, 'synced_rev', 'TEXT');   // sig last confirmed synced (== sig means clean)
@@ -342,7 +355,7 @@ function resetClinicData() {
       // Sync bookkeeping first, so nothing here can resurrect a record later.
       // A leftover tombstone also blocks a legitimate re-import of the same uid.
       for (const t of ['undeletes', 'tombstones', 'event_reports',
-                       'xrays', 'consents', 'treatments', 'triage', 'patients',
+                       'xrays', 'consents', 'treatments', 'triage', 'exit_surveys', 'patients',
                        'audit_log',   // detail carries patient names
                        'users', 'events']) {
         db.prepare(`DELETE FROM ${t}`).run();
@@ -1225,7 +1238,7 @@ function tombstonePatient(id) {
     `INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at)
      VALUES (?,?,?,?,NULL,?) ON CONFLICT(uid) DO UPDATE SET synced_rev = NULL, updated_at = excluded.updated_at`
   );
-  for (const [table, entity] of [['triage', 'triage'], ['treatments', 'treatment'], ['consents', 'consent'], ['xrays', 'xray']]) {
+  for (const [table, entity] of [['triage', 'triage'], ['treatments', 'treatment'], ['consents', 'consent'], ['xrays', 'xray'], ['exit_surveys', 'survey']]) {
     for (const c of db.prepare(`SELECT uid FROM ${table} WHERE patient_id = ?`).all(id)) {
       if (c.uid) tomb.run(c.uid, entity, evUid, stampNow(), now());
     }
@@ -1286,6 +1299,8 @@ function getPatient(id) {
       }
     : null;
   p.xrays = db.prepare('SELECT id, station, note, created_at FROM xrays WHERE patient_id = ?').all(id);
+  const sv = db.prepare('SELECT * FROM exit_surveys WHERE patient_id = ?').get(id);
+  p.exit_survey = sv ? { ...sv, answers: safeJson(sv.answers, {}), declined: !!sv.declined } : null;
   p.event = db.prepare('SELECT * FROM events WHERE id = ?').get(p.event_id);
   // v1.0.6 accountability: resolve the staff name for each recorded action.
   // v1.1.0: prefer the denormalized *_by_name column (set by cloud sync from
@@ -1673,6 +1688,130 @@ function searchAllPatients(term) {
 /*  Triage                                                             */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Exit survey                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Save the patient's exit survey. One per patient, like triage and treatment,
+ * so answering it twice corrects the record rather than double-counting the
+ * household in a grant return.
+ *
+ * `declined` is a first-class answer, not an absence. A patient may refuse — it
+ * is a voluntary survey attached to free care — and check-out must be able to
+ * say "asked, declined" rather than leaving a row that looks like the question
+ * was never put. Without it the only way past a required survey would be to
+ * invent answers, which is worse than no data.
+ *
+ * Answers are stored as a blob of closed choices: {questionKey: value} for a
+ * single-choice question, {questionKey: [values]} for select-all-that-apply.
+ * Nothing free-text is accepted, so the survey carries no sentence a patient
+ * could be identified by — which is what lets the aggregate live on past the
+ * clinic's own records.
+ */
+function saveExitSurvey(actor, patientId, data) {
+  const pt = db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId);
+  if (!pt) throw new Error('Patient not found.');
+  const d = data || {};
+  const declined = d.declined ? 1 : 0;
+  // Keep only keys the survey actually defines, and only values those questions
+  // offer. A renamed question or a hand-edited payload would otherwise put
+  // answers in the blob that no report can ever explain.
+  const answers = declined ? {} : sanitizeSurveyAnswers(d.answers);
+  const version = String(d.version || 'mmw-exit-v1');
+  const language = d.language ? String(d.language) : null;
+  const existing = db.prepare('SELECT id FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  if (existing) {
+    db.prepare(
+      `UPDATE exit_surveys SET version=?, language=?, answers=?, declined=?,
+         completed_at=?, completed_by=?, completed_by_name=? WHERE patient_id=?`
+    ).run(version, language, JSON.stringify(answers), declined, now(),
+          actor ? actor.id : null, actor ? actor.full_name : null, patientId);
+  } else {
+    db.prepare(
+      `INSERT INTO exit_surveys (patient_id, version, language, answers, declined,
+         completed_at, completed_by, completed_by_name, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`
+    ).run(patientId, version, language, JSON.stringify(answers), declined, now(),
+          actor ? actor.id : null, actor ? actor.full_name : null, now());
+  }
+  // No dirty-marking here on purpose: sync decides dirtiness by hashing a row's
+  // syncable columns (see collectSyncRows), so a plain write is enough.
+  audit(actor, 'survey.save', 'patient', patientId,
+        declined ? 'Exit survey declined by patient' : `Exit survey completed (${Object.keys(answers).length} answered)`);
+  return getExitSurvey(patientId);
+}
+
+function getExitSurvey(patientId) {
+  const r = db.prepare('SELECT * FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  return r ? { ...r, answers: safeJson(r.answers, {}), declined: !!r.declined } : null;
+}
+
+/**
+ * The questions and the values each one allows.
+ *
+ * Deliberately duplicated from the renderer's schema rather than imported: the
+ * renderer is ES modules and this is CommonJS, and a survey answer that reaches
+ * the database has to be validated on this side regardless of what the form
+ * sent. The harness asserts the two lists agree, so they cannot drift.
+ */
+const SURVEY_SCHEMA = {
+  first_time: ['yes', 'no', 'not_sure'],
+  heard_about: ['friend_family', 'church', 'social_media', 'flyer', 'community_org', 'healthcare_provider', 'previous_mmw'],
+  household_size: ['1', '2', '3', '4', '5', '6_or_more'],
+  children_under_18: ['none', '1', '2', '3', '4_or_more', 'pna'],
+  disability: ['yes', 'no', 'unsure', 'pna'],
+  living_situation: ['own', 'rent', 'with_family', 'temporary', 'shelter', 'homeless', 'pna'],
+  education: ['none', 'elementary', 'some_high_school', 'high_school', 'some_college', 'associate', 'bachelor', 'graduate', 'pna'],
+  household_in_school: ['yes', 'no', 'pna'],
+  employment: ['full_time', 'part_time', 'self_employed', 'unable_to_work', 'unemployed_looking', 'unemployed_not_looking', 'retired', 'student', 'homemaker', 'pna'],
+  work_type: ['healthcare', 'education', 'construction', 'retail', 'food_service', 'transportation', 'agriculture', 'office', 'pna'],
+  income: ['0_15k', '15k_25k', '25k_35k', '35k_50k', '50k_75k', '75k_100k', 'over_100k', 'pna'],
+  assistance: ['snap', 'medicaid', 'ssi', 'ssdi', 'housing', 'wic', 'other_public', 'none', 'pna'],
+  health_insurance: ['yes', 'no', 'unsure', 'pna'],
+  health_insurance_type: ['employer', 'medicaid', 'medicare', 'private', 'military_va', 'pna', 'na'],
+  dental_insurance: ['yes', 'no', 'unsure', 'pna'],
+  vision_insurance: ['yes', 'no', 'unsure', 'pna'],
+  last_checkup: ['under_6m', '6_12m', '1_2y', 'over_2y', 'never', 'pna'],
+  last_eye_exam: ['under_6m', '6_12m', '1_2y', 'over_2y', 'never', 'pna'],
+  delayed_care_cost: ['yes', 'no', 'pna'],
+  access_barriers: ['cost', 'no_insurance', 'high_deductible', 'transportation', 'no_providers', 'wait_times', 'work_schedule', 'childcare', 'language', 'no_new_patients', 'none', 'pna'],
+  unmet_need: ['yes', 'no', 'unsure', 'pna'],
+  food_insecurity: ['yes', 'no', 'pna'],
+  rate_care: ['1', '2', '3', '4', '5'],
+  rate_staff: ['1', '2', '3', '4', '5'],
+  rate_wait: ['1', '2', '3', '4', '5'],
+  comfortable_questions: ['yes', 'no', 'somewhat'],
+  explained_care: ['yes', 'no', 'somewhat', 'na'],
+  recommend: ['1', '2', '3', '4', '5'],
+  health_concern_daily: ['yes', 'no', 'unsure', 'pna'],
+  will_improve_health: ['yes', 'no', 'unsure'],
+  reduced_financial_burden: ['yes', 'no', 'unsure', 'pna'],
+  available_elsewhere: ['yes', 'no', 'unsure', 'pna'],
+  future_needs: ['dental', 'medical', 'vision', 'prescriptions', 'mental_health', 'screenings', 'health_education', 'none'],
+  future_interest: ['yes', 'no', 'maybe'],
+};
+// Select-all-that-apply questions, which store an array rather than a string.
+const SURVEY_MULTI = new Set(['assistance', 'access_barriers', 'future_needs']);
+
+function sanitizeSurveyAnswers(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const [key, allowed] of Object.entries(SURVEY_SCHEMA)) {
+    const v = src[key];
+    if (v == null || v === '') continue;
+    if (SURVEY_MULTI.has(key)) {
+      const picked = (Array.isArray(v) ? v : [v]).map(String).filter((x) => allowed.includes(x));
+      // De-duplicated: a double-tap must not count a household's SNAP twice.
+      const uniq = [...new Set(picked)];
+      if (uniq.length) out[key] = uniq;
+    } else if (allowed.includes(String(v))) {
+      out[key] = String(v);
+    }
+  }
+  return out;
+}
+
 function saveTriage(actor, patientId, data) {
   const existing = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
@@ -1917,6 +2056,7 @@ function exportClinicBundle(eventId) {
     treatments: kids('treatments'),
     consents: kids('consents'),
     xrays: kids('xrays'),
+    exit_surveys: kids('exit_surveys'),
   };
 }
 
@@ -2007,6 +2147,7 @@ function importClinicBundle(actor, bundle) {
     restoreOnePerPatient('treatments', SYNC_COLS.treatment);
     restoreMany('consents', SYNC_COLS.consent, 'consents');
     restoreMany('xrays', SYNC_COLS.xray, 'xrays');
+    restoreOnePerPatient('exit_surveys', SYNC_COLS.survey, 'exit_surveys');
     return eventId;
   });
   const eventId = tx();
@@ -2018,7 +2159,7 @@ function importClinicBundle(actor, bundle) {
   // deleted the whole clinic again — the restore silently undid itself.
   if (b.event && b.event.uid) uids.push(b.event.uid);
   for (const p of (b.patients || [])) if (p.uid) uids.push(p.uid);
-  for (const t of ['triage', 'treatments', 'consents', 'xrays']) {
+  for (const t of ['triage', 'treatments', 'consents', 'xrays', 'exit_surveys']) {
     for (const r of (b[t] || [])) if (r.uid) uids.push(r.uid);
   }
   if (uids.length) {
@@ -2061,7 +2202,7 @@ const didCleaning = (t) => {
 // Through the clinic and gone: treatment finished, or checked out and left.
 const isFinishedStatus = (s) => s === 'completed' || s === 'dismissed';
 
-function summarize(event, patients, treatmentOf, xrayCountOf, triageOf) {
+function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf) {
   const bump = (o, k) => { const key = k || 'Not recorded'; o[key] = (o[key] || 0) + 1; };
   const ageBand = (a) => (a == null ? 'Not recorded' : a < 18 ? 'Under 18' : a < 35 ? '18–34' : a < 55 ? '35–54' : '55+');
   // Age AS OF THE VISIT. Using today's date would move boundary-crossers every
@@ -2109,7 +2250,27 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf) {
     txDay.treatments += f + x + c;
     if (finished) txDay.completed++;
   }
+  // The exit survey, as counts only. Every answer is a closed choice, so a
+  // tally of them carries nothing that belongs to a person — which is the whole
+  // point: these figures are what a grant return is written from, and they have
+  // to survive the clinic purging its patient records.
+  const survey = { responses: 0, declined: 0, not_asked: 0, answers: {} };
+  for (const p of patients) {
+    const sv = surveyOf ? surveyOf(p) : null;
+    if (!sv) { survey.not_asked++; continue; }
+    if (sv.declined) { survey.declined++; continue; }
+    survey.responses++;
+    const ans = typeof sv.answers === 'string' ? safeJson(sv.answers, {}) : (sv.answers || {});
+    for (const [q, v] of Object.entries(ans)) {
+      const bucket = (survey.answers[q] = survey.answers[q] || {});
+      // A select-all question contributes once per option chosen, so its
+      // percentages are of respondents, not of ticks.
+      for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (bucket[one] || 0) + 1;
+    }
+  }
+
   return {
+    survey,
     event_name: event ? event.name : null,
     event_location: event ? event.location : null,
     event_start: event ? event.start_date : null,
@@ -2136,6 +2297,7 @@ function buildEventSummary(eventId) {
     (p) => db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT COUNT(*) AS n FROM xrays WHERE patient_id = ?').get(p.id).n,
     (p) => db.prepare('SELECT flags FROM triage WHERE patient_id = ?').get(p.id),
+    (p) => db.prepare('SELECT answers, declined FROM exit_surveys WHERE patient_id = ?').get(p.id),
   );
 }
 
@@ -2147,9 +2309,11 @@ function mergeSummaries(list) {
     'pre_signups', 'pre_checked_out', 'onsite_signups', 'onsite_checked_out',
     'extractions', 'fillings', 'cleanings', 'xrays'];
   const MAPS = ['by_gender', 'by_age', 'by_language', 'by_city', 'by_day', 'by_status', 'visit_types', 'conditions'];
+  const SURVEY_NUM = ['responses', 'declined', 'not_asked'];
   const out = { generated_at: now() };
   NUM.forEach((k) => { out[k] = 0; });
   MAPS.forEach((k) => { out[k] = {}; });
+  out.survey = { responses: 0, declined: 0, not_asked: 0, answers: {} };
   const days = {};
   // Totals kept by an older version hold only the headline counts. Coercing
   // their missing fields to 0 is right for the sum, but the page must be able to
@@ -2163,6 +2327,16 @@ function mergeSummaries(list) {
     MAPS.forEach((k) => {
       Object.entries(s[k] || {}).forEach(([kk, v]) => { out[k][kk] = (out[k][kk] || 0) + (Number(v) || 0); });
     });
+    // Survey tallies add like any other breakdown, one level deeper: question
+    // -> option -> count. A report kept before the survey existed simply has
+    // none, which contributes zero rather than breaking the merge.
+    if (s.survey) {
+      SURVEY_NUM.forEach((k) => { out.survey[k] += Number(s.survey[k]) || 0; });
+      Object.entries(s.survey.answers || {}).forEach(([q, opts]) => {
+        const bucket = (out.survey.answers[q] = out.survey.answers[q] || {});
+        Object.entries(opts || {}).forEach(([o, v]) => { bucket[o] = (bucket[o] || 0) + (Number(v) || 0); });
+      });
+    }
     (s.days || []).forEach((d) => {
       const row = (days[d.date] = days[d.date] || { date: d.date, seen: 0, completed: 0, fillings: 0, extractions: 0, cleanings: 0, treatments: 0 });
       ['seen', 'completed', 'fillings', 'extractions', 'cleanings', 'treatments'].forEach((k) => { row[k] += Number(d[k]) || 0; });
@@ -2273,7 +2447,8 @@ function rebuildSummaryFromBundle(actor, bundle) {
   const xrayCount = {};
   (b.xrays || []).forEach((x) => { xrayCount[x.patient_id] = (xrayCount[x.patient_id] || 0) + 1; });
   const patients = b.patients.map((p) => rowToPatient({ ...p }));
-  const summary = summarize(b.event, patients, (p) => txBy.get(p.id), (p) => xrayCount[p.id] || 0, (p) => triBy.get(p.id));
+  const svBy = new Map((b.exit_surveys || []).map((r) => [r.patient_id, r]));
+  const summary = summarize(b.event, patients, (p) => txBy.get(p.id), (p) => xrayCount[p.id] || 0, (p) => triBy.get(p.id), (p) => svBy.get(p.id));
 
   // Attach to the matching local event if there is one; otherwise recreate the
   // event shell (name/date only) so the report has somewhere to live.
@@ -2323,7 +2498,7 @@ function purgeEventPatients(actor, eventId) {
   // each row separately — so every child needs its own tombstone. Miss them and
   // the consent signatures and x-ray images (the most identifying data in the
   // system) stay in the cloud forever and are re-served to every station.
-  const CHILDREN = [['triage', 'triage'], ['treatments', 'treatment'], ['consents', 'consent'], ['xrays', 'xray']];
+  const CHILDREN = [['triage', 'triage'], ['treatments', 'treatment'], ['consents', 'consent'], ['xrays', 'xray'], ['exit_surveys', 'survey']];
   const tx = db.transaction(() => {
     for (const p of patients) {
       for (const [table, entity] of CHILDREN) {
@@ -2388,10 +2563,10 @@ function exportEventJson(eventId) {
 /*  fields are hashed) so no write path had to change.                 */
 /* ================================================================== */
 
-const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays' };
+const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys' };
 // 'user' is applied right after 'event' (a scoped staff account is parented to an
 // event, exactly like a patient) and before patients.
-const APPLY_ORDER = ['event', 'user', 'report', 'patient', 'triage', 'treatment', 'consent', 'xray'];
+const APPLY_ORDER = ['event', 'user', 'report', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
 // Syncable payload columns per entity (fixed order -> stable content hash).
 const SYNC_COLS = {
   event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at'],
@@ -2406,6 +2581,9 @@ const SYNC_COLS = {
   // v1.6.0: the de-identified totals a finished clinic leaves behind. Event-
   // scoped like a patient, so it survives on the server after the PHI is gone.
   report: ['summary', 'patients_seen', 'finished_at', 'finished_by_name', 'created_at'],
+  // The exit survey. Closed-choice answers only, so the blob carries no free
+  // text a patient could be identified by.
+  survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at'],
 };
 // Denormalized name field -> the local user-id column it is resolved from.
 const NAME_SOURCE = {
@@ -2773,6 +2951,7 @@ function close() {
 module.exports = {
   init, close,
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
+  saveExitSurvey, getExitSurvey, SURVEY_SCHEMA, SURVEY_MULTI,
   needsSetup, createFirstAdmin, defaultAdminActive,
   DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,

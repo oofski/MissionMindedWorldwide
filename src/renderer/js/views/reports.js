@@ -1,5 +1,6 @@
 import { el, clear, toast } from '../dom.js';
 import { conditions } from '../i18n.js';
+import { SECTIONS, QUESTION_BY_KEY } from '../../i18n/exitSurvey.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
@@ -33,6 +34,70 @@ function relabel(obj, fn) {
   Object.entries(obj || {}).forEach(([k, v]) => { const label = fn(k); out[label] = (out[label] || 0) + v; });
   return out;
 }
+/**
+ * The exit survey, as the aggregate a grant return is written from.
+ *
+ * Counts and percentages only, in the survey's own order, with every question
+ * shown — including ones nobody answered, because "0 of 41 told us they are
+ * uninsured" and "we did not ask" are different claims and a funder is entitled
+ * to know which one it is looking at.
+ *
+ * Percentages are of people who ANSWERED THAT QUESTION, not of everyone seen:
+ * questions are individually skippable, so a shared denominator would quietly
+ * understate every one of them.
+ */
+function surveyCard(sv) {
+  const s = sv || { responses: 0, declined: 0, not_asked: 0, answers: {} };
+  const asked = s.responses + s.declined;
+  if (!asked) {
+    return el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
+      el('p', { class: 'muted' }, ['No exit surveys yet. They are taken at check-out — the desk is prompted before a patient can be dismissed.']),
+    ]);
+  }
+
+  const answersFor = (key) => s.answers[key] || {};
+  const questionBlock = (q) => {
+    const counts = answersFor(q.key);
+    // A select-all question's denominator is the people who answered IT, which
+    // is not the sum of its ticks — one person can choose three barriers.
+    const n = q.type === 'multi'
+      ? Math.max(...[0, ...Object.values(counts)])
+      : Object.values(counts).reduce((a, b) => a + b, 0);
+    const answered = q.type === 'multi'
+      ? Object.values(counts).reduce((a, b) => Math.max(a, b), 0)
+      : n;
+    const denom = answered || 1;
+    return el('div', { class: 'survey-report-q' }, [
+      el('strong', {}, [q.en]),
+      answered === 0
+        ? el('p', { class: 'muted small', style: 'margin:0' }, ['Not answered by anyone who took the survey.'])
+        : el('div', {}, q.options.map((o) => {
+            const c = counts[o.value] || 0;
+            const pct = Math.round((c / denom) * 100);
+            return el('div', { class: 'survey-bar-row' }, [
+              el('span', {}, [o.en]),
+              el('div', { class: 'survey-bar-track' }, [el('span', { style: `width:${pct}%` })]),
+              el('span', { class: 'survey-bar-n' }, [`${c} · ${pct}%`]),
+            ]);
+          })),
+    ]);
+  };
+
+  return el('div', { class: 'card' }, [
+    el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
+    el('p', { class: 'awareness' }, [
+      el('strong', {}, [String(s.responses)]),
+      ` completed · ${s.declined} declined · ${s.not_asked} not asked`,
+      s.responses ? ` — percentages below are of those who answered each question.` : '',
+    ]),
+    ...SECTIONS.map((sec) => el('details', { class: 'collapse', style: 'margin-top:10px' }, [
+      el('summary', {}, [el('span', {}, [sec.en]), el('span', { class: 'subtle small' }, ['Show'])]),
+      el('div', { class: 'collapse-body' }, sec.questions.map((q) => questionBlock(QUESTION_BY_KEY[q.key] || q))),
+    ])),
+  ]);
+}
+
 function conditionLabels(obj) {
   const map = Object.fromEntries(conditions().map((c) => [c.key, c.label]));
   return relabel(obj, (k) => map[k] || String(k).replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()));
@@ -161,6 +226,9 @@ export function renderReports(ctx) {
           el('p', { class: 'awareness', style: 'margin-top:12px' }, [el('strong', {}, [String(flagged)]), ` of ${total} patient(s) flagged with a condition needing awareness.`]),
         ]),
       ]),
+
+      // ---- Exit survey: what the grant return is written from ----
+      surveyCard(sm.survey),
 
       // ---- Email visit summaries (patients who left an email) ----
       patients.length ? emailCard(patients) : null,

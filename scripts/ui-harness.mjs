@@ -68,6 +68,7 @@ const PERMS = {
   'vitalsSave': ['admin', 'doctor', 'triage', 'emt'], 'patientsRoute': ['admin', 'doctor', 'triage', 'emt'], 'consentSetTeeth': ['admin', 'doctor'], 'consentAdd': ['admin', 'doctor'],
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
+  'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
   'xrayAdd': ['admin', 'doctor', 'triage'], 'xraySetTooth': ['admin', 'doctor'], 'xrayGet': ['admin', 'doctor', 'triage', 'hygienist'], 'xrayList': ['admin', 'doctor', 'triage', 'hygienist'], 'xrayDelete': ['admin', 'doctor', 'triage'],
   'xrayFolderConfig': ['admin', 'doctor'], 'xrayFolderChoose': ['admin', 'doctor'], 'xrayFolderLock': ['admin', 'doctor'], 'xrayFolderDelete': ['admin', 'doctor'], 'xrayDeleteFile': ['admin', 'doctor'],
   'pdfPreview': ['admin', 'doctor'], 'pdfGenerate': ['admin', 'doctor'], 'pdfPrint': ['admin', 'doctor'],
@@ -114,6 +115,7 @@ window.api = {
   patientsIncomplete: okWrap(() => db.listIncompletePatients(), 'patientsIncomplete'),
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
   triageSave: okWrap(({ patientId, data }) => db.saveTriage(currentUser, patientId, data), 'triageSave'),
+  surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data), 'surveySave'),
   treatmentSave: okWrap(({ patientId, data, finalize }) => db.saveTreatment(currentUser, patientId, data, finalize), 'treatmentSave'),
   vitalsSave: okWrap(({ patientId, data }) => db.saveVitals(currentUser, patientId, data), 'vitalsSave'),
   patientsRoute: okWrap(({ patientId, route }) => db.routePatient(currentUser, patientId, route), 'patientsRoute'),
@@ -1405,15 +1407,33 @@ async function main() {
     for (let i = 0; i < 6; i++) await tick();
 
     const tickBtns = Array.from(co.querySelectorAll('.tick-btn'));
-    log(tickBtns.length >= 2, 'v1.6.1: check-out lists a one-tap "Check out" tick for each ready patient');
-    const alphaRow = Array.from(co.querySelectorAll('tr')).find((r) => /Alpha/.test(r.textContent));
+    log(tickBtns.length >= 2, 'v1.6.1: check-out lists a one-tap tick for each ready patient');
+    let alphaRow = Array.from(co.querySelectorAll('tr')).find((r) => /Alpha/.test(r.textContent));
     log(!!alphaRow && !!alphaRow.querySelector('.tick-btn'), 'v1.6.1: the tick sits on the patient\'s own row');
 
-    // Tick -> confirm -> the patient is checked out, without opening the record.
+    // v0.0.8: the exit survey comes first. With none recorded the tick opens the
+    // survey rather than the dismiss confirmation — the desk's next action is the
+    // same either way, and a disabled button with no explanation is how a
+    // required step gets worked around instead of used.
     alphaRow.querySelector('.tick-btn').click();
-    await tick();
+    for (let i = 0; i < 4; i++) await tick();
+    const svOverlay = document.querySelector('.survey-overlay');
+    log(!!svOverlay, 'MMW survey: ticking a patient who has not been surveyed opens the survey first');
+    log(!!svOverlay && /Prefer not to answer|rather not/i.test(svOverlay.textContent),
+      'MMW survey: the patient can decline from inside the survey');
+    // Decline it, which is a recorded answer, and the flow continues to dismissal.
+    const declineBtn = Array.from(svOverlay.querySelectorAll('button')).find((b) => /rather not/i.test(b.textContent));
+    declineBtn.click();
+    for (let i = 0; i < 10; i++) await tick();
+    log(db.getExitSurvey(a1.id) && db.getExitSurvey(a1.id).declined === true,
+      'MMW survey: declining from the tick flow is recorded against the patient');
+
+    // Now that the survey is answered, the tick asks for the dismiss confirmation.
+    alphaRow = Array.from(co.querySelectorAll('tr')).find((r) => /Alpha/.test(r.textContent));
+    if (alphaRow && alphaRow.querySelector('.tick-btn')) alphaRow.querySelector('.tick-btn').click();
+    for (let i = 0; i < 4; i++) await tick();
     const confirmBtn = Array.from(document.querySelectorAll('.modal-card button')).find((b) => /Verify & dismiss/i.test(b.textContent));
-    log(!!confirmBtn, 'v1.6.1: ticking asks for confirmation before checking someone out');
+    log(!!confirmBtn, 'v1.6.1: ticking a surveyed patient asks for confirmation before checking them out');
     confirmBtn.click();
     for (let i = 0; i < 8; i++) await tick();
     log(db.listPatients({}).find((p) => p.id === a1.id).status === 'dismissed',
@@ -2148,6 +2168,94 @@ async function main() {
     log(r.setupDone, 'MMW setup: setup does not run again once an account exists');
     log(r.uid !== '00000000-0000-4000-8000-000000000002',
       'MMW setup: an administrator created by hand does not reuse the shared admin sync identity');
+  }
+
+  /* ================= MMW v0.0.8 — the patient exit survey ====================
+     Taken at check-out, for grant reporting. The things that matter: that it
+     stores only answers the survey actually offers, that declining is a real
+     answer rather than an absence, that the aggregate is counts-only, and that
+     the two copies of the question schema (renderer form, data-layer
+     validation) cannot drift apart. */
+  {
+    const sp = await import('../src/renderer/i18n/exitSurvey.js');
+
+    // The two schemas are written out separately — one ES module for the form,
+    // one CommonJS object for validation — because the renderer and the data
+    // layer cannot import each other. If they ever disagree, answers the form
+    // collects get silently dropped on save, which is the worst possible
+    // failure: the clinic sees a completed survey and the report sees nothing.
+    const uiKeys = sp.QUESTIONS.map((q) => q.key).sort();
+    const dbKeys = Object.keys(db.SURVEY_SCHEMA).sort();
+    log(JSON.stringify(uiKeys) === JSON.stringify(dbKeys),
+      'MMW survey: the form and the data layer ask exactly the same questions');
+    let optsMatch = true, multiMatch = true;
+    for (const q of sp.QUESTIONS) {
+      const ui = q.options.map((o) => o.value).sort();
+      const dbv = (db.SURVEY_SCHEMA[q.key] || []).slice().sort();
+      if (JSON.stringify(ui) !== JSON.stringify(dbv)) { optsMatch = false; log(false, `  schema drift on ${q.key}: ui=${ui} db=${dbv}`); }
+      if ((q.type === 'multi') !== db.SURVEY_MULTI.has(q.key)) multiMatch = false;
+    }
+    log(optsMatch, 'MMW survey: every question offers the same options on both sides');
+    log(multiMatch, 'MMW survey: select-all-that-apply questions agree on both sides');
+    log(sp.QUESTIONS.every((q) => q.en && q.es) && sp.QUESTIONS.every((q) => q.options.every((o) => o.en && o.es)),
+      'MMW survey: every question and option is translated into Spanish');
+    log(sp.SECTIONS.every((sec) => sec.en && sec.es), 'MMW survey: every section heading is translated');
+
+    currentUser = signInAdmin();
+    const sp1 = db.createPatient(currentUser, { first_name: 'Survey', last_name: 'One', language: 'es', demographics: {}, medical_history: {}, dental_history: {} });
+    const saved = db.saveExitSurvey(currentUser, sp1.id, {
+      version: sp.SURVEY_VERSION, language: 'es',
+      answers: {
+        first_time: 'yes', income: '0_15k', living_situation: 'homeless',
+        assistance: ['snap', 'wic', 'snap'],        // duplicated tick
+        access_barriers: ['cost', 'made_up_thing'], // one real, one junk
+        rate_care: '5',
+        employment: 'not_a_status',                 // value the question never offers
+        totally_unknown_question: 'x',
+      },
+    });
+    log(saved.answers.first_time === 'yes' && saved.answers.rate_care === '5',
+      'MMW survey: answers are stored against the patient');
+    log(JSON.stringify(saved.answers.assistance) === JSON.stringify(['snap', 'wic']),
+      'MMW survey: a repeated tick on a select-all question is only counted once');
+    log(JSON.stringify(saved.answers.access_barriers) === JSON.stringify(['cost']),
+      'MMW survey: an option the question does not offer is dropped');
+    log(saved.answers.employment === undefined && saved.answers.totally_unknown_question === undefined,
+      'MMW survey: unknown questions and impossible values never reach the database');
+    log(db.getPatient(sp1.id).exit_survey.answers.living_situation === 'homeless',
+      'MMW survey: the survey comes back on the patient record');
+
+    // Declining is an answer. Without it a required survey would force staff to
+    // invent responses for a patient who does not want to disclose their income.
+    const sp2 = db.createPatient(currentUser, { first_name: 'Survey', last_name: 'Two', demographics: {}, medical_history: {}, dental_history: {} });
+    const dec = db.saveExitSurvey(currentUser, sp2.id, { declined: true });
+    log(dec.declined === true && Object.keys(dec.answers).length === 0,
+      'MMW survey: declining records a refusal and stores no answers');
+
+    // Re-answering corrects rather than duplicating, or a household would be
+    // counted twice in a grant return.
+    db.saveExitSurvey(currentUser, sp1.id, { answers: { first_time: 'no' } });
+    const again = db.getExitSurvey(sp1.id);
+    log(again.answers.first_time === 'no' && again.answers.rate_care === undefined,
+      'MMW survey: answering again replaces the response rather than adding a second one');
+
+    // The aggregate: counts only, and nothing that belongs to a person.
+    const sum = db.buildEventSummary();
+    const blob = JSON.stringify(sum.survey);
+    log(sum.survey.responses >= 1 && sum.survey.declined >= 1,
+      'MMW survey: the summary counts completions and refusals separately');
+    log(!blob.includes('Survey') && !blob.includes('One') && !/patient_id/.test(blob),
+      'MMW survey: the aggregate carries counts only — no names, no patient ids');
+    log(Object.values(sum.survey.answers).every((o) => Object.values(o).every((n) => typeof n === 'number')),
+      'MMW survey: every aggregated value is a number');
+
+    // A clinic that has been through a purge must keep its survey totals, since
+    // that is the whole reason the figures are de-identified.
+    const merged = db.mergeSummaries([sum, sum]);
+    log(merged.survey.responses === sum.survey.responses * 2,
+      'MMW survey: merging two clinics adds their survey totals together');
+    log(merged.survey.answers.first_time.no === (sum.survey.answers.first_time.no || 0) * 2,
+      'MMW survey: merging adds option counts question by question');
   }
 
   /* ================= MMW v0.0.3 — severing the inherited cloud ===============

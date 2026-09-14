@@ -57,6 +57,10 @@ const PERMS = {
   'patients:audit': ['admin', 'doctor', 'checkout', 'hygienist'],
   'patients:records': ['admin', 'doctor'],
   'triage:save': ['admin', 'doctor', 'triage'],
+  // The exit survey is taken at the desk as the patient leaves, so the
+  // check-out role is the one that needs it. Admins and the clinical roles
+  // can too, since a patient sometimes answers it at the chair.
+  'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
   'patients:route': ['admin', 'doctor', 'triage', 'emt'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],
@@ -315,6 +319,7 @@ function register(getMainWindow) {
 
   /* ---- Triage & treatment ---- */
   handle('triage:save', ({ patientId, data }) => db.saveTriage(currentUser, patientId, data));
+  handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data));
   // finalize may be false, 'complete' (mark done, no lock), or 'lock'/true — pass
   // it through so v1.2.1's "complete without lock" mode reaches the data layer.
   handle('treatment:save', ({ patientId, data, finalize }) =>

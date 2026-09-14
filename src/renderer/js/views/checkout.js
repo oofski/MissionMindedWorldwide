@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
+import { openExitSurvey, surveyStatus } from '../components/exitSurvey.js';
 
 const fmtWhen = (ts) => { if (!ts) return '—'; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
 
@@ -29,19 +30,34 @@ export function renderCheckout(ctx, params = {}) {
 
   async function queue() {
     ctx.setDetail && ctx.setDetail(false);
+    // listPatients returns the queue rows; the survey lives on the full record,
+    // so fetch it for the ones that can still be checked out. Done together
+    // rather than one at a time, so a queue of thirty is one round trip's worth
+    // of waiting rather than thirty.
     const patients = await api.listPatients({});
     const ready = sortedByName(patients.filter((p) => p.status === 'completed'));
     const done = sortedByName(patients.filter((p) => p.status === 'dismissed'));
+    (await Promise.all(ready.map((p) => api.getPatient(p.id).catch(() => null))))
+      .forEach((full, i) => { if (full) ready[i].exit_survey = full.exit_survey; });
     const rowFor = (p) => {
       const isDone = p.status === 'dismissed';
       // One-tap tick: check a patient out straight from the list. Opening the
       // record to review first is still there, but a desk working through a
       // queue of finished patients shouldn't have to open each one.
+      // The one-tap tick opens the survey first when it has not been taken,
+      // rather than being disabled — the desk's next action is the same either
+      // way, and a dead button with no explanation is how this gets worked
+      // around instead of used.
+      const needsSurvey = !p.exit_survey;
       const tickBtn = el('button', {
-        class: 'btn btn--success btn--sm tick-btn',
-        title: `Check ${p.first_name} out`,
-        onClick: async (e) => { e.stopPropagation(); await dismiss(p); },
-      }, [icon('checkCircle', { size: 15 }), 'Check out']);
+        class: 'btn btn--sm tick-btn ' + (needsSurvey ? 'btn--primary' : 'btn--success'),
+        title: needsSurvey ? `Exit survey for ${p.first_name}` : `Check ${p.first_name} out`,
+        onClick: async (e) => {
+          e.stopPropagation();
+          if (needsSurvey) { const r = await takeSurvey(p); if (!r) return; }
+          await dismiss(p);
+        },
+      }, [icon(needsSurvey ? 'clipboard' : 'checkCircle', { size: 15 }), needsSurvey ? 'Survey' : 'Check out']);
       return el('tr', { class: isDone ? 'row--done' : '', style: 'cursor:pointer', onClick: () => detail(p.id) }, [
         el('td', {}, [
           isDone ? el('span', { class: 'tick-done', title: 'Checked out' }, [icon('checkCircle', { size: 16 })]) : null,
@@ -94,7 +110,14 @@ export function renderCheckout(ctx, params = {}) {
     // visit is complete (or even in progress), no forced sign-off/lock required.
     const locked = !!tx.locked;
     const visitComplete = p.status === 'completed' || locked;
-    const canDismiss = p.status !== 'dismissed' && p.status !== 'checked_in';
+    const sv = p.exit_survey;
+    const st = surveyStatus(sv);
+    // The survey is asked before the patient leaves — once they are out of the
+    // door there is no second chance, which is exactly why it has never been
+    // collected reliably on paper. Answered or explicitly declined both count;
+    // what is blocked is dismissing someone who was never asked.
+    const surveyDone = st.key !== 'none';
+    const canDismiss = p.status !== 'dismissed' && p.status !== 'checked_in' && surveyDone;
 
     clear(root);
     root.append(
@@ -127,6 +150,17 @@ export function renderCheckout(ctx, params = {}) {
           el('div', { class: 'card' }, [
             el('div', { class: 'card-title' }, [icon('checkCircle', { size: 15 }), 'Actions']),
             el('div', { class: 'action-stack' }, [
+              // The survey, above the optional artefacts: it is the one thing
+              // here that cannot be done after the patient leaves.
+              el('div', { class: 'action-stack' }, [
+                el('span', { class: 'field-label' }, ['Exit survey']),
+                el('div', { class: `pill ${st.pill}` }, [el('span', { class: 'pill-dot' }), st.label]),
+                el('button', {
+                  class: 'btn btn--block ' + (surveyDone ? 'btn--ghost' : 'btn--primary'),
+                  onClick: () => takeSurvey(p),
+                }, [icon('clipboard', { size: 16 }), surveyDone ? 'Review or change answers' : 'Hand tablet to patient']),
+                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, ['Needed before check-out. The patient can decline inside.']),
+              ]),
               // Optional artefacts, grouped and de-emphasised so they read as
               // secondary to the single primary action below.
               el('div', { class: 'action-stack' }, [
@@ -142,12 +176,27 @@ export function renderCheckout(ctx, params = {}) {
               // Primary action — the climax: last, prominent, on its own.
               p.status === 'dismissed'
                 ? el('div', { class: 'pill pill--neutral', style: 'margin-top:8px' }, [`Dismissed by ${p.dismissed_by_name || '—'} · ${fmtWhen(p.dismissed_at)}`])
-                : el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
+                : el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', title: surveyDone ? null : 'Take the exit survey first — the patient may decline it', onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
             ]),
           ]),
         ]),
       ]),
     );
+  }
+
+  // Hand the device over. Resolves to the saved survey, or null if it was
+  // closed without finishing — in which case nothing was written and the desk
+  // can try again.
+  async function takeSurvey(p) {
+    const full = p.exit_survey !== undefined ? p : await api.getPatient(p.id);
+    const saved = await openExitSurvey(full, {
+      // Open in the language the patient registered in, so the common case
+      // needs no switching; the patient can still change it themselves.
+      lang: full.language === 'es' ? 'es' : 'en',
+      existing: full.exit_survey,
+    });
+    if (saved) { if (params.id) detail(p.id); else queue(); }
+    return saved;
   }
 
   async function dismiss(p) {

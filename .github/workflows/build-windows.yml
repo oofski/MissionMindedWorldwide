@@ -226,20 +226,26 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### Fixed in this build — the Apple Silicon download was broken
-            The arm64 DMG in build 13 contained an Intel build of the database
-            module, so it crashed the moment it opened on an M-series Mac. Each
-            architecture is now built on its own machine, and the build refuses
-            to publish a DMG whose contents do not match the Mac it is for. The
-            Intel DMG and both Windows downloads were unaffected.
+            ### New — the patient exit survey
+            The MMW Patient Exit Survey is now part of check-out. The desk hands
+            the laptop or tablet to the patient, who answers it themselves in
+            **English or Spanish** — every one of the 34 questions is translated,
+            and the patient can switch language at any point.
 
-            ### Also fixed — admin / admin now works on an existing install
-            v0.0.5 only created the `admin` account on a machine with an **empty**
-            database, so anyone updating over an existing install never got it and
-            signing in with `admin` / `admin` failed. This build creates it once on
-            those machines too, without disturbing the account that is already
-            there. If an account called `admin` exists on some other password, it
-            is reset to `admin` this once.
+            - It is asked **before** the patient is dismissed, because once they
+              are out of the door there is no second chance — which is why this
+              has never been collected reliably on paper.
+            - Every question is optional and the whole survey can be **declined**.
+              A refusal is recorded as a refusal, so the clinic can tell the
+              difference between "asked, said no" and "never asked" — and nobody
+              has to invent answers to get a patient checked out.
+            - **Reports → Patient exit survey** shows the results as counts and
+              percentages, question by question, which is what a grant return is
+              written from. Percentages are of the people who answered *that*
+              question, not of everyone seen.
+            - The totals are de-identified — closed-choice answers only, no free
+              text and no names — so they survive a patient-data purge and can
+              still answer a funder months later.
 
             ### Signing in
             Every install now comes with an administrator already set up:

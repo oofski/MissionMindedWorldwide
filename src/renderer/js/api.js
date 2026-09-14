@@ -44,6 +44,8 @@ export const api = {
   cleanupIncomplete: () => call('patientsCleanupIncomplete'),
 
   saveTriage: (patientId, data) => call('triageSave', { patientId, data }),
+
+  saveExitSurvey: (patientId, data) => call('surveySave', { patientId, data }),
   saveTreatment: (patientId, data, finalize) => call('treatmentSave', { patientId, data, finalize }),
   saveVitals: (patientId, data) => call('vitalsSave', { patientId, data }),
   routePatient: (patientId, route) => call('patientsRoute', { patientId, route }),
