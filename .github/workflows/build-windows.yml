@@ -110,16 +110,44 @@ jobs:
       - name: Run UI harness
         run: node scripts/ui-harness.mjs
 
-      - name: Build macOS DMG (arm64 + x64)
-        run: npm run dist:mac
+      # Each architecture separately, and each allowed to exit non-zero.
+      #
+      # electron-builder finishes the DMG — the image and its blockmap are both
+      # written — and THEN fails on "hdiutil detach" of its own temporary
+      # volume, which on a headless runner has no Finder session to release it.
+      # That is a cleanup step failing after the artifact exists, so failing the
+      # build on it would throw away a perfectly good DMG. The check below is
+      # what actually decides whether this job passed: no DMG, no release.
+      #
+      # There is no Apple Developer ID for this project. Without
+      # CSC_IDENTITY_AUTO_DISCOVERY=false, electron-builder searches the
+      # runner's keychain, finds nothing, and reports a signing error rather
+      # than the deliberate choice it is. The app is still ad-hoc signed, which
+      # Apple Silicon requires in order to launch a binary at all.
+      - name: Build macOS DMG (Intel x64)
+        run: npm run dist:mac:x64 || echo "electron-builder exited non-zero — the DMG check below decides"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # There is no Apple Developer ID for this project. Without this,
-          # electron-builder searches the runner's keychain, finds nothing, and
-          # the failure is reported as a signing error rather than as the
-          # deliberate choice it is. The app is still ad-hoc signed, which
-          # Apple Silicon requires in order to launch it at all.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # Force off anything the previous build left mounted, so the next one
+      # cannot collide with it. Distinct volume titles make this belt-and-braces.
+      - name: Release any volume left mounted
+        if: always()
+        run: |
+          hdiutil detach -force "/Volumes/Mission Minded Intel" 2>/dev/null || true
+          hdiutil detach -force "/Volumes/Mission Minded Apple Silicon" 2>/dev/null || true
+          ls /Volumes
+
+      - name: Build macOS DMG (Apple Silicon arm64)
+        run: npm run dist:mac:arm64 || echo "electron-builder exited non-zero — the DMG check below decides"
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Release any volume left mounted (again)
+        if: always()
+        run: |
+          hdiutil detach -force "/Volumes/Mission Minded Intel" 2>/dev/null || true
+          hdiutil detach -force "/Volumes/Mission Minded Apple Silicon" 2>/dev/null || true
 
       # Both DMGs, or the job fails. The two architectures are built by separate
       # electron-builder invocations into the same output directory, so a
@@ -129,8 +157,11 @@ jobs:
         run: |
           ls -la release/
           V=$(node -p "require('./package.json').version")
-          test -f "release/MMW-$V-x64.dmg"
-          test -f "release/MMW-$V-arm64.dmg"
+          test -s "release/MMW-$V-x64.dmg"   || { echo "::error::Intel DMG missing"; exit 1; }
+          test -s "release/MMW-$V-arm64.dmg" || { echo "::error::Apple Silicon DMG missing"; exit 1; }
+          # A truncated image would mount as a corrupt disk on a clinic laptop.
+          hdiutil verify "release/MMW-$V-x64.dmg"
+          hdiutil verify "release/MMW-$V-arm64.dmg"
 
       # Only the DMGs. The zip and latest-mac.yml exist for Squirrel.Mac
       # auto-update, which an ad-hoc-signed build cannot use — see

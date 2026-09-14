@@ -15,7 +15,9 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win --x64",
     "dist:win": "electron-builder --win --x64",
-    "dist:mac": "electron-builder --mac --x64 --publish never && electron-builder --mac --arm64 --publish never"
+    "dist:mac": "npm run dist:mac:x64 && npm run dist:mac:arm64",
+    "dist:mac:x64": "electron-builder --mac --x64 --publish never -c.dmg.title=\"Mission Minded Intel\"",
+    "dist:mac:arm64": "electron-builder --mac --arm64 --publish never -c.dmg.title=\"Mission Minded Apple Silicon\""
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
@@ -97,20 +99,7 @@
     },
     "dmg": {
       "artifactName": "MMW-${version}-${arch}.${ext}",
-      "title": "Mission Minded ${version}",
-      "contents": [
-        {
-          "x": 140,
-          "y": 200,
-          "type": "file"
-        },
-        {
-          "x": 400,
-          "y": 200,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
+      "title": "Mission Minded ${version}"
     }
   }
 }
