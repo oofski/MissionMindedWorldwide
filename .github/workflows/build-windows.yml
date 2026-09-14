@@ -86,6 +86,21 @@ jobs:
         with:
           node-version: '22'
 
+      # node-gyp's bundled gyp still does "from distutils.version import
+      # StrictVersion", and distutils was removed from the Python stdlib in
+      # 3.12 — which is older than the runner's default python3. Building the
+      # x64 slice of better-sqlite3 from source therefore dies before it
+      # compiles anything. 3.11 is the last release that still ships distutils.
+      #
+      # This is needed for the x64 build specifically: the arm64 slice matches
+      # the runner's own architecture and npm install satisfies it from a
+      # prebuilt binary, which is why an earlier run got all the way to hdiutil
+      # before failing and this one did not get past rebuild.
+      - name: Pin Python 3.11 for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
         run: npm install
 
