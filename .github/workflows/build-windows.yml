@@ -106,8 +106,16 @@ jobs:
           # Apple Silicon requires in order to launch it at all.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: List build output
-        run: ls -la release/
+      # Both DMGs, or the job fails. The two architectures are built by separate
+      # electron-builder invocations into the same output directory, so a
+      # regression that clobbered one would otherwise ship a release that
+      # silently excludes every Intel Mac.
+      - name: Check both DMGs were produced
+        run: |
+          ls -la release/
+          V=$(node -p "require('./package.json').version")
+          test -f "release/MMW-$V-x64.dmg"
+          test -f "release/MMW-$V-arm64.dmg"
 
       # Only the DMGs. The zip and latest-mac.yml exist for Squirrel.Mac
       # auto-update, which an ad-hoc-signed build cannot use — see
