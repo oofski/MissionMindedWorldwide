@@ -281,7 +281,7 @@ function fullPacketBody(p) {
           <div class="val">${esc(c.signer_name)}${c.relationship ? ' (' + esc(c.relationship) + ')' : ''}</div>
           <div class="muted">${esc(c.version)} · Signed ${fmtDate(c.signed_at)}</div>
         </div>
-        <div>${c.signature_png ? `<div class="sig"><img src="${imgSrc(c.signature_png)}"/></div>` : ''}</div>
+        <div>${c.signature_png ? `<div class="sig"><img src="${imgSrc(c.signature_png)}"/></div>${SIG_METHOD_NOTE[c.signature_method] || ''}` : ''}</div>
       </div>
       ${consentBody}
       ${teethBlock}
@@ -315,7 +315,7 @@ function fullPacketBody(p) {
     <h2>Dental History</h2>
     <table class="grid">
       <tr>${field('What they need today', VISIT_LABELS[dh.visit_type] || '')}${field('May need extraction', dh.may_need_extraction === 'yes' ? 'Yes' : '')}</tr>
-      <tr>${field('Reason for visit', dh.reason)}${field('Prior dentist', dh.prior_dentist)}</tr>
+      <tr>${field('Last saw a dentist', PRIOR_DENTIST_LABELS[dh.prior_dentist] || dh.prior_dentist || '')}${dh.reason ? field('Reason for visit (legacy)', dh.reason) : '<td></td>'}</tr>
       <tr>${field('Gums bleed', dh.gum_bleeding)}${field('Sores / lumps', dh.sores)}</tr>
       <tr>${field('Head/neck/jaw injury', dh.jaw_injury)}${field('Clenching / grinding', dh.grinding)}</tr>
       <tr>${field('Bleeding after extraction', dh.post_extraction_bleeding)}${field('Orthodontic history', dh.ortho)}</tr>
@@ -350,6 +350,28 @@ function historyItems(arr, m, otherKey) {
 }
 
 // The patient's stated need from the 1–4 check-in scale.
+// Mirrors PRIOR_DENTIST in src/renderer/i18n/strings.js. Duplicated rather than
+// imported because this is CommonJS in the main process and that is an ES module
+// in the renderer; the harness asserts the two lists agree so they cannot drift.
+// An unrecognised value falls through to the raw text, which is how records
+// created before this was a dropdown keep printing the answer they were given.
+// Printed under a signature so the page itself says what the patient did. A
+// generated mark is drawn in a script hand; without this note it could later be
+// read as one the patient drew by hand, which it is not.
+const SIG_METHOD_NOTE = {
+  type: '<div class="muted" style="font-size:10px">Signed by typed name</div>',
+  generate: '<div class="muted" style="font-size:10px">Signature generated from typed name</div>',
+  draw: '',
+};
+
+const PRIOR_DENTIST_LABELS = {
+  within_6_months: 'Within the past 6 months',
+  about_1_year: 'About 1 year ago',
+  about_2_years: 'About 2 years ago',
+  over_3_years: '3 or more years ago',
+  never: 'Never',
+};
+
 const VISIT_LABELS = {
   extraction_pain: 'Extraction — in pain', extraction_no_pain: 'Extraction — not in pain',
   filling: 'Filling', cleaning: 'Dental cleaning',

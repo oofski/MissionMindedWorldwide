@@ -1,6 +1,6 @@
 import { el } from '../dom.js';
 import { icon } from '../icons.js';
-import { conditions, allergies, visitTypeLabel } from '../i18n.js';
+import { conditions, allergies, visitTypeLabel, priorDentistLabel } from '../i18n.js';
 
 // A record created by the old (v1.0) intake bug has no name / empty histories.
 export function isIncompleteRecord(p) {
@@ -81,8 +81,14 @@ export function patientHistoryCards(p, priorVisits = []) {
 
   out.push(card('tooth', 'Dental history',
     el('div', { class: 'kv-grid' }, [
-      kv('What patient needs', visitTypeLabel(dh.visit_type)), kv('Reason for visit', (p.triage && p.triage.complaint) || dh.reason),
-      kv('Prior dentist', dh.prior_dentist), kv('Gums bleed', dh.gum_bleeding),
+      kv('What patient needs', visitTypeLabel(dh.visit_type)),
+      // "Reason for today's visit" is no longer asked — "What patient needs"
+      // above is the countable version of the same question. Records taken
+      // before that change still hold the prose, and it is still shown for them:
+      // it is a real thing the patient said, and hiding it would lose it.
+      (p.triage && p.triage.complaint) || dh.reason
+        ? kv('Reason for visit', (p.triage && p.triage.complaint) || dh.reason) : null,
+      kv('Last saw a dentist', priorDentistLabel(dh.prior_dentist)), kv('Gums bleed', dh.gum_bleeding),
       kv('Sores / lumps', dh.sores), kv('Head/neck/jaw injury', dh.jaw_injury),
       kv('Clenching / grinding', dh.grinding), kv('Bleeding after extraction', dh.post_extraction_bleeding),
       kv('Orthodontic history', dh.ortho),
@@ -95,6 +101,12 @@ export function patientHistoryCards(p, priorVisits = []) {
         el('div', { class: 'muted' }, [`${c.signer_name}${c.relationship ? ' (' + c.relationship + ')' : ''}`]),
         el('div', { class: 'muted small' }, [`${c.version} · ${new Date(c.signed_at).toLocaleString()}`]),
         c.signature_png ? el('img', { class: 'sig-thumb', src: c.signature_png }) : null,
+        // Say how it was signed. A typed or generated mark is a valid record of
+        // assent, but it is not a drawn signature and the chart should not imply
+        // that it is.
+        c.signature_method && c.signature_method !== 'draw'
+          ? el('span', { class: 'subtle small' }, [c.signature_method === 'type' ? 'Signed by typed name' : 'Signature generated from typed name'])
+          : null,
       ])))));
   }
 

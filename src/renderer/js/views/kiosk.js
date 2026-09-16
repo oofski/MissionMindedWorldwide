@@ -1,8 +1,8 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking } from '../i18n.js';
-import { textField, textArea, selectField, yesNo, chipGrid, limitDigits } from '../forms.js';
-import { SignaturePad } from '../components/signature.js';
+import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions } from '../i18n.js';
+import { textField, selectField, yesNo, chipGrid, limitDigits } from '../forms.js';
+import { SignatureField } from '../components/signatureField.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -29,7 +29,10 @@ export function renderKiosk(ctx) {
   function computeSteps() {
     const list = [stepDemographics, stepMedical, stepDental, stepGeneralConsent];
     if (data.dental_history.may_need_extraction === 'yes') list.push(stepSurgeryConsent);
-    list.push(stepRoute);
+    // No "who would you like to see?" step any more: the answer is already
+    // implied by what the patient said they need on the dental step, and asking
+    // twice let the two disagree — a patient could ask for a cleaning and then
+    // pick the dentist, and the queue believed the second answer.
     list.push(stepReview);
     return list;
   }
@@ -172,6 +175,41 @@ export function renderKiosk(ctx) {
       { value: '', label: '—' },
       ...referrals().map((r) => ({ value: r.key, label: r.label })),
     ], { value: d.referral });
+    // Race and ethnicity as ONE optional select-all question. Optional on
+    // purpose and labelled as such: it is asked for grant reporting, and a
+    // patient who does not want to answer must still get care.
+    const RACE_OPTS = raceOptions();
+    const race = chipGrid(
+      L({ en: 'Race and ethnicity', es: 'Raza y origen étnico', ru: 'Раса и этническая принадлежность' }),
+      RACE_OPTS.map((o) => ({ key: o.key, label: o.label })),
+      {
+        selected: Array.isArray(d.race) ? d.race : [],
+        hint: L({
+          en: 'Optional. Choose any that apply — this is only used for reporting how the clinic served the community.',
+          es: 'Opcional. Elija todas las que correspondan — solo se usa para informar cómo la clínica sirvió a la comunidad.',
+          ru: 'Необязательно. Выберите все подходящие — используется только для отчётности.',
+        }),
+      },
+    );
+    const raceField = el('div', { class: 'span-2' }, [race.node]);
+    // Make the exclusivity visible rather than reconciling it silently on save:
+    // today a patient can light up "White" AND "Prefer not to answer" and only
+    // one of them survives, with no indication which.
+    race.node.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.chip-select');
+      if (!btn) return;
+      const chosen = race.get();
+      const isPna = btn.textContent === (RACE_OPTS.find((o) => o.key === 'prefer_not') || {}).label;
+      if (isPna && chosen.includes('prefer_not')) race.set(['prefer_not']);
+      else if (!isPna && chosen.includes('prefer_not')) race.set(chosen.filter((k) => k !== 'prefer_not'));
+      else return;
+      // Repaint the chips from the corrected selection.
+      const now = race.get();
+      race.node.querySelectorAll('.chip-select').forEach((b, i) => {
+        b.classList.toggle('chip-select--on', now.includes(RACE_OPTS[i].key));
+      });
+    });
+
     const referralOther = textField(t('intake.referralOther'), { value: d.referral_other });
     const referralOtherWrap = el('div', { class: 'span-2' }, [referralOther.node]);
     const syncReferralOther = () => { referralOtherWrap.style.display = referral.get() === 'other' ? '' : 'none'; };
@@ -184,6 +222,7 @@ export function renderKiosk(ctx) {
       city.node, stateF.node,
       el('div', { class: 'span-2' }, [mailing.node]),
       marital.node, emName.node, emPhone.node,
+      raceField,
       servicesField,
       el('div', { class: 'span-2' }, [referral.node]),
       referralOtherWrap,
@@ -208,6 +247,9 @@ export function renderKiosk(ctx) {
           address: address.get(), city: city.get(), state: stateF.get(), mailing_address: mailing.get(), marital_status: marital.get(),
           emergency_name: emName.get(), emergency_phone: emPhone.get(),
           services: SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k)),
+          // "Prefer not to answer" is about the list, so it replaces it rather
+          // than joining it — a record must not say both "white" and "declined".
+          race: race.get().includes('prefer_not') ? ['prefer_not'] : race.get(),
           referral: referral.get(),
           referral_other: referral.get() === 'other' ? referralOther.get() : '',
         });
@@ -355,15 +397,27 @@ export function renderKiosk(ctx) {
 
   function stepDental() {
     const dh = data.dental_history;
-    const reason = textArea(t('intake.reason'), { value: dh.reason, rows: 2 });
-    const prior = textField(t('intake.priorDentist'), { value: dh.prior_dentist });
+    // "Reason for today's visit" is gone: "What do you need today?" below asks
+    // the same thing as a countable choice, and the free-text box duplicated it
+    // in prose nothing could report on.
+    const POPTS = priorDentistOptions();
+    const prior = selectField(
+      t('intake.priorDentist'),
+      [{ value: '', label: '—' }, ...POPTS.map((o) => ({ value: o.key, label: o.label }))],
+      { value: dh.prior_dentist, required: true },
+    );
     const yn = (k, label) => yesNo(label, { value: dh[k], yesText: t('common.yes'), noText: t('common.no') });
-    const gum = yn('gum_bleeding', t('intake.gumBleeding'));
-    const sores = yn('sores', t('intake.sores'));
-    const jaw = yn('jaw_injury', t('intake.jawInjury'));
-    const grinding = yn('grinding', t('intake.grinding'));
-    const postExt = yn('post_extraction_bleeding', t('intake.postExtraction'));
-    const ortho = yn('ortho', t('intake.ortho'));
+    // Ordered so the refusal below can name the first unanswered question rather
+    // than saying "something is missing" and leaving the patient to hunt.
+    const YN_FIELDS = [
+      ['gum_bleeding', t('intake.gumBleeding')],
+      ['sores', t('intake.sores')],
+      ['jaw_injury', t('intake.jawInjury')],
+      ['grinding', t('intake.grinding')],
+      ['post_extraction_bleeding', t('intake.postExtraction')],
+      ['ortho', t('intake.ortho')],
+    ].map(([k, label]) => ({ key: k, label, field: yn(k, label) }));
+    const [gum, sores, jaw, grinding, postExt, ortho] = YN_FIELDS.map((f) => f.field);
     // "What do you need today?" on a 1–4 slider. Options 1 & 2 (extraction) add the
     // oral-surgery consent (may_need_extraction='yes'); this replaces the old yes/no
     // "are you in pain" question but drives the exact same consent trigger.
@@ -422,7 +476,6 @@ export function renderKiosk(ctx) {
     ]);
 
     const node = el('div', {}, [
-      el('div', { class: 'span-2' }, [reason.node]),
       el('div', { class: 'form-grid' }, [
         prior.node, gum.node, sores.node, jaw.node, grinding.node, postExt.node, ortho.node,
       ]),
@@ -433,10 +486,16 @@ export function renderKiosk(ctx) {
       title: t('intake.s_dental'),
       node,
       collect: () => {
+        // Every dental question is required now. Each refusal names the question
+        // it is about — a bare "please complete this step" on a screen of seven
+        // near-identical Yes/No rows is the reason people give up on a form.
+        if (!prior.get()) { toast(t('common.required') + ': ' + t('intake.priorDentist'), 'error'); return false; }
+        const missing = YN_FIELDS.find((f) => !f.field.get());
+        if (missing) { toast(t('common.required') + ': ' + missing.label, 'error'); return false; }
         if (!visitNum) { toast(L({ en: 'Please choose what you need today.', es: 'Por favor elija qué necesita hoy.', ru: 'Пожалуйста, выберите, что вам нужно сегодня.' }), 'error'); return false; }
         const vopt = VOPTS[visitNum - 1];
         Object.assign(dh, {
-          reason: reason.get(), prior_dentist: prior.get(),
+          prior_dentist: prior.get(),
           gum_bleeding: gum.get(), sores: sores.get(), jaw_injury: jaw.get(), grinding: grinding.get(),
           post_extraction_bleeding: postExt.get(), ortho: ortho.get(),
           visit_type: vopt.key,
@@ -478,10 +537,13 @@ export function renderKiosk(ctx) {
 
   function stepGeneralConsent() {
     const minor = age() != null && age() < 18;
-    const sigPad = SignaturePad();
     const agree = el('input', { class: 'big-check', type: 'checkbox' });
     const signer = textField(t('intake.signerName'), { value: '', required: true });
     const rel = textField(t('intake.relationship'), { value: minor ? '' : '' });
+    const sigPad = SignatureField({ getName: () => signer.get() });
+    // Typing the name is what Type and Generate render from, so the preview has
+    // to follow the field rather than only refresh when the tab is switched.
+    signer.input.addEventListener('input', () => sigPad.refresh());
 
     // Render the complete general-consent wording. English shows the full
     // numbered clauses (consent.generalFull); other languages keep their existing
@@ -555,6 +617,7 @@ export function renderKiosk(ctx) {
         upsertConsent('general', {
           signer_name: signer.get(), relationship: rel.get(),
           signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
+          signature_method: sigPad.isEmpty() ? null : sigPad.getMethod(),
           deemed_consent: deemed,
           version: `mmw-general-${getLang()}-v1`,
         });
@@ -564,9 +627,10 @@ export function renderKiosk(ctx) {
   }
 
   function stepSurgeryConsent() {
-    const sigPad = SignaturePad();
     const agree = el('input', { class: 'big-check', type: 'checkbox' });
     const signer = textField(t('intake.signerName'), { value: signerFromGeneral() });
+    const sigPad = SignatureField({ getName: () => signer.get() });
+    signer.input.addEventListener('input', () => sigPad.refresh());
 
     // F10: tooth numbers are NOT collected from the patient — the provider
     // records them chairside. Show a read-only note instead of an input.
@@ -609,69 +673,9 @@ export function renderKiosk(ctx) {
         upsertConsent('oral_surgery', {
           signer_name: signer.get() || signerFromGeneral(),
           signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
+          signature_method: sigPad.isEmpty() ? null : sigPad.getMethod(),
           version: `oral_surgery-${getLang()}-v1`,
         });
-        return true;
-      },
-    };
-  }
-
-  // A4: provider choice — the patient picks who they want to see today. Stored
-  // as data.route ('dentist' | 'hygienist'); required before submit.
-  function stepRoute() {
-    const question = L({
-      en: 'Who would you like to see today?',
-      es: '¿A quién le gustaría ver hoy?',
-      ru: 'Кого вы хотели бы посетить сегодня?',
-    });
-    const options = [
-      {
-        key: 'dentist', iconName: 'tooth',
-        title: L({ en: 'Dentist', es: 'Dentista', ru: 'Стоматолог' }),
-        sub: L({ en: 'Fillings, extractions', es: 'Empastes, extracciones', ru: 'Пломбы, удаление зубов' }),
-      },
-      {
-        key: 'hygienist', iconName: 'sparkle',
-        title: L({ en: 'Hygienist', es: 'Higienista', ru: 'Гигиенист' }),
-        sub: L({ en: 'Cleaning', es: 'Limpieza', ru: 'Чистка' }),
-      },
-    ];
-    const cards = new Map();
-    const grid = el('div', { class: 'lang-grid route-grid' }, options.map((o) => {
-      const card = el('button', {
-        type: 'button',
-        class: 'lang-card route-card' + (data.route === o.key ? ' lang-card--on' : ''),
-        onClick: () => {
-          data.route = o.key;
-          cards.forEach((c) => c.classList.remove('lang-card--on'));
-          card.classList.add('lang-card--on');
-        },
-      }, [
-        icon(o.iconName, { size: 40 }),
-        el('span', { class: 'lang-native' }, [o.title]),
-        el('span', { class: 'lang-en' }, [o.sub]),
-      ]);
-      cards.set(o.key, card);
-      return card;
-    }));
-
-    const node = el('div', { class: 'route-screen' }, [
-      el('h3', {}, [question]),
-      grid,
-    ]);
-
-    return {
-      title: L({ en: 'Who to see', es: 'A quién ver', ru: 'К кому обратиться' }),
-      node,
-      collect: () => {
-        if (data.route !== 'dentist' && data.route !== 'hygienist') {
-          toast(L({
-            en: 'Please choose who you would like to see.',
-            es: 'Por favor elija a quién desea ver.',
-            ru: 'Пожалуйста, выберите, к кому вы хотите обратиться.',
-          }), 'error');
-          return false;
-        }
         return true;
       },
     };
@@ -694,11 +698,11 @@ export function renderKiosk(ctx) {
         row(t('intake.allergiesTitle'), allergyLabels.join(', ')),
         row(t('intake.conditionsTitle'), condLabels.join(', ')),
         row(L({ en: 'What you need today', es: 'Qué necesita hoy', ru: 'Что вам нужно сегодня' }), visitTypeLabel(dh.visit_type)),
-        row(t('intake.reason'), dh.reason),
+        row(t('intake.priorDentist'), priorDentistLabel(dh.prior_dentist)),
         row(
-          L({ en: 'Who to see', es: 'A quién ver', ru: 'К кому обратиться' }),
-          data.route === 'dentist' ? L({ en: 'Dentist', es: 'Dentista', ru: 'Стоматолог' })
-            : data.route === 'hygienist' ? L({ en: 'Hygienist', es: 'Higienista', ru: 'Гигиенист' })
+          L({ en: 'Who you will see', es: 'A quién verá', ru: 'К кому вы обратитесь' }),
+          routeForVisitType(dh.visit_type) === 'hygienist' ? L({ en: 'Hygienist', es: 'Higienista', ru: 'Гигиенист' })
+            : routeForVisitType(dh.visit_type) === 'dentist' ? L({ en: 'Dentist', es: 'Dentista', ru: 'Стоматолог' })
             : ''
         ),
         row(t('intake.s_consent'), data.consents.map((c) => c.type === 'general' ? 'General — signed' : 'Oral Surgery — signed').join(' · ')),
@@ -726,15 +730,6 @@ export function renderKiosk(ctx) {
     // "Submit" tap bypasses forward-nav collect()).
     const ok = current && current.collect ? current.collect() : true;
     if (ok === false) return;
-    // A4: never submit without a provider choice recorded.
-    if (data.route !== 'dentist' && data.route !== 'hygienist') {
-      toast(L({
-        en: 'Please choose who you would like to see.',
-        es: 'Por favor elija a quién desea ver.',
-        ru: 'Пожалуйста, выберите, к кому вы хотите обратиться.',
-      }), 'error');
-      return;
-    }
     try {
       const patient = await api.createPatient(data);
       showThankYou(patient);

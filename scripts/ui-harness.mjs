@@ -284,10 +284,25 @@ async function main() {
   clickText('Next');
   await tick();
 
-  // Step: Dental history — reason
+  // Step: Dental history
   log(/Dental/i.test($('.kiosk-step-label').textContent), 'on dental history step');
   log(!/long-term dental goals/i.test($('.kiosk-body').textContent) && !/cosmetic/i.test($('.kiosk-body').textContent), 'v1.4.9: dental step no longer asks long-term goals / cosmetic interest');
-  const ta = $('.kiosk-body textarea'); if (ta) setInput(ta, 'Lower left tooth pain');
+  // C2: the free-text "Reason for today's visit" box is gone — "What do you need
+  // today?" below asks the same thing in a form a report can count.
+  log(!$('.kiosk-body textarea'), 'C2: dental step no longer has a free-text reason box');
+  log(!/Reason for today/i.test($('.kiosk-body').textContent), 'C2: "Reason for today\'s visit" is not asked anywhere on the step');
+  // C2: "when did you last see a dentist" is a closed dropdown, not free text.
+  const priorSel = $all('.kiosk-body select').find((x) => Array.from(x.options).some((o) => /6 months|1 year|Never/i.test(o.textContent)));
+  log(!!priorSel, 'C2: last-dental-visit is a dropdown');
+  log(!!priorSel && Array.from(priorSel.options).some((o) => /Never/i.test(o.textContent)),
+    'C2: the dropdown can record a patient who has never seen a dentist');
+  // C2: every dental question is required, and the refusal names which one.
+  clickText('Next');
+  await tick();
+  log(/Dental/i.test($('.kiosk-step-label').textContent), 'C2: Next is refused while a dental answer is missing');
+  if (priorSel) { priorSel.value = 'about_2_years'; priorSel.dispatchEvent(new window.Event('change', { bubbles: true })); }
+  // Answer every Yes/No on the step.
+  $all('.kiosk-body .chip-row').forEach((row) => { const b = row.querySelector('.chip-btn'); if (b) b.click(); });
   // v1.4.9: choose a visit type on the required 1–4 scale. Pick 3 = Filling so no
   // surgery consent is added (keeps this drive on the existing review path).
   const vrange = $('.visit-range');
@@ -322,14 +337,9 @@ async function main() {
   clickText('Next');
   await tick();
 
-  // v1.2.0 Step: provider choice — "Who would you like to see today?" (required).
-  const routeCards = $all('.route-card, .kiosk-body .lang-card');
-  log(routeCards.length >= 2, 'provider-choice step: dentist/hygienist options present (' + routeCards.length + ')');
-  const dentistCard = routeCards.find((c) => /Dentist|Dentista|Стоматолог/i.test(c.textContent)) || routeCards[0];
-  if (dentistCard) dentistCard.click();
-  await tick();
-  clickText('Next');
-  await tick();
+  // C3: there is no "who would you like to see?" step any more — the station is
+  // derived from what the patient said they need on the dental step.
+  log(!$('.route-card'), 'C3: the standalone dentist/hygienist chooser is gone from intake');
 
   // Now should be Review (may_need_extraction was not 'yes')
   const onReview = /Sign|Review|Firmar|Send|Submit/i.test($('.kiosk-step-label') ? $('.kiosk-step-label').textContent : '');
@@ -350,7 +360,17 @@ async function main() {
     log(full.first_name === 'Maria', 'demographics captured: first_name=' + full.first_name);
     log((full.medical_history.allergies || []).includes('penicillin'), 'medical allergies captured: ' + JSON.stringify(full.medical_history.allergies));
     log((full.medical_history.conditions || []).includes('diabetes'), 'medical conditions captured: ' + JSON.stringify(full.medical_history.conditions));
-    log(!!full.dental_history.reason, 'dental history captured: reason=' + full.dental_history.reason);
+    // C2: reason is no longer collected; the closed last-dental-visit answer is
+    // what the step now has to capture.
+    log(full.dental_history.reason === undefined, 'C2: no reason is stored for a new patient');
+    log(full.dental_history.prior_dentist === 'about_2_years',
+      'C2: the last-dental-visit answer is stored as a code, not prose (' + full.dental_history.prior_dentist + ')');
+    log(['gum_bleeding', 'sores', 'jaw_injury', 'grinding', 'post_extraction_bleeding', 'ortho']
+      .every((k) => full.dental_history[k] === 'yes' || full.dental_history[k] === 'no'),
+      'C2: every dental yes/no question is answered on a submitted record');
+    // C3: the station was derived from the visit type, with nobody asked.
+    log(full.triage && full.triage.route === 'dentist',
+      'C3: choosing Filling routed the patient to the dentist automatically');
     log(full.dental_history.visit_type === 'filling' && full.dental_history.may_need_extraction === 'no', 'v1.4.9: visit-type scale captured (filling → no surgery consent)');
     log((full.consents || []).length > 0, 'consent captured: ' + (full.consents || []).length + ' consent(s)');
     // v1.2.0: patient chose a provider at check-in; vitals are NOT collected here.
@@ -367,7 +387,7 @@ async function main() {
     document.body.append(recRoot);
     await tick(); await tick();
     const recText = recRoot.textContent;
-    log(/Lower left tooth pain/.test(recText), 'records view shows dental history reason');
+    log(/About 2 years ago/i.test(recText), 'C2: the records view shows the last-dental-visit answer as a readable label');
     log(/Diabetes/i.test(recText), 'records view shows condition');
     log(/Penicillin/i.test(recText), 'records view shows allergy');
   }
@@ -2256,6 +2276,129 @@ async function main() {
       'MMW survey: merging two clinics adds their survey totals together');
     log(merged.survey.answers.first_time.no === (sum.survey.answers.first_time.no || 0) * 2,
       'MMW survey: merging adds option counts question by question');
+  }
+
+  /* ===== C1 + C4 — age, race, and how the waiver was signed ==================
+     Both changes shipped with no coverage at all until these were added, and the
+     one pre-existing merge check used mergeSummaries([sum, sum]) — merging a
+     report with ITSELF, the single input shape that cannot tell correct
+     size-weighted merging apart from averaging two averages. */
+  {
+    currentUser = signInAdmin();
+    const sp = await import('../src/renderer/i18n/exitSurvey.js');   // keep the import graph warm
+    void sp;
+
+    // ---- C1: mean age must be a SUM and a COUNT, never a stored average -----
+    // Two clinics of DIFFERENT sizes. Averaging the averages gives 40; the true
+    // mean of all ten patients is 46.
+    const small = { age_sum: 60, age_known: 2, by_race: { white: 1 }, race_answered: 2, race_declined: 0 };
+    const large = { age_sum: 400, age_known: 8, by_race: { white: 5, asian: 2 }, race_answered: 7, race_declined: 1 };
+    const merged = db.mergeSummaries([small, large]);
+    log(merged.age_sum === 460 && merged.age_known === 10,
+      'C1: merging reports of different sizes adds the age sum and count');
+    log(merged.age_sum / merged.age_known === 46,
+      'C1: the combined mean age is of all patients (46), not the average of the two means (40)');
+    log(merged.by_race.white === 6 && merged.by_race.asian === 2,
+      'C1: race counts merge question by question across clinics');
+    log(merged.race_answered === 9 && merged.race_declined === 1,
+      'C1: the people-who-answered counts merge too');
+    // A report kept before this change has none of these fields.
+    const legacyMerge = db.mergeSummaries([small, { patients_seen: 3 }]);
+    log(Number.isFinite(legacyMerge.age_sum) && legacyMerge.age_sum === 60,
+      'C1: a report kept before age was tracked contributes zero rather than NaN');
+
+    // ---- C1: the capture path, end to end -----------------------------------
+    const rp = db.createPatient(currentUser, {
+      first_name: 'Race', last_name: 'Capture', dob: '1990-06-01', gender: 'female',
+      demographics: { city: 'Sandy', state: 'OR', race: ['black_african_american', 'hispanic_latino'] },
+      medical_history: {}, dental_history: { visit_type: 'cleaning' },
+    });
+    log(JSON.stringify(db.getPatient(rp.id).demographics.race) === JSON.stringify(['black_african_american', 'hispanic_latino']),
+      'C1: a race answer survives the round trip through the database');
+    const declined = db.createPatient(currentUser, {
+      first_name: 'Race', last_name: 'Declined', dob: '1980-06-01',
+      demographics: { race: ['prefer_not'] }, medical_history: {}, dental_history: { visit_type: 'cleaning' },
+    });
+    // A date of birth AFTER the visit is a typo; it must not drag the mean.
+    const bad = db.createPatient(currentUser, {
+      first_name: 'Bad', last_name: 'Dob', dob: '2099-01-01',
+      demographics: {}, medical_history: {}, dental_history: { visit_type: 'cleaning' },
+    });
+    void declined; void bad;
+    const sum1 = db.buildEventSummary();
+    log(sum1.by_race.black_african_american >= 1 && sum1.by_race.hispanic_latino >= 1,
+      'C1: one patient choosing two categories counts once in each');
+    log(sum1.race_declined >= 1, 'C1: "prefer not to answer" is counted as a refusal, not as a category');
+    log(Object.keys(sum1.by_race).every((k) => k === 'Not recorded' || /^[a-z_]+$/.test(k)),
+      'C1: the report stores raw codes, not display labels, so the blob stays language-neutral');
+    const meanNow = sum1.age_sum / sum1.age_known;
+    log(meanNow > 0 && meanNow < 130,
+      `C1: a date of birth after the visit date cannot poison the mean age (${meanNow.toFixed(1)})`);
+
+    // ---- C4: how the waiver was signed --------------------------------------
+    for (const [method, who] of [['draw', 'Drawn Sig'], ['type', 'Typed Sig'], ['generate', 'Made Sig']]) {
+      const p4 = db.createPatient(currentUser, {
+        first_name: who.split(' ')[0], last_name: 'Waiver', demographics: {}, medical_history: {},
+        dental_history: { visit_type: 'filling' },
+        consents: [{ type: 'general', signer_name: who, signature_png: 'data:image/png;base64,AAAA', signature_method: method, deemed_consent: 'yes' }],
+      });
+      const c = db.getPatient(p4.id).consents[0];
+      log(c.signature_method === method, `C4: a consent signed by "${method}" records that it was`);
+      log(c.deemed_consent === 'yes', `C4: the HIV/Hepatitis answer is stored alongside it (${method})`);
+    }
+    const junk = db.createPatient(currentUser, {
+      first_name: 'Junk', last_name: 'Method', demographics: {}, medical_history: {}, dental_history: {},
+      consents: [{ type: 'general', signer_name: 'J', signature_png: 'data:,x', signature_method: 'forged' }],
+    });
+    log(db.getPatient(junk.id).consents[0].signature_method === null,
+      'C4: a signature method the app does not offer is not stored');
+
+    // ---- the duplicated lists, actually pinned ------------------------------
+    // Several source comments claim the harness keeps these copies in step.
+    // Until now that claim was simply untrue. PRIOR_DENTIST exists in five
+    // places and the route rule in two, across CommonJS and ES modules that
+    // cannot import each other, so drift is silent and only shows up as a
+    // report bucket nobody can explain.
+    const fsx = await import('node:fs');
+    const strings = await import('../src/renderer/i18n/strings.js');
+    const readSrc = (rel) => fsx.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const canonicalPD = strings.PRIOR_DENTIST.map((o) => o.key);
+    const keysIn = (src, varName) => {
+      const m = src.match(new RegExp(varName + '\\s*=\\s*\\{([\\s\\S]*?)\\n\\};'));
+      return m ? Array.from(m[1].matchAll(/^\s*([a-z0-9_]+)\s*:/gm)).map((x) => x[1]) : null;
+    };
+    const pdfKeys = keysIn(readSrc('../src/main/pdf.js'), 'PRIOR_DENTIST_LABELS');
+    const sheetKeys = keysIn(readSrc('../src/main/clinicSheets.js'), 'PRIOR_DENTIST_LABELS');
+    const workerSrc = readSrc('../cloud/worker.js');
+    const workerArr = workerSrc.match(/const PRIOR_DENTIST = \[([^\]]*)\]/);
+    const workerKeys = workerArr ? Array.from(workerArr[1].matchAll(/'([a-z0-9_]+)'/g)).map((x) => x[1]) : null;
+    const same = (a) => Array.isArray(a) && JSON.stringify(a.slice().sort()) === JSON.stringify(canonicalPD.slice().sort());
+    log(same(pdfKeys), 'C2: the patient-record PDF knows every last-dental-visit option');
+    log(same(sheetKeys), 'C2: the clinic spreadsheet knows every last-dental-visit option');
+    log(same(workerKeys), 'C2: the online form validates against the same option list');
+    log(workerSrc.includes('Within the past 6 months') && workerSrc.includes('En los últimos 6 meses'),
+      'C2: the online form carries the options in English and Spanish');
+
+    // C3: the route rule lives in db.js (authoritative) and strings.js (display).
+    for (const [vt, want] of [['cleaning', 'hygienist'], ['filling', 'dentist'], ['extraction_pain', 'dentist'], ['extraction_no_pain', 'dentist']]) {
+      log(strings.routeForVisitType(vt) === want, `C3: ${vt} routes to the ${want} (renderer copy)`);
+    }
+    log(strings.routeForVisitType(undefined) === null && strings.routeForVisitType('nonsense') === null,
+      'C3: an unknown or missing visit type routes nowhere rather than guessing');
+    const dbRoute = readSrc('../src/main/db.js').match(/const VISIT_ROUTE = \{([\s\S]*?)\};/);
+    const dbPairs = dbRoute ? Object.fromEntries(Array.from(dbRoute[1].matchAll(/([a-z_]+):\s*'([a-z]+)'/g)).map((m) => [m[1], m[2]])) : {};
+    log(Object.entries(dbPairs).every(([k, v]) => strings.routeForVisitType(k) === v)
+      && Object.keys(dbPairs).length === 4,
+      'C3: the data layer and the renderer agree on every routing rule');
+
+    // C4 / the bug fixed in passing: both must be in the SYNCED payload or they
+    // are dropped on every other laptop and on a USB clinic restore.
+    const dbSrc = readSrc('../src/main/db.js');
+    const consentCols = dbSrc.match(/\n  consent: \[([^\]]*)\]/);
+    log(!!consentCols && /'signature_method'/.test(consentCols[1]),
+      'C4: how a consent was signed is part of what syncs between laptops');
+    log(!!consentCols && /'deemed_consent'/.test(consentCols[1]),
+      'C4: the HIV/Hepatitis answer syncs too (it was silently dropped before)');
   }
 
   /* ================= MMW v0.0.3 — severing the inherited cloud ===============

@@ -408,6 +408,8 @@ async function main() {
     under_treatment: 'no', hospitalized: 'no', tobacco: 'no', pregnancy: 'no',
     gum_bleeding: 'no', sores: 'no', jaw_injury: 'no', grinding: 'no',
     post_extraction_bleeding: 'no', ortho: 'no',
+    // Required since the last-dental-visit question became a closed dropdown.
+    prior_dentist: 'about_2_years',
   };
   async function getText(path) {
     const res = await worker.fetch(new Request('https://sync.example.com' + path, { method: 'GET' }), env, {});
@@ -425,9 +427,9 @@ async function main() {
     body: { ...REQ,
       first_name: 'Pre', last_name: 'Reg', dob: '1990-01-02', gender: 'female', phone: '(555) 123-4567', language: 'es',
       address: '1 Main St', city: 'Sandy', state: 'OR', emergency_name: 'Kin', emergency_phone: '5550001111',
-      reason: 'tooth hurts', visit_type: 'filling', allergies: ['penicillin', 'other'], allergies_other: 'shellfish',
+      visit_type: 'filling', allergies: ['penicillin', 'other'], allergies_other: 'shellfish',
       conditions: ['diabetes', 'pain_mgmt'], medications: ['Metformin', 'Lisinopril'],
-      under_treatment: 'yes', tobacco: 'no', gum_bleeding: 'yes', prior_dentist: 'Dr. Smith',
+      under_treatment: 'yes', tobacco: 'no', gum_bleeding: 'yes', prior_dentist: 'about_2_years',
       consent_agree: true, signer_name: 'Pre Reg', relationship: 'Self', signature_png: 'data:image/png;base64,AAAA',
     },
   });
@@ -443,7 +445,18 @@ async function main() {
   check('pre-registration maps ALL the in-person options natively (parity)',
     !!demo && demo.preregistered === true && demo.address === '1 Main St' && demo.city === 'Sandy' && demo.state === 'OR' && demo.emergency_name === 'Kin' && pd.phone === '5551234567' &&
     !!mh && mh.allergies.includes('penicillin') && mh.allergies_other === 'shellfish' && mh.conditions.includes('diabetes') && mh.conditions.includes('pain_mgmt') && mh.medications.length === 2 && mh.under_treatment === 'yes' && mh.tobacco === 'no' &&
-    !!dh && dh.reason === 'tooth hurts' && dh.visit_type === 'filling' && dh.gum_bleeding === 'yes' && dh.prior_dentist === 'Dr. Smith');
+    !!dh && dh.visit_type === 'filling' && dh.gum_bleeding === 'yes' && dh.prior_dentist === 'about_2_years');
+  // The free-text reason is gone from BOTH forms. If the online one kept posting
+  // it, pre-registrations would be the only records carrying it and the report
+  // would show a split nobody could see.
+  check('C2: pre-registration no longer stores a free-text reason', !!dh && dh.reason === undefined);
+  // And a free-text value posted directly to the endpoint must not be stored.
+  const junkDent = await call(env, 'POST', '/checkin/evt-1', {
+    body: { ...REQ, first_name: 'Junk', last_name: 'Dent', dob: '1990-01-02', gender: 'male', phone: '5551112222',
+      city: 'Sandy', state: 'OR', visit_type: 'cleaning', prior_dentist: 'a while ago',
+      consent_agree: true, signer_name: 'Junk Dent', signature_png: 'data:image/png;base64,AAAA' },
+  });
+  check('C2: a free-text last-dental-visit posted straight to the endpoint is rejected', junkDent.status === 400);
 
   // The general consent must be written as a consent row bound to that patient.
   const gConsent = Array.from(env.DB._store.values()).find((r) => r.entity === 'consent' && r.patient_uid === stored.uid && JSON.parse(r.data).type === 'general');
@@ -535,7 +548,9 @@ async function main() {
   // The question wording must match the app's in-person check-in EXACTLY.
   check('the pre-registration questions use the app\'s exact wording',
     fullForm.text.includes('What do you need today?') &&
-    fullForm.text.includes('Reason for today’s visit') &&
+    !fullForm.text.includes('Reason for today’s visit') &&   // C2: removed from both forms
+    fullForm.text.includes('Within the past 6 months') &&    // C2: the dropdown, not a text box
+    fullForm.text.includes('Never') &&
     fullForm.text.includes('Are you currently under a doctor’s care?') &&
     fullForm.text.includes('Hospitalized in the last 2 years?') &&
     fullForm.text.includes('When did you last see a dentist?') &&
@@ -566,7 +581,9 @@ async function main() {
     esForm.status === 200 && /text\/html/.test(esForm.ctype) &&
     esForm.text.includes('Sobre usted') &&
     esForm.text.includes('¿Qué necesita hoy?') &&
-    esForm.text.includes('Motivo de la visita de hoy') &&
+    !esForm.text.includes('Motivo de la visita de hoy') &&
+    esForm.text.includes('En los últimos 6 meses') &&        // C2: Spanish dropdown options
+    esForm.text.includes('Nunca') &&
     esForm.text.includes('Ciudad') && esForm.text.includes('Estado'));
   check('the Spanish form carries the Spanish consent + agree text',
     esForm.text.includes('Consentimiento General para Tratamiento Dental') &&

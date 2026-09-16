@@ -398,7 +398,7 @@ export function renderEmt(ctx, params = {}) {
       const other = OTHER[tr.route];
       nextStepBody = el('div', {}, [
         el('div', { style: 'display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap' }, [
-          el('span', { class: 'subtle small' }, ['Patient asked to see:']),
+          el('span', { class: 'subtle small' }, ['Routed automatically to:']),
           routePill(tr.route),
         ]),
         el('button', {
@@ -415,7 +415,10 @@ export function renderEmt(ctx, params = {}) {
       ]);
     } else {
       nextStepBody = el('div', {}, [
-        el('p', { class: 'subtle small' }, ['No provider on record — sign off to the dentist or hygienist:']),
+        // Nothing to derive a station from: a returning patient starting a
+        // fresh visit has no visit type yet. Better to ask than to guess and
+        // silently put a cleaning in the dentist's queue.
+        el('p', { class: 'subtle small' }, ['Nothing recorded to route from — choose a station:']),
         vitalsGateNote,
         el('div', { style: 'display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-2)' }, [
           inlineRouteBtn('dentist'),

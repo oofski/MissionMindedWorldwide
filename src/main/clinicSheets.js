@@ -10,6 +10,17 @@
 // Codes are title-cased for reading, the same way the printed record does it
 // (pdf.js historyItems), so the spreadsheet and the PDF never disagree.
 const titleKey = (k) => String(k || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// Mirrors PRIOR_DENTIST in src/renderer/i18n/strings.js; the harness pins them
+// together. Unknown values fall through to the raw text so pre-dropdown records
+// still export the answer they recorded.
+const PRIOR_DENTIST_LABELS = {
+  within_6_months: 'Within the past 6 months',
+  about_1_year: 'About 1 year ago',
+  about_2_years: 'About 2 years ago',
+  over_3_years: '3 or more years ago',
+  never: 'Never',
+};
+
 const VISIT_TYPES = {
   extraction_pain: 'Extraction — in pain', extraction_no_pain: 'Extraction — not in pain',
   filling: 'Filling', cleaning: 'Dental cleaning',
@@ -71,7 +82,10 @@ function clinicSheets(bundle) {
       d.emergency_name, d.emergency_phone,
       d.preregistered ? 'Online' : 'At the desk',
       VISIT_TYPES[dh.visit_type] || dh.visit_type || '',
-      dh.reason,
+      // Was 'Reason' — a free-text box that has been removed from intake. The
+      // column now carries the countable answer the dropdown collects; records
+      // taken before that keep printing whatever text they hold.
+      PRIOR_DENTIST_LABELS[dh.prior_dentist] || dh.prior_dentist || '',
       labelled(m.allergies, m.allergies_other),
       labelled(m.conditions, m.conditions_other),
       meds.length ? meds.join('; ') : (m.medications_none ? 'None' : ''),
@@ -124,7 +138,7 @@ function clinicSheets(bundle) {
       name: 'Patients',
       columns: ['Last name', 'First name', 'Date of birth', 'Age', 'Gender', 'Language',
         'Phone', 'Email', 'Address', 'City', 'State', 'Emergency contact', 'Emergency phone',
-        'Registered', 'Needed today', 'Reason', 'Allergies', 'Conditions', 'Medications',
+        'Registered', 'Needed today', 'Last saw a dentist', 'Allergies', 'Conditions', 'Medications',
         'Under doctor’s care', 'Hospitalized (2 yrs)', 'Tobacco', 'Pregnant/nursing',
         'Blood pressure', 'Pulse', 'Sent to', 'Status', 'Checked in at', 'Arrived at', 'Checked out at'],
       rows: patientRows,

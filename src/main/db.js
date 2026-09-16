@@ -182,6 +182,10 @@ function migrate() {
   // explained to me and I understand it." The app recorded the wording but never
   // the answer, so a signed consent could not evidence what was agreed.
   addColumn('consents', 'deemed_consent', 'TEXT');   // 'yes' | 'no' | null
+  // How the patient signed: 'draw' | 'type' | 'generate'. Recorded because a
+  // name rendered in a script hand must never be mistaken for one the patient
+  // drew — the printed consent and the chart both state which it was.
+  addColumn('consents', 'signature_method', 'TEXT');
   addColumn('consents', 'tooth_numbers', 'TEXT');
   addColumn('consents', 'amended_by', 'TEXT');
   addColumn('consents', 'amended_at', 'TEXT');
@@ -1032,6 +1036,14 @@ const VISIT_ROUTE = {
   extraction_pain: 'dentist',
   extraction_no_pain: 'dentist',
 };
+// Plain-language stand-in for the chief complaint, from what the patient chose.
+// A provider overwrites it the moment they type a real one.
+const VISIT_COMPLAINT = {
+  cleaning: 'Cleaning',
+  filling: 'Filling',
+  extraction_pain: 'Extraction — in pain',
+  extraction_no_pain: 'Extraction — not in pain',
+};
 function routeFromVisitType(visitType) {
   return VISIT_ROUTE[String(visitType || '')] || null;
 }
@@ -1109,7 +1121,11 @@ function createPatient(actor, data) {
     : routeFromVisitType(d.dental_history && d.dental_history.visit_type);
   db.prepare(
     `INSERT INTO triage (patient_id, complaint, status, route) VALUES (?,?, 'waiting', ?)`
-  ).run(id, (d.dental_history && d.dental_history.reason) || null, intendedRoute);
+  // complaint used to be seeded from dental_history.reason, which intake no
+  // longer asks. What the patient said they need is the honest stand-in, and it
+  // keeps the queue rows from all reading "—" until a provider types something.
+  // Legacy records that still carry reason keep using it.
+  ).run(id, (d.dental_history && (d.dental_history.reason || VISIT_COMPLAINT[String(d.dental_history.visit_type || '')])) || null, intendedRoute);
 
   // Persist consents
   (d.consents || []).forEach((c) => addConsent(id, c));
@@ -1172,8 +1188,8 @@ function updatePatient(actor, id, data) {
 
 function addConsent(patientId, c) {
   db.prepare(
-    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, deemed_consent)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, deemed_consent, signature_method)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     patientId,
     c.type,
@@ -1187,7 +1203,8 @@ function addConsent(patientId, c) {
     // covers, and the general consent carries the deemed-notice answer. Both
     // were dropped on this path, which is the one registration actually uses.
     c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null,
-    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null
+    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null,
+    ['draw', 'type', 'generate'].includes(c.signature_method) ? c.signature_method : null
   );
 }
 
@@ -1440,7 +1457,14 @@ function confirmArrival(actor, patientId, opts = {}) {
   if (!r.surgery_signed) throw new Error('This patient is here for an extraction, so the Oral Surgery consent must be signed too.');
   if (!route) throw new Error('Choose which station this patient goes to: dentist or hygienist.');
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
-  if (!tr) db.prepare("INSERT INTO triage (patient_id, status, route) VALUES (?, 'waiting', ?)").run(patientId, route);
+  if (!tr) {
+    // Seed the complaint the same way check-in does. Without it the whole
+    // pre-registered cohort reaches the provider queues showing "—", because
+    // dental_history.reason no longer exists to fall back on.
+    const dh = safeJson(db.prepare('SELECT dental_history FROM patients WHERE id = ?').get(patientId).dental_history, {});
+    db.prepare("INSERT INTO triage (patient_id, complaint, status, route) VALUES (?,?, 'waiting', ?)")
+      .run(patientId, dh.reason || VISIT_COMPLAINT[String(dh.visit_type || '')] || null, route);
+  }
   else db.prepare('UPDATE triage SET route = ? WHERE patient_id = ?').run(route, patientId);
   // Presence only — they still go to vitals next. This does NOT skip a station.
   db.prepare('UPDATE patients SET arrived_at = ?, arrived_by_name = ?, updated_at = ? WHERE id = ?')
@@ -1459,13 +1483,14 @@ function addPatientConsent(actor, patientId, consent) {
   if (c.type !== 'general' && c.type !== 'oral_surgery') throw new Error('Unknown consent type.');
   const teeth = c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null;
   db.prepare(
-    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, amended_by, amended_at, deemed_consent)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, amended_by, amended_at, deemed_consent, signature_method)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     patientId, c.type, c.version || `${c.type}-${c.language || 'en'}-chairside-v1`, c.language || 'en',
     c.signer_name || '', c.relationship || '', c.signature_png || '', c.signed_at || now(),
     teeth, teeth ? (actor ? actor.full_name : null) : null, teeth ? now() : null,
-    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null
+    c.deemed_consent === 'yes' || c.deemed_consent === 'no' ? c.deemed_consent : null,
+    ['draw', 'type', 'generate'].includes(c.signature_method) ? c.signature_method : null
   );
   audit(actor, 'consent_add', 'patient', patientId, c.type + (teeth ? ' · teeth ' + teeth : ''));
   return getPatient(patientId);
@@ -2204,7 +2229,10 @@ const isFinishedStatus = (s) => s === 'completed' || s === 'dismissed';
 
 function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf) {
   const bump = (o, k) => { const key = k || 'Not recorded'; o[key] = (o[key] || 0) + 1; };
-  const ageBand = (a) => (a == null ? 'Not recorded' : a < 18 ? 'Under 18' : a < 35 ? '18–34' : a < 55 ? '35–54' : '55+');
+  // An impossible age is 'Not recorded', not a band. A date of birth typed after
+  // the visit gives a negative number, which would otherwise satisfy `a < 18`
+  // and render a data-entry error as a child in the demographic table.
+  const ageBand = (a) => (a == null || a < 0 || a >= 130 ? 'Not recorded' : a < 18 ? 'Under 18' : a < 35 ? '18–34' : a < 55 ? '35–54' : '55+');
   // Age AS OF THE VISIT. Using today's date would move boundary-crossers every
   // time a report is rebuilt, so the same clinic would report different bands.
   const ageAtVisit = (p) => {
@@ -2214,15 +2242,38 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     return Math.floor((seen.getTime() - born.getTime()) / (365.25 * 24 * 3600 * 1000));
   };
   const dayOf = (iso) => (String(iso || '').slice(0, 10) || 'Not recorded');
-  const by_gender = {}, by_age = {}, by_language = {}, by_city = {}, by_day = {}, by_status = {};
+  const by_gender = {}, by_age = {}, by_language = {}, by_city = {}, by_day = {}, by_status = {}, by_race = {};
   const conditions = {}, visit_types = {}, days = {};
   const dayRow = (k) => (days[k] = days[k] || { date: k, seen: 0, completed: 0, fillings: 0, extractions: 0, cleanings: 0, treatments: 0 });
   let extractions = 0, fillings = 0, cleanings = 0, xrays = 0, completed = 0;
   let checked_out = 0, flagged = 0, patients_with_xray = 0;
   let pre_signups = 0, pre_checked_out = 0, onsite_signups = 0, onsite_checked_out = 0;
+  // Mean age is kept as a SUM and a COUNT, never as an average. mergeSummaries
+  // adds the NUM fields together, and averaging two stored averages across
+  // clinics of different sizes gives a number that is simply wrong.
+  let age_sum = 0, age_known = 0;
+  // People, not ticks: someone choosing three categories counts once here and
+  // three times in by_race, so a percentage of race_answered is of patients and
+  // a percentage of by_race is of selections. Both are useful; conflating them
+  // is how a demographic table ends up summing past 100%.
+  let race_answered = 0, race_declined = 0;
   for (const p of patients) {
     const d = p.demographics || {}, m = p.medical_history || {}, dh = p.dental_history || {};
-    bump(by_gender, p.gender); bump(by_age, ageBand(ageAtVisit(p))); bump(by_language, p.language);
+    bump(by_gender, p.gender); bump(by_language, p.language);
+    const ageV = ageAtVisit(p);
+    bump(by_age, ageBand(ageV));
+    // A date of birth typed after the visit date yields a negative age; one such
+    // record would drag a whole clinic's average, so it is banded but not meaned.
+    if (ageV != null && ageV >= 0 && ageV < 130) { age_sum += ageV; age_known++; }
+    let races = Array.isArray(d.race) ? d.race.filter(Boolean) : [];
+    // "Prefer not to answer" is about the list, so it replaces it. The kiosk
+    // enforces this, but a row can also arrive by sync or by clinic import, and
+    // one patient must never appear as both "White" and "declined".
+    if (races.includes('prefer_not')) races = ['prefer_not'];
+    if (!races.length) bump(by_race, null);
+    else races.forEach((r) => bump(by_race, r));
+    if (races.includes('prefer_not')) race_declined++;
+    else if (races.length) race_answered++;
     bump(by_city, d.city ? (d.city + (d.state ? ', ' + d.state : '')) : 'Not recorded');
     bump(by_day, dayOf(p.created_at));
     bump(by_status, p.status);
@@ -2281,7 +2332,8 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     patients_with_xray,
     pre_signups, pre_checked_out, onsite_signups, onsite_checked_out,
     extractions, fillings, cleanings, xrays,
-    by_gender, by_age, by_language, by_city, by_day, by_status, visit_types,
+    by_gender, by_age, by_language, by_city, by_day, by_status, visit_types, by_race,
+    age_sum, age_known, race_answered, race_declined,
     conditions,
     days: Object.values(days).filter((d) => d.date !== 'Not recorded').sort((a, b) => (a.date < b.date ? -1 : 1)),
     generated_at: now(),
@@ -2307,8 +2359,9 @@ function buildEventSummary(eventId) {
 function mergeSummaries(list) {
   const NUM = ['patients_seen', 'visits_completed', 'checked_out', 'flagged', 'patients_with_xray',
     'pre_signups', 'pre_checked_out', 'onsite_signups', 'onsite_checked_out',
-    'extractions', 'fillings', 'cleanings', 'xrays'];
-  const MAPS = ['by_gender', 'by_age', 'by_language', 'by_city', 'by_day', 'by_status', 'visit_types', 'conditions'];
+    'extractions', 'fillings', 'cleanings', 'xrays',
+    'age_sum', 'age_known', 'race_answered', 'race_declined'];
+  const MAPS = ['by_gender', 'by_age', 'by_language', 'by_city', 'by_day', 'by_status', 'visit_types', 'conditions', 'by_race'];
   const SURVEY_NUM = ['responses', 'declined', 'not_asked'];
   const out = { generated_at: now() };
   NUM.forEach((k) => { out[k] = 0; });
@@ -2576,7 +2629,12 @@ const SYNC_COLS = {
   patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
   triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name'],
   treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name'],
-  consent: ['type', 'version', 'language', 'signer_name', 'relationship', 'signature_png', 'signed_at', 'tooth_numbers', 'amended_by', 'amended_at'],
+  // deemed_consent was added as a column and written by both consent paths, but
+  // never listed here — so the HIV/Hepatitis answer a patient gives has been
+  // silently dropped on every sync and every USB clinic restore since it shipped.
+  // A consent that cannot evidence what was agreed is the one thing this row
+  // exists to do.
+  consent: ['type', 'version', 'language', 'signer_name', 'relationship', 'signature_png', 'signed_at', 'tooth_numbers', 'amended_by', 'amended_at', 'deemed_consent', 'signature_method'],
   xray: ['station', 'image_png', 'note', 'created_at', 'tooth'],
   // v1.6.0: the de-identified totals a finished clinic leaves behind. Event-
   // scoped like a patient, so it survives on the server after the PHI is gone.

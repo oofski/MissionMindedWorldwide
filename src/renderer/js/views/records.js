@@ -1,6 +1,6 @@
 import { el, clear, toast, modal } from '../dom.js';
 import { limitDigits } from '../forms.js';
-import { t, conditions, allergies, referralLabel, languageList, visitTypeLabel } from '../i18n.js';
+import { t, conditions, allergies, referralLabel, languageList, visitTypeLabel, priorDentistLabel } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
@@ -201,7 +201,7 @@ export function renderRecords(ctx, params = {}) {
             el('h3', { class: 'card-title' }, ['Dental history']),
             el('div', { class: 'kv-grid' }, [
               kv('What patient needs', visitTypeLabel(p.dental_history.visit_type)), kv('Reason', (p.triage && p.triage.complaint) || p.dental_history.reason),
-              kv('Prior dentist', p.dental_history.prior_dentist), kv('Gums bleed', p.dental_history.gum_bleeding),
+              kv('Last saw a dentist', priorDentistLabel(p.dental_history.prior_dentist)), kv('Gums bleed', p.dental_history.gum_bleeding),
               kv('Sores / lumps', p.dental_history.sores), kv('Head/neck/jaw injury', p.dental_history.jaw_injury),
               kv('Grinding / clenching', p.dental_history.grinding), kv('Bleeding after extraction', p.dental_history.post_extraction_bleeding),
               kv('Orthodontic history', p.dental_history.ortho),
@@ -219,6 +219,12 @@ export function renderRecords(ctx, params = {}) {
                 c.amended_by ? el('div', { class: 'muted small' }, [`(added by ${c.amended_by}${c.amended_at ? ' on ' + new Date(c.amended_at).toLocaleString() : ''})`]) : null,
               ]) : null,
               c.signature_png ? el('img', { class: 'sig-thumb', src: c.signature_png }) : null,
+              // Say how it was signed. The caption baked into the image is a few
+              // pixels tall at thumbnail size, so on this screen a generated
+              // signature would otherwise be indistinguishable from a drawn one.
+              c.signature_method && c.signature_method !== 'draw'
+                ? el('div', { class: 'muted small' }, [c.signature_method === 'type' ? 'Signed by typed name' : 'Signature generated from typed name'])
+                : null,
             ]))) : el('span', { class: 'muted' }, ['No consents on file']),
           ]),
           auditCard,

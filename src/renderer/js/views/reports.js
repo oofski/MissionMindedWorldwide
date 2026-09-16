@@ -1,5 +1,5 @@
 import { el, clear, toast } from '../dom.js';
-import { conditions } from '../i18n.js';
+import { conditions, raceLabel } from '../i18n.js';
 import { SECTIONS, QUESTION_BY_KEY } from '../../i18n/exitSurvey.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
@@ -146,6 +146,11 @@ export function renderReports(ctx) {
     const city = sm.by_city || {};
     const byStatus = sm.by_status || {};
     const condObj = conditionLabels(sm.conditions);
+    // Stored as raw codes so the blob stays language-neutral on disk; labelled here.
+    const race = relabel(sm.by_race || {}, (k) => (k === 'Not recorded' ? k : raceLabel(k)));
+    // Recomputed from the sum and count, never read as a stored average — a
+    // merged report's mean has to be of all its patients, not of its parts.
+    const meanAge = sm.age_known ? Math.round((sm.age_sum / sm.age_known) * 10) / 10 : null;
     const dailyRows = (sm.days || []).filter((d) => d.date && d.date !== 'Not recorded');
 
     const keptEvents = (rollup && rollup.kept_events) || [];
@@ -199,6 +204,24 @@ export function renderReports(ctx) {
           el('div', { class: 'card-title' }, [icon('users', { size: 15 }), 'Patient demographics']),
           demoGroup('By gender', gender, ['Male', 'Female', 'Other', 'Not recorded'], { sort: false }),
           demoGroup('By age', age, ['Under 18', '18–34', '35–54', '55+', 'Not recorded'], { sort: false }),
+          meanAge != null
+            ? el('p', { class: 'awareness', style: 'margin:-6px 0 14px' }, [
+                'Average age ', el('strong', {}, [String(meanAge)]),
+                ` years, across ${sm.age_known} patient(s) with a date of birth on file.`,
+              ])
+            : null,
+          demoGroup('By race and ethnicity', race, Object.keys(race), { limit: 9 }),
+          // The counts above are of SELECTIONS — one patient may choose several —
+          // so the figure a grant return quotes as "patients who told us" is this
+          // one, stated separately rather than left to be inferred from bars that
+          // deliberately sum past the patient count.
+          (sm.race_answered || sm.race_declined)
+            ? el('p', { class: 'awareness', style: 'margin:-6px 0 14px' }, [
+                el('strong', {}, [String(sm.race_answered || 0)]),
+                ` patient(s) gave one or more categories; ${sm.race_declined || 0} preferred not to answer. `,
+                'A patient may choose more than one, so the bars above count selections, not people.',
+              ])
+            : null,
           demoGroup('By language', lang, Object.keys(lang), { limit: 4 }),
           demoGroup('By city', city, Object.keys(city), { limit: 5 }),
         ]),

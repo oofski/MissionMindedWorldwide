@@ -1,4 +1,4 @@
-import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES } from '../i18n/strings.js';
+import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE } from '../i18n/strings.js';
 
 let lang = 'en';
 
@@ -28,6 +28,34 @@ export function t(path) {
 export function tRaw(path) {
   const lookup = (obj) => path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
   return lookup(CATALOG[lang]);
+}
+
+export function raceOptions() {
+  return RACE.map((o) => ({ key: o.key, label: o[lang] || o.en }));
+}
+
+/** Display text for one stored race key; unknown keys pass through verbatim. */
+export function raceLabel(key) {
+  const hit = RACE.find((o) => o.key === key);
+  return hit ? (hit[lang] || hit.en) : String(key || '');
+}
+
+export function priorDentistOptions() {
+  return PRIOR_DENTIST.map((o) => ({ key: o.key, label: o[lang] || o.en }));
+}
+
+/**
+ * Display text for a stored prior_dentist value.
+ *
+ * Records created before this became a dropdown hold free text ("2 yrs ago",
+ * "?"). Those are shown back verbatim rather than blanked or coerced into a
+ * bucket they may not belong in — the answer the patient actually gave is the
+ * honest thing to print on their record.
+ */
+export function priorDentistLabel(value) {
+  if (!value) return '';
+  const hit = PRIOR_DENTIST.find((o) => o.key === value);
+  return hit ? (hit[lang] || hit.en) : String(value);
 }
 
 export function conditions() {
@@ -85,3 +113,6 @@ export function stopSpeaking() {
 export function isSpeaking() {
   return speaking;
 }
+
+// Re-exported so views import route derivation from the same place as labels.
+export { routeForVisitType };

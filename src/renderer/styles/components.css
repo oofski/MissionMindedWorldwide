@@ -883,3 +883,10 @@ body.survey-open{ overflow:hidden; }
 .survey-bar-track{ height:9px; border-radius:var(--radius-full); background:var(--surface-sunken); overflow:hidden; }
 .survey-bar-track span{ display:block; height:100%; background:var(--teal-deep); border-radius:var(--radius-full); }
 .survey-bar-n{ color:var(--text-muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+/* Signature field — draw / type / generate. */
+.sigfield{ display:block; }
+.sigfield-tabs{ margin:6px 0 10px; flex-wrap:wrap; }
+.sigfield-tabs .chip-btn{ display:inline-flex; align-items:center; gap:7px; }
+.sigfield-preview{ border:var(--border-line); border-radius:var(--radius-sm); background:#fff; padding:10px; min-height:96px; display:flex; align-items:center; justify-content:center; }
+.sigfield-img{ max-width:100%; height:auto; display:block; }

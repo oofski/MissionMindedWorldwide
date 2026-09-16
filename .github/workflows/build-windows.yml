@@ -226,26 +226,42 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### New — the patient exit survey
-            The MMW Patient Exit Survey is now part of check-out. The desk hands
-            the laptop or tablet to the patient, who answers it themselves in
-            **English or Spanish** — every one of the 34 questions is translated,
-            and the patient can switch language at any point.
+            ### New in this build
 
-            - It is asked **before** the patient is dismissed, because once they
-              are out of the door there is no second chance — which is why this
-              has never been collected reliably on paper.
-            - Every question is optional and the whole survey can be **declined**.
-              A refusal is recorded as a refusal, so the clinic can tell the
-              difference between "asked, said no" and "never asked" — and nobody
-              has to invent answers to get a patient checked out.
-            - **Reports → Patient exit survey** shows the results as counts and
-              percentages, question by question, which is what a grant return is
-              written from. Percentages are of the people who answered *that*
-              question, not of everyone seen.
-            - The totals are de-identified — closed-choice answers only, no free
-              text and no names — so they survive a patient-data purge and can
-              still answer a funder months later.
+            **Intake is shorter and the answers are countable.**
+            - "Reason for today's visit" is gone. "What do you need today?" asks
+              the same thing in a form a report can add up.
+            - "When did you last see a dentist?" is now a dropdown — within 6
+              months, about 1 year, about 2 years, 3 or more years, or never —
+              instead of a free-text box that produced answers like "a while ago".
+            - **Every dental history question is now required**, and if one is
+              missed the app says which one rather than "please complete this step".
+            - The same changes apply to the online pre-registration form, so both
+              routes produce the same countable answers.
+
+            **Patients are routed automatically.** The "Who would you like to see
+            today?" step is gone. A cleaning goes to the hygienist; a filling or
+            an extraction goes to the dentist — decided from what the patient
+            already said they need, so the two answers can no longer disagree.
+            Staff can still move a patient between the two.
+
+            **The waiver can be signed three ways**, for clinics running a mix of
+            tablets and laptops: draw it, type your name, or have the app write
+            your name for you. How it was signed is recorded and shown on the
+            chart and the printed consent — a generated signature is never
+            presented as one drawn by hand.
+
+            **Reports gains race and ethnicity, and an average age.** The race
+            question uses the seven current US federal (OMB 2024) categories as
+            one optional question, which is what grant returns are scored
+            against. Age was already calculated from date of birth; the report
+            now also states the average.
+
+            **Fixed:** the HIV / Hepatitis consent answer was never included in
+            what syncs between laptops, so it was silently lost on every other
+            device and on a USB clinic restore. **Update all clinic laptops
+            together** — a device left on an older build will blank these answers
+            when it syncs.
 
             ### Signing in
             Every install now comes with an administrator already set up:

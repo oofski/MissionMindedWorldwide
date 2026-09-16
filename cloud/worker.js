@@ -351,6 +351,12 @@ async function handleCheckinPost(eventUid, request, env) {
     if (missingMed || missingDent) {
       return json({ ok: false, error: esErr ? 'Por favor responda todas las preguntas del historial médico y dental.' : 'Please answer every medical and dental history question.' }, 400);
     }
+    // Same gate as the walk-in form. Without it a blank stores as '' and lands
+    // in the report as an uncountable row, which is the thing making this a
+    // dropdown was meant to stop.
+    if (!clean.dental_history.prior_dentist) {
+      return json({ ok: false, error: esErr ? 'Por favor indique cuándo visitó al dentista por última vez.' : 'Please choose when you last saw a dentist.' }, 400);
+    }
   }
 
   const iso = nowIso();
@@ -455,8 +461,17 @@ function buildPreregPatient(b) {
   if (conditions.includes('none')) medical_history.conditions_none = true;
   if (!meds.length && (b.medications_none === true || b.medications_none === 'on')) medical_history.medications_none = true;
 
+  // Mirrors PRIOR_DENTIST in src/renderer/i18n/strings.js. Validated here, not
+  // just presented as a dropdown in the page: this endpoint is reachable
+  // directly, and a free-text value arriving from it would land in the report as
+  // a bucket of one that no funder figure can use.
+  //
+  // 'reason' is deliberately NOT read any more. The walk-in form dropped it, and
+  // if this form kept posting prose the online sign-ups would be the only
+  // records carrying it — a split the Reports tab cannot show.
+  const PRIOR_DENTIST = ['within_6_months', 'about_1_year', 'about_2_years', 'over_3_years', 'never'];
   const dental_history = {
-    reason: s(b.reason, 400), prior_dentist: s(b.prior_dentist, 120),
+    prior_dentist: PRIOR_DENTIST.includes(b.prior_dentist) ? b.prior_dentist : '',
     gum_bleeding: yn(b.gum_bleeding), sores: yn(b.sores), jaw_injury: yn(b.jaw_injury),
     grinding: yn(b.grinding), post_extraction_bleeding: yn(b.post_extraction_bleeding), ortho: yn(b.ortho),
   };
@@ -477,6 +492,17 @@ function buildPreregPatient(b) {
     demographics: {
       address: s(b.address, 200), city: s(b.city, 80), state: s(b.state, 40),
       emergency_name: s(b.emergency_name, 120), emergency_phone: s(b.emergency_phone, 20), referral: s(b.referral, 120),
+      // Mirrors RACE in src/renderer/i18n/strings.js. Without this the online
+      // sign-ups would be permanently "Not recorded" in the race breakdown while
+      // walk-ins were counted — a split invisible on the Reports page.
+      // "Prefer not to answer" is about the list, so it replaces it.
+      race: (function () {
+        const ok = ['american_indian_alaska_native', 'asian', 'black_african_american', 'hispanic_latino',
+          'middle_eastern_north_african', 'native_hawaiian_pacific_islander', 'white', 'prefer_not'];
+        const picked = Array.isArray(b.race) ? b.race.filter((r) => ok.includes(r)) : [];
+        const uniq = Array.from(new Set(picked));
+        return uniq.includes('prefer_not') ? ['prefer_not'] : uniq;
+      })(),
     },
     medical_history,
     dental_history,
@@ -517,24 +543,24 @@ const FORM_DENTAL_YESNO = [
 // patient can read and sign remotely the SAME forms they would in person.
 const GENERAL_CONSENT_TITLE = 'Consent to Dental Procedures, Administration of Anesthetics, Sedatives, Rendering of Other Services, and Hold Harmless Clause';
 const GENERAL_CONSENT = [
-  'I hereby authorize Caring Hands Worldwide or Associate Dentist and/or such assistants as may be selected, to perform Routine Dental Care upon the above named and/or any other therapeutic procedure that his/her/their judgment may dictate to be advisable for the patient’s well-being.',
+  'I hereby authorize Mission Minded Worldwide or Associate Dentist and/or such assistants as may be selected, to perform Routine Dental Care upon the above named and/or any other therapeutic procedure that his/her/their judgment may dictate to be advisable for the patient’s well-being.',
   'The nature and purpose of the procedure and anesthetic, the risks involved, and the possibility of complications has been explained to me. I acknowledge that no guarantee or assurance has been made as to the results that may be obtained. The advantages and inherent risks of anesthesia and sedation have been explained to me and I authorize the administration of such anesthesia and sedation as may be considered necessary or desirable.',
   'I authorize that any specimens, tissue or parts removed from the patient may be disposed of in accordance with established practice.',
   'I further authorize the performance by any qualified person of any other services which are deemed to be necessary or advisable.',
-  'If in Caring Hands Worldwide/Associate Dentist’s opinion, further observation of the above named is indicated after an anesthetic or procedure, the above named agrees to be transported by ambulance at his/her personal expense to a mutually satisfactory hospital in the local area, and to be admitted for observation and any necessary treatment. Any and all medical treatment required after a dental procedure will be the financial responsibility of the patient or his/her family. Free services are limited to the services provided at the free dental clinic.',
-  'If in Caring Hands Worldwide/Associate Dentist’s opinion, the above named requires the services of a specialist, he/she agrees to accept the referral and will be responsible for any expense that may be incurred.',
-  'I certify that I have read this Consent, or that it has been read to me, and that I understand the above. The nature and purpose of such operation(s), procedure(s), treatment(s), and/or services and the reasons why the same is (are) considered necessary or advisable has been explained to me. I hereby hold Caring Hands Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence. I am also aware of the risk of exposure to COVID during a dental procedure and I consent to participate in this clinic at my own risk.',
+  'If in Mission Minded Worldwide/Associate Dentist’s opinion, further observation of the above named is indicated after an anesthetic or procedure, the above named agrees to be transported by ambulance at his/her personal expense to a mutually satisfactory hospital in the local area, and to be admitted for observation and any necessary treatment. Any and all medical treatment required after a dental procedure will be the financial responsibility of the patient or his/her family. Free services are limited to the services provided at the free dental clinic.',
+  'If in Mission Minded Worldwide/Associate Dentist’s opinion, the above named requires the services of a specialist, he/she agrees to accept the referral and will be responsible for any expense that may be incurred.',
+  'I certify that I have read this Consent, or that it has been read to me, and that I understand the above. The nature and purpose of such operation(s), procedure(s), treatment(s), and/or services and the reasons why the same is (are) considered necessary or advisable has been explained to me. I hereby hold Mission Minded Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence. I am also aware of the risk of exposure to COVID during a dental procedure and I consent to participate in this clinic at my own risk.',
 ];
 const ORAL_SURGERY_TITLE = 'Consent for Oral Surgery';
 const ORAL_SURGERY_CONSENT = [
   'The surgery procedure that is to be performed has been explained to me and I understand the nature of my condition and of the proposed treatment. I also understand what health risks exist if the procedure is not done, such as pain, infection, decay, damage to other teeth and a more difficult surgery as I get older.',
   'I agree to the administration of local anesthesia and other therapeutic measures as discussed that may be necessary for my comfort, safety and well-being.',
   'I realize that occasionally there are complications with this surgery and the medications. The more common complications include pain, swelling, bleeding, dry sockets, limited mouth opening, infection, bruising and discoloration of the skin, and temporary numbness and/or tingling of the lip, chin, teeth, or tongue.',
-  'In some cases, even with the utmost care, there can be referred pain to the ear or neck; stiffness of the neck and facial muscles; changes in the bite and temporomandibular joint (TMJ); nausea; allergic reactions; bone fractures; injury to adjacent teeth; delayed healing; and permanent numbness of nerves in the facial area. Sinus complications, which may occur from the removal of upper teeth, include a root tip or tooth in the sinus or the development of a lingering opening into the sinus from the mouth, which could require sinus treatments following surgery. I understand Caring Hands Worldwide does not provide or pay for any of these additional treatments.',
+  'In some cases, even with the utmost care, there can be referred pain to the ear or neck; stiffness of the neck and facial muscles; changes in the bite and temporomandibular joint (TMJ); nausea; allergic reactions; bone fractures; injury to adjacent teeth; delayed healing; and permanent numbness of nerves in the facial area. Sinus complications, which may occur from the removal of upper teeth, include a root tip or tooth in the sinus or the development of a lingering opening into the sinus from the mouth, which could require sinus treatments following surgery. I understand Mission Minded Worldwide does not provide or pay for any of these additional treatments.',
   'Medications given during or after surgery may cause drowsiness and a lack of awareness and coordination, which could be increased by the use of alcohol or other drugs. I am aware that I should not operate any vehicle or hazardous device while taking such medications for at least 24 hours after taking them, or until recovered from their effects.',
   'I know that some of the above-mentioned complications can be avoided or reduced by carefully following dentist instructions. I have had an opportunity to ask questions about the procedure and aspects related to it and have had them answered to my satisfaction. This is my consent to surgery on the tooth number(s) recorded on this form.',
-  'For prolonged swelling (growing bigger in 24–48 hrs) or no relief from pain: Call CARING HANDS WORLDWIDE at (541) 556-5902. Leave a message for Randy Meyer. He will call you back and tell you how to get attention for your problem. If you have had to leave a message, be patient and wait until he calls back and gives you instructions. This post-op attention is only for treatment received and is not for continuing treatment on other teeth. If you experience difficulty breathing or swallowing, you should go to the Emergency Room for immediate treatment. Caring Hands Worldwide does not pay for any emergency room treatment, only for follow-up consultation with an approved local dentist to treat infection, pain, or swelling associated with treatment received at the free clinic.',
-  'I hereby hold Caring Hands Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence.',
+  'For prolonged swelling (growing bigger in 24–48 hrs) or no relief from pain: Call MISSION MINDED WORLDWIDE at (951) 317-4968 and leave a message. Someone will call you back and tell you how to get attention for your problem. If you have had to leave a message, be patient and wait until someone calls back and gives you instructions. This post-op attention is only for treatment received and is not for continuing treatment on other teeth. If you experience difficulty breathing or swallowing, you should go to the Emergency Room for immediate treatment. Mission Minded Worldwide does not pay for any emergency room treatment, only for follow-up consultation with an approved local dentist to treat infection, pain, or swelling associated with treatment received at the free clinic.',
+  'I hereby hold Mission Minded Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence.',
 ];
 const CONSENT_AGREE_TEXT = 'I have read and understand the above, and I consent.';
 
@@ -563,7 +589,7 @@ const FORM_DENTAL_YESNO_ES = [
   ['gum_bleeding', '¿Le sangran las encías?'], ['sores', '¿Llagas o bultos en la boca?'], ['jaw_injury', '¿Lesión en cabeza, cuello o mandíbula?'],
   ['grinding', '¿Aprieta o rechina los dientes?'], ['post_extraction_bleeding', '¿Historial de sangrado después de una extracción?'], ['ortho', '¿Ha usado frenos u ortodoncia?'],
 ];
-const GENERAL_CONSENT_ES = ['Certifico que he leído este Consentimiento, o que me ha sido leído, y que entiendo lo anterior. Se me ha explicado la naturaleza y el propósito de tales operación(es), procedimiento(s), tratamiento(s) y/o servicios y las razones por las que se consideran necesarios o aconsejables. Por la presente eximo de responsabilidad a Caring Hands Worldwide, al Dentista Asociado y/o a dichos asistentes por la atención dental gratuita brindada. Los servicios se prestan sin compensación y la responsabilidad del proveedor es limitada y el proveedor no puede ser considerado responsable por ninguna lesión, muerte u otra pérdida que surja de la prestación de estos servicios, a menos que la lesión, muerte u otra pérdida resulte de negligencia grave. También soy consciente del riesgo de exposición al COVID durante un procedimiento dental y consiento participar en esta clínica bajo mi propio riesgo. (La versión en inglés es la versión legal autoritativa.)'];
+const GENERAL_CONSENT_ES = ['Certifico que he leído este Consentimiento, o que me ha sido leído, y que entiendo lo anterior. Se me ha explicado la naturaleza y el propósito de tales operación(es), procedimiento(s), tratamiento(s) y/o servicios y las razones por las que se consideran necesarios o aconsejables. Por la presente eximo de responsabilidad a Mission Minded Worldwide, al Dentista Asociado y/o a dichos asistentes por la atención dental gratuita brindada. Los servicios se prestan sin compensación y la responsabilidad del proveedor es limitada y el proveedor no puede ser considerado responsable por ninguna lesión, muerte u otra pérdida que surja de la prestación de estos servicios, a menos que la lesión, muerte u otra pérdida resulte de negligencia grave. También soy consciente del riesgo de exposición al COVID durante un procedimiento dental y consiento participar en esta clínica bajo mi propio riesgo. (La versión en inglés es la versión legal autoritativa.)'];
 const ORAL_SURGERY_ES = [
   'Este consentimiento adicional es necesario porque hoy podría realizarse una extracción.',
   'Consiento la extracción de uno o más dientes y el uso de anestesia local.',
@@ -582,11 +608,14 @@ const I18N = {
     gOpt: [['', '—'], ['male', 'Male'], ['female', 'Female'], ['other', 'Other']],
     phone: 'Phone number', email: 'Email', address: 'Home address', city: 'City', state: 'State',
     emName: 'Emergency contact name', emPhone: 'Emergency contact phone',
-    need: 'What do you need today?', reason: 'Reason for today’s visit', reasonPh: 'Tell us what is bothering you',
+    need: 'What do you need today?',
+    raceTitle: 'Race and ethnicity', raceHint: 'Optional. Choose any that apply — used only for reporting how the clinic served the community.',
+    raceList: [['american_indian_alaska_native', 'American Indian or Alaska Native'], ['asian', 'Asian'], ['black_african_american', 'Black or African American'], ['hispanic_latino', 'Hispanic or Latino'], ['middle_eastern_north_african', 'Middle Eastern or North African'], ['native_hawaiian_pacific_islander', 'Native Hawaiian or Pacific Islander'], ['white', 'White'], ['prefer_not', 'Prefer not to answer']],
     allergies: 'Medication allergies', selectAll: 'Select all that apply', allergyOther: 'Other allergy (specify)',
     conditions: 'Do you have any of these conditions?', conditionOther: 'Other condition (specify)', none: 'None of the above', otherOpt: 'Other (type below)',
     meds: 'Current medications', addMed: '+ Add medication', noMeds: 'No medications', medNamePh: 'Medication',
     medHist: 'Medical History', dentHist: 'Dental History', priorDentist: 'When did you last see a dentist?', yes: 'Yes', no: 'No', dash: '—',
+    priorDentistOpts: [['within_6_months', 'Within the past 6 months'], ['about_1_year', 'About 1 year ago'], ['about_2_years', 'About 2 years ago'], ['over_3_years', '3 or more years ago'], ['never', 'Never']],
     consent: 'Consent', signName: 'Your name (for the signature)', relationship: 'Relationship (if for a minor)', relPh: 'Self / Parent / Guardian',
     agree: CONSENT_AGREE_TEXT, sigOpt: 'Signature', sigHint: 'Sign with your finger or a stylus.', clear: 'Clear',
     surgery: 'Surgery Consent', surgeryIntro: 'Because an extraction may be done, please also read and sign this.', teeth: 'Tooth number(s), if known',
@@ -609,11 +638,14 @@ const I18N = {
     gOpt: [['', '—'], ['male', 'Masculino'], ['female', 'Femenino'], ['other', 'Otro']],
     phone: 'Teléfono', email: 'Correo electrónico', address: 'Dirección', city: 'Ciudad', state: 'Estado',
     emName: 'Nombre de contacto de emergencia', emPhone: 'Teléfono de contacto de emergencia',
-    need: '¿Qué necesita hoy?', reason: 'Motivo de la visita de hoy', reasonPh: 'Díganos qué le molesta',
+    need: '¿Qué necesita hoy?',
+    raceTitle: 'Raza y origen étnico', raceHint: 'Opcional. Elija todas las que correspondan — solo se usa para informar cómo la clínica sirvió a la comunidad.',
+    raceList: [['american_indian_alaska_native', 'Indígena de América o nativo de Alaska'], ['asian', 'Asiático'], ['black_african_american', 'Negro o afroamericano'], ['hispanic_latino', 'Hispano o latino'], ['middle_eastern_north_african', 'De Medio Oriente o del norte de África'], ['native_hawaiian_pacific_islander', 'Nativo de Hawái o de las islas del Pacífico'], ['white', 'Blanco'], ['prefer_not', 'Prefiero no responder']],
     allergies: 'Alergias a medicamentos', selectAll: 'Seleccione todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
     conditions: '¿Tiene alguna de estas condiciones?', conditionOther: 'Otra condición (especifique)', none: 'Ninguna de las anteriores', otherOpt: 'Otra (escriba abajo)',
     meds: 'Medicamentos actuales', addMed: '+ Agregar medicamento', noMeds: 'Sin medicamentos', medNamePh: 'Medicamento',
     medHist: 'Historial médico', dentHist: 'Historial dental', priorDentist: '¿Cuándo visitó al dentista por última vez?', yes: 'Sí', no: 'No', dash: '—',
+    priorDentistOpts: [['within_6_months', 'En los últimos 6 meses'], ['about_1_year', 'Hace aproximadamente 1 año'], ['about_2_years', 'Hace aproximadamente 2 años'], ['over_3_years', 'Hace 3 años o más'], ['never', 'Nunca']],
     consent: 'Consentimiento', signName: 'Su nombre (para la firma)', relationship: 'Parentesco (si es para un menor)', relPh: 'Yo mismo / Padre / Tutor',
     agree: 'He leído y entiendo lo anterior, y doy mi consentimiento.', sigOpt: 'Firma', sigHint: 'Firme con su dedo o un lápiz óptico.', clear: 'Borrar',
     surgery: 'Consentimiento de Cirugía', surgeryIntro: 'Como podría realizarse una extracción, lea y firme esto también.', teeth: 'Número(s) de diente, si los sabe',
@@ -690,6 +722,7 @@ function checkinFormPage(eventUid, eventName, lang) {
   const chip = (name, k, label) => '<label class="chip"><input type="checkbox" name="' + name + '" value="' + htmlEscape(k) + '">' + htmlEscape(label) + '</label>';
   const allergyChips = L.allergyList.map(([k, l]) => chip('allergy', k, l)).join('') + chip('allergy', 'none', L.none) + chip('allergy', 'other', L.otherOpt);
   const condChips = L.conditionList.map(([k, l]) => chip('condition', k, l)).join('') + chip('condition', 'none', L.none) + chip('condition', 'other', L.otherOpt);
+  const raceChips = L.raceList.map(([k, l]) => chip('race', k, l)).join('');
   const visitOpts = L.visits.map(([k, l]) => '<label class="chip"><input type="radio" name="visit" value="' + htmlEscape(k) + '">' + htmlEscape(l) + '</label>').join('');
   // Every history question is required: a blank is not the same as "no", and the
   // dentist reads these before deciding whether it is safe to treat.
@@ -721,7 +754,9 @@ function checkinFormPage(eventUid, eventName, lang) {
     '</div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.need) + '</h2><div class="chips">' + visitOpts + '</div>' +
-    '<label style="margin-top:12px">' + htmlEscape(L.reason) + '</label><textarea id="reason" placeholder="' + htmlEscape(L.reasonPh) + '"></textarea></div>' +
+    '</div>' +
+
+    '<div class="card"><h2>' + htmlEscape(L.raceTitle) + '</h2><p class="hint" style="margin:0 0 6px">' + htmlEscape(L.raceHint) + '</p><div class="chips" id="race">' + raceChips + '</div></div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.allergies) + '</h2><p class="hint" style="margin:0 0 6px">' + htmlEscape(L.selectAll) + '</p><div class="chips" id="allergies">' + allergyChips + '</div>' +
     '<input type="text" id="allergies_other" placeholder="' + htmlEscape(L.allergyOther) + '" style="margin-top:8px"></div>' +
@@ -735,7 +770,10 @@ function checkinFormPage(eventUid, eventName, lang) {
 
     '<div class="card"><h2>' + htmlEscape(L.medHist) + '</h2>' + medYesNo + '</div>' +
 
-    '<div class="card"><h2>' + htmlEscape(L.dentHist) + '</h2><label>' + htmlEscape(L.priorDentist) + '</label><input type="text" id="prior_dentist">' + dentalYesNo + '</div>' +
+    '<div class="card"><h2>' + htmlEscape(L.dentHist) + '</h2><label>' + htmlEscape(L.priorDentist) + '</label>' +
+      '<select id="prior_dentist"><option value="">' + htmlEscape(L.dash) + '</option>' +
+      L.priorDentistOpts.map(function (o) { return '<option value="' + o[0] + '">' + htmlEscape(o[1]) + '</option>'; }).join('') +
+      '</select>' + dentalYesNo + '</div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.consent) + '</h2><div class="consent">' + genConsent + '</div>' +
     '<div class="row" style="margin-top:10px"><div><label>' + htmlEscape(L.signName) + '</label><input type="text" id="signer"></div>' +
@@ -786,7 +824,7 @@ function checkinFormPage(eventUid, eventName, lang) {
     "if(extraction&&!el('sagree').checked){err.textContent=T.errSurgery;return;}" +
     "if(extraction&&(!spad||!spad.data())){err.textContent=T.errSignSurgery;el('ssig').scrollIntoView({block:'center'});return;}" +
     "var payload={first_name:fn,last_name:ln,dob:val('dob'),gender:val('gender'),phone:val('phone'),email:val('email'),language:LANG,address:val('address'),city:val('city'),state:val('state'),emergency_name:val('emergency_name'),emergency_phone:val('emergency_phone')," +
-    "reason:val('reason'),visit_type:visit,allergies:checked('allergy'),allergies_other:val('allergies_other'),conditions:checked('condition'),conditions_other:val('conditions_other')," +
+    "visit_type:visit,race:checked('race'),allergies:checked('allergy'),allergies_other:val('allergies_other'),conditions:checked('condition'),conditions_other:val('conditions_other')," +
     "medications:Array.prototype.slice.call(meds.querySelectorAll('input')).map(function(i){return i.value.trim();}).filter(Boolean),medications_none:el('medications_none').checked," +
     "under_treatment:val('under_treatment'),hospitalized:val('hospitalized'),tobacco:val('tobacco'),pregnancy:val('pregnancy')," +
     "prior_dentist:val('prior_dentist'),gum_bleeding:val('gum_bleeding'),sores:val('sores'),jaw_injury:val('jaw_injury'),grinding:val('grinding'),post_extraction_bleeding:val('post_extraction_bleeding'),ortho:val('ortho')," +

@@ -695,6 +695,9 @@ export function renderProvider(ctx, params = {}) {
           type, language: 'en',
           signer_name: signer.value.trim(),
           signature_png: sig.isEmpty() ? null : sig.getDataUrl(),
+          // Chairside signing is the canvas pad. Saying so explicitly stops NULL
+          // from meaning both "signed at the chair" and "row predates the field".
+          signature_method: sig.isEmpty() ? null : 'draw',
           tooth_numbers: isSurgery ? teeth.value.trim() : undefined,
         });
         toast('Consent recorded', 'success');

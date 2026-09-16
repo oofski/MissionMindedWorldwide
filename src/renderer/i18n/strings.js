@@ -73,6 +73,65 @@ export const ALLERGIES = [
 // What the patient needs today — chosen on a 1–4 scale at check-in. Options 1 and
 // 2 (extraction) trigger the oral-surgery consent. Shared so the check-in slider
 // and the clinician screens all use the same labels.
+// Race and ethnicity, as ONE question.
+//
+// These are the seven minimum categories of OMB Statistical Policy Directive
+// No. 15 as revised in March 2024 — the standard US federal and HHS grant
+// reporting is scored against, which is the entire reason this field exists.
+//
+// The 2024 revision folded ethnicity INTO race: "Hispanic or Latino" is a
+// category here, not a separate yes/no question as it was under the 1997
+// standard. Collecting the combined answer is also the safe direction, because
+// it can be crosswalked down to the old two-field layout later and a 1997-shaped
+// answer cannot be crosswalked up.
+//
+// Select all that apply, and entirely optional — this is a free clinic, and a
+// demographic question must never stand between a patient and care.
+export const RACE = [
+  { key: 'american_indian_alaska_native', en: 'American Indian or Alaska Native', es: 'Indígena de América o nativo de Alaska' },
+  { key: 'asian', en: 'Asian', es: 'Asiático' },
+  { key: 'black_african_american', en: 'Black or African American', es: 'Negro o afroamericano' },
+  { key: 'hispanic_latino', en: 'Hispanic or Latino', es: 'Hispano o latino' },
+  { key: 'middle_eastern_north_african', en: 'Middle Eastern or North African', es: 'De Medio Oriente o del norte de África' },
+  { key: 'native_hawaiian_pacific_islander', en: 'Native Hawaiian or Pacific Islander', es: 'Nativo de Hawái o de las islas del Pacífico' },
+  { key: 'white', en: 'White', es: 'Blanco' },
+  { key: 'prefer_not', en: 'Prefer not to answer', es: 'Prefiero no responder' },
+];
+
+// Which station a patient goes to, derived from what they said they need.
+// Mirrors VISIT_ROUTE in src/main/db.js, which is the authority — this copy
+// exists only so the kiosk can SHOW the patient where they are being sent. The
+// harness pins the two together.
+//
+// Returns null for an unknown or missing visit type rather than guessing: a
+// returning patient starting a fresh visit has no visit_type yet, and silently
+// defaulting them to the dentist would put cleanings in the wrong queue with
+// nobody aware a guess had been made.
+export function routeForVisitType(visitType) {
+  const hit = VISIT_TYPES.find((v) => v.key === visitType);
+  if (!hit) return null;
+  return hit.key === 'cleaning' ? 'hygienist' : 'dentist';
+}
+
+// When the patient last saw a dentist. Was a free-text box, which produced
+// answers like "a while ago" and "?" that no report could ever count — the whole
+// reason the question is asked at a free clinic is to show unmet need.
+//
+// Two deliberate departures from the four buckets requested:
+//   - the last bucket is "3 or more years", not "3 years", because otherwise a
+//     patient who last went a decade ago has nowhere to go but an answer that is
+//     simply false;
+//   - "Never" exists, because at a free clinic it is one of the most common and
+//     most reportable answers there is, and without it those patients would be
+//     forced to claim a visit they never made.
+export const PRIOR_DENTIST = [
+  { key: 'within_6_months', en: 'Within the past 6 months', es: 'En los últimos 6 meses' },
+  { key: 'about_1_year', en: 'About 1 year ago', es: 'Hace aproximadamente 1 año' },
+  { key: 'about_2_years', en: 'About 2 years ago', es: 'Hace aproximadamente 2 años' },
+  { key: 'over_3_years', en: '3 or more years ago', es: 'Hace 3 años o más' },
+  { key: 'never', en: 'Never', es: 'Nunca' },
+];
+
 export const VISIT_TYPES = [
   { key: 'extraction_pain', en: 'Extraction — in pain', es: 'Extracción — con dolor', ru: 'Удаление — с болью', surgery: true },
   { key: 'extraction_no_pain', en: 'Extraction — no pain', es: 'Extracción — sin dolor', ru: 'Удаление — без боли', surgery: true },
