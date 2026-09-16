@@ -21,6 +21,20 @@
 
 export const SURVEY_VERSION = 'mmw-exit-v1';
 
+// WHEN each section can honestly be asked.
+//
+// The survey is split across the visit. Everything about the patient's
+// circumstances — household, income, insurance, housing, barriers to care — is
+// answerable the moment they register, while they are sitting and waiting
+// anyway. Everything about the visit itself can only be answered afterwards:
+// nobody can rate care they have not yet received, and asking them to would
+// produce a grant figure that means nothing.
+//
+// Splitting it also makes check-out a twelve-question ask instead of
+// thirty-four, which is the difference between a survey people finish on their
+// way out of the door and one they abandon.
+export const STAGES = { REGISTRATION: 'registration', EXIT: 'exit' };
+
 /** Shorthand for the answer sets that repeat across the survey. */
 const YES_NO_UNSURE_PNA = [
   { value: 'yes', en: 'Yes', es: 'Sí' },
@@ -38,6 +52,7 @@ const PNA = { value: 'pna', en: 'Prefer not to answer', es: 'Prefiero no respond
 export const SECTIONS = [
   {
     key: 'about',
+    stage: 'registration',
     en: 'About your visit',
     es: 'Sobre su visita',
     questions: [
@@ -69,6 +84,7 @@ export const SECTIONS = [
   },
   {
     key: 'household',
+    stage: 'registration',
     en: 'Your household',
     es: 'Su hogar',
     questions: [
@@ -144,6 +160,7 @@ export const SECTIONS = [
   },
   {
     key: 'work',
+    stage: 'registration',
     en: 'Work and income',
     es: 'Trabajo e ingresos',
     questions: [
@@ -217,6 +234,7 @@ export const SECTIONS = [
   },
   {
     key: 'coverage',
+    stage: 'registration',
     en: 'Insurance and access to care',
     es: 'Seguro y acceso a la atención',
     questions: [
@@ -321,6 +339,7 @@ export const SECTIONS = [
   },
   {
     key: 'experience',
+    stage: 'exit',
     en: "Today's clinic",
     es: 'La clínica de hoy',
     questions: [
@@ -397,6 +416,7 @@ export const SECTIONS = [
   },
   {
     key: 'impact',
+    stage: 'exit',
     en: 'The difference today made',
     es: 'La diferencia que hizo hoy',
     questions: [
@@ -458,6 +478,15 @@ export const SECTIONS = [
     ],
   },
 ];
+
+/** The sections asked at each point in the visit. */
+export const REGISTRATION_SECTIONS = SECTIONS.filter((s) => s.stage === STAGES.REGISTRATION);
+export const EXIT_SECTIONS = SECTIONS.filter((s) => s.stage === STAGES.EXIT);
+
+/** Questions belonging to one stage — used to score that stage's completeness. */
+export function questionsForStage(stage) {
+  return SECTIONS.filter((s) => s.stage === stage).flatMap((s) => s.questions);
+}
 
 /** Every question, flattened — the order the survey is asked and reported in. */
 export const QUESTIONS = SECTIONS.flatMap((s) => s.questions.map((q) => ({ ...q, section: s.key })));

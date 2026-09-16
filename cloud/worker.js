@@ -490,7 +490,8 @@ function buildPreregPatient(b) {
     email: s(b.email, 120),
     language: b.language === 'es' ? 'es' : 'en',
     demographics: {
-      address: s(b.address, 200), city: s(b.city, 80), state: s(b.state, 40),
+      address: s(b.address, 200), city: s(b.city, 80),
+      state: US_STATE_CODES.includes(String(b.state || '').toUpperCase()) ? String(b.state).toUpperCase() : '',
       emergency_name: s(b.emergency_name, 120), emergency_phone: s(b.emergency_phone, 20), referral: s(b.referral, 120),
       // Mirrors RACE in src/renderer/i18n/strings.js. Without this the online
       // sign-ups would be permanently "Not recorded" in the race breakdown while
@@ -512,6 +513,13 @@ function buildPreregPatient(b) {
 // The check-in questions offered on the public form — the SAME options a patient
 // gets in person. Keys MUST match the app's i18n keys (renderer/i18n/strings.js)
 // so selections render natively in the clinic app.
+// Mirrors US_STATES in src/renderer/i18n/strings.js. A dropdown here as well as
+// on the walk-in form, and validated server-side: this endpoint is reachable
+// directly, and free text was putting "OR", "Oregon" and "ore" into the
+// city/state report as three different places.
+const US_STATE_CODES = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'PR', 'VI', 'GU', 'AS', 'MP'];
+const US_STATE_OPTIONS = '<option value="AL">Alabama (AL)</option><option value="AK">Alaska (AK)</option><option value="AZ">Arizona (AZ)</option><option value="AR">Arkansas (AR)</option><option value="CA">California (CA)</option><option value="CO">Colorado (CO)</option><option value="CT">Connecticut (CT)</option><option value="DE">Delaware (DE)</option><option value="DC">District of Columbia (DC)</option><option value="FL">Florida (FL)</option><option value="GA">Georgia (GA)</option><option value="HI">Hawaii (HI)</option><option value="ID">Idaho (ID)</option><option value="IL">Illinois (IL)</option><option value="IN">Indiana (IN)</option><option value="IA">Iowa (IA)</option><option value="KS">Kansas (KS)</option><option value="KY">Kentucky (KY)</option><option value="LA">Louisiana (LA)</option><option value="ME">Maine (ME)</option><option value="MD">Maryland (MD)</option><option value="MA">Massachusetts (MA)</option><option value="MI">Michigan (MI)</option><option value="MN">Minnesota (MN)</option><option value="MS">Mississippi (MS)</option><option value="MO">Missouri (MO)</option><option value="MT">Montana (MT)</option><option value="NE">Nebraska (NE)</option><option value="NV">Nevada (NV)</option><option value="NH">New Hampshire (NH)</option><option value="NJ">New Jersey (NJ)</option><option value="NM">New Mexico (NM)</option><option value="NY">New York (NY)</option><option value="NC">North Carolina (NC)</option><option value="ND">North Dakota (ND)</option><option value="OH">Ohio (OH)</option><option value="OK">Oklahoma (OK)</option><option value="OR">Oregon (OR)</option><option value="PA">Pennsylvania (PA)</option><option value="RI">Rhode Island (RI)</option><option value="SC">South Carolina (SC)</option><option value="SD">South Dakota (SD)</option><option value="TN">Tennessee (TN)</option><option value="TX">Texas (TX)</option><option value="UT">Utah (UT)</option><option value="VT">Vermont (VT)</option><option value="VA">Virginia (VA)</option><option value="WA">Washington (WA)</option><option value="WV">West Virginia (WV)</option><option value="WI">Wisconsin (WI)</option><option value="WY">Wyoming (WY)</option><option value="PR">Puerto Rico (PR)</option><option value="VI">U.S. Virgin Islands (VI)</option><option value="GU">Guam (GU)</option><option value="AS">American Samoa (AS)</option><option value="MP">Northern Mariana Islands (MP)</option>';
+
 const FORM_ALLERGIES = [
   ['lidocaine', 'Lidocaine'], ['articaine', 'Articaine'], ['penicillin', 'Penicillin'], ['codeine', 'Codeine'],
   ['erythromycin', 'Erythromycin'], ['nsaids', 'NSAIDs (Ibuprofen, Aspirin)'], ['tylenol', 'Tylenol (Acetaminophen)'],
@@ -748,7 +756,7 @@ function checkinFormPage(eventUid, eventName, lang) {
     '<div><label>' + htmlEscape(L.email) + '</label><input type="email" id="email" autocomplete="email"></div></div>' +
     '<label>' + htmlEscape(L.address) + '</label><input type="text" id="address" autocomplete="street-address">' +
     '<div class="row"><div><label>' + htmlEscape(L.city) + ' <span class="req">*</span></label><input type="text" id="city" autocomplete="address-level2"></div>' +
-    '<div><label>' + htmlEscape(L.state) + ' <span class="req">*</span></label><input type="text" id="state" autocomplete="address-level1"></div></div>' +
+    '<div><label>' + htmlEscape(L.state) + ' <span class="req">*</span></label><select id="state" autocomplete="address-level1"><option value="">' + htmlEscape(L.dash) + '</option>' + US_STATE_OPTIONS + '</select></div></div>' +
     '<div class="row"><div><label>' + htmlEscape(L.emName) + ' <span class="req">*</span></label><input type="text" id="emergency_name"></div>' +
     '<div><label>' + htmlEscape(L.emPhone) + ' <span class="req">*</span></label><input type="tel" id="emergency_phone" inputmode="numeric"></div></div>' +
     '</div>' +

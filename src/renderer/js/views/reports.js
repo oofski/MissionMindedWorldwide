@@ -48,14 +48,17 @@ function relabel(obj, fn) {
  */
 function surveyCard(sv) {
   const s = sv || { responses: 0, declined: 0, not_asked: 0, answers: {} };
-  const asked = s.responses + s.declined;
+  const r0 = s.registration || {}; const e0 = s.exit || {};
+  const asked = (r0.completed || 0) + (r0.declined || 0) + (e0.completed || 0) + (e0.declined || 0) + s.responses + s.declined;
   if (!asked) {
     return el('div', { class: 'card' }, [
       el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
-      el('p', { class: 'muted' }, ['No exit surveys yet. They are taken at check-out — the desk is prompted before a patient can be dismissed.']),
+      el('p', { class: 'muted' }, ['No survey answers yet. The household questions are asked at the end of registration; the questions about the visit are asked at check-out.']),
     ]);
   }
 
+  const reg = s.registration || { completed: 0, declined: 0, not_asked: 0 };
+  const ex = s.exit || { completed: s.responses || 0, declined: s.declined || 0, not_asked: s.not_asked || 0 };
   const answersFor = (key) => s.answers[key] || {};
   const questionBlock = (q) => {
     const counts = answersFor(q.key);
@@ -86,10 +89,16 @@ function surveyCard(sv) {
 
   return el('div', { class: 'card' }, [
     el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
+    // Per stage, because the survey is taken in two sittings and most patients
+    // answer one and not the other. A single pair of totals hid that entirely.
     el('p', { class: 'awareness' }, [
-      el('strong', {}, [String(s.responses)]),
-      ` completed · ${s.declined} declined · ${s.not_asked} not asked`,
-      s.responses ? ` — percentages below are of those who answered each question.` : '',
+      el('strong', {}, ['At registration: ']),
+      `${reg.completed} answered · ${reg.declined} declined · ${reg.not_asked} not asked`,
+    ]),
+    el('p', { class: 'awareness' }, [
+      el('strong', {}, ['At check-out: ']),
+      `${ex.completed} answered · ${ex.declined} declined · ${ex.not_asked} not asked`,
+      ' — percentages below are of those who answered each question.',
     ]),
     ...SECTIONS.map((sec) => el('details', { class: 'collapse', style: 'margin-top:10px' }, [
       el('summary', {}, [el('span', {}, [sec.en]), el('span', { class: 'subtle small' }, ['Show'])]),

@@ -890,3 +890,9 @@ body.survey-open{ overflow:hidden; }
 .sigfield-tabs .chip-btn{ display:inline-flex; align-items:center; gap:7px; }
 .sigfield-preview{ border:var(--border-line); border-radius:var(--radius-sm); background:#fff; padding:10px; min-height:96px; display:flex; align-items:center; justify-content:center; }
 .sigfield-img{ max-width:100%; height:auto; display:block; }
+
+/* The survey rendered inline inside the registration wizard (rather than as the
+   full-screen overlay used at check-out). */
+.survey-inline .survey-lede{ margin-bottom:20px; }
+.survey-inline .survey-section{ margin-bottom:24px; }
+.survey-inline .survey-q{ padding:14px 16px; }

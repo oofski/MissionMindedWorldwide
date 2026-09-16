@@ -255,6 +255,15 @@ async function main() {
   log(fillField(/^Phone/i, '503-555-0100'), 'F1 phone field present (required)');
   log(fillField(/Emergency contact name/i, 'Jose Lopez'), 'F2 emergency contact name present (required)');
   log(fillField(/Emergency contact phone/i, '503-555-0199'), 'F3 emergency contact phone present (required)');
+  // State is a dropdown now, not a text box — "OR" / "Oregon" / "ore" used to
+  // land in the city/state report as three different places.
+  const stateSel = $all('.kiosk-body label.field').find((l) => /^State/i.test(((l.querySelector('.field-label') || {}).textContent || '').trim()));
+  const stateInput = stateSel && stateSel.querySelector('select');
+  log(!!stateInput, 'state is a dropdown, not a typed field');
+  log(!!stateInput && Array.from(stateInput.options).some((o) => o.value === 'OR' && /Oregon/.test(o.textContent)),
+    'the state dropdown offers every state by name and code');
+  if (stateInput) { stateInput.value = 'OR'; stateInput.dispatchEvent(new window.Event('change', { bubbles: true })); }
+
   // F4: referral dropdown
   const refSel = $all('.kiosk-body label.field').find((l) => /How did you hear/i.test(((l.querySelector('.field-label') || {}).textContent || '')));
   log(!!(refSel && refSel.querySelector('select')), 'F4 referral dropdown present');
@@ -341,6 +350,26 @@ async function main() {
   // derived from what the patient said they need on the dental step.
   log(!$('.route-card'), 'C3: the standalone dentist/hygienist chooser is gone from intake');
 
+  // The demographic half of the grant survey is asked at the END OF
+  // REGISTRATION now; the twelve questions about the visit itself stay at
+  // check-out, where they can actually be answered.
+  const surveyStep = $('.survey-inline');
+  log(!!surveyStep, 'the registration survey step is part of the wizard');
+  log(!!surveyStep && surveyStep.querySelectorAll('.survey-q').length === 22,
+    'registration asks the 22 questions answerable before treatment (' + (surveyStep ? surveyStep.querySelectorAll('.survey-q').length : 0) + ')');
+  log(!!surveyStep && !/rate the quality of care/i.test(surveyStep.textContent),
+    'registration does NOT ask the patient to rate care they have not received yet');
+  log(!!surveyStep && !surveyStep.querySelector('input[type=text]') && !surveyStep.querySelector('textarea'),
+    'every registration survey question is a choice — nothing is typed');
+  // Answer two of them, leave the rest blank: every question is optional.
+  const sqs = $all('.survey-inline .survey-q');
+  const pickIn = (q, re) => { const b = Array.from(q.querySelectorAll('.survey-opt')).find((x) => re.test(x.textContent)); if (b) b.click(); return !!b; };
+  log(pickIn(sqs[0], /^Yes/), 'a registration survey answer can be chosen');
+  const hh = sqs.find((q) => /How many people live in your household/i.test(q.textContent));
+  log(!!hh && pickIn(hh, /^4$/), 'household size can be answered');
+  clickText('Next');
+  await tick();
+
   // Now should be Review (may_need_extraction was not 'yes')
   const onReview = /Sign|Review|Firmar|Send|Submit/i.test($('.kiosk-step-label') ? $('.kiosk-step-label').textContent : '');
   log(!!$('.review') || onReview, 'reached review/sign step');
@@ -363,6 +392,14 @@ async function main() {
     // C2: reason is no longer collected; the closed last-dental-visit answer is
     // what the step now has to capture.
     log(full.dental_history.reason === undefined, 'C2: no reason is stored for a new patient');
+    // The registration half of the survey travelled with the patient.
+    const regSv = db.getExitSurvey(created.id);
+    log(!!regSv && regSv.registration_status === 'completed',
+      'survey: the registration half is recorded against the patient at check-in');
+    log(!!regSv && regSv.answers.first_time === 'yes' && regSv.answers.household_size === '4',
+      'survey: the answers given during registration are stored');
+    log(!!regSv && !regSv.exit_status,
+      'survey: the check-out half is still outstanding, so check-out will still ask');
     log(full.dental_history.prior_dentist === 'about_2_years',
       'C2: the last-dental-visit answer is stored as a code, not prose (' + full.dental_history.prior_dentist + ')');
     log(['gum_bleeding', 'sores', 'jaw_injury', 'grinding', 'post_extraction_bleeding', 'ortho']
@@ -2276,6 +2313,74 @@ async function main() {
       'MMW survey: merging two clinics adds their survey totals together');
     log(merged.survey.answers.first_time.no === (sum.survey.answers.first_time.no || 0) * 2,
       'MMW survey: merging adds option counts question by question');
+  }
+
+  /* ===== The survey, split across the visit =================================
+     The demographic half is asked at the end of registration and the experience
+     half at check-out. They are one row, filled in two sittings hours apart by
+     two different people, so the second must MERGE — a check-out that replaced
+     the blob would silently erase everything the patient told registration
+     about their household and income. */
+  {
+    currentUser = signInAdmin();
+    const two = db.createPatient(currentUser, {
+      first_name: 'Two', last_name: 'Sittings', demographics: {}, medical_history: {},
+      dental_history: { visit_type: 'cleaning' },
+      survey: { answers: { household_size: '4', income: '0_15k', food_insecurity: 'yes' } },
+    });
+    let sv2 = db.getExitSurvey(two.id);
+    log(sv2.registration_status === 'completed' && !sv2.exit_status,
+      'survey split: registration records its half and leaves the other open');
+    db.saveExitSurvey(currentUser, two.id, { stage: 'exit', answers: { rate_care: '5', recommend: '5' } });
+    sv2 = db.getExitSurvey(two.id);
+    log(sv2.answers.household_size === '4' && sv2.answers.income === '0_15k',
+      'survey split: check-out does NOT erase what registration collected');
+    log(sv2.answers.rate_care === '5' && sv2.exit_status === 'completed',
+      'survey split: the check-out answers join the same record');
+
+    // Declining at check-out must take only the check-out half with it.
+    db.saveExitSurvey(currentUser, two.id, { stage: 'exit', declined: true });
+    sv2 = db.getExitSurvey(two.id);
+    log(sv2.answers.household_size === '4' && sv2.answers.rate_care === undefined,
+      'survey split: declining at check-out clears only the check-out answers');
+    log(sv2.registration_status === 'completed' && sv2.exit_status === 'declined',
+      'survey split: each half records its own outcome');
+
+    // A patient can decline at registration and still answer at check-out.
+    const decl = db.createPatient(currentUser, {
+      first_name: 'Declined', last_name: 'Early', demographics: {}, medical_history: {},
+      dental_history: { visit_type: 'cleaning' }, survey: { declined: true },
+    });
+    db.saveExitSurvey(currentUser, decl.id, { stage: 'exit', answers: { rate_care: '4' } });
+    const sv3 = db.getExitSurvey(decl.id);
+    log(sv3.registration_status === 'declined' && sv3.exit_status === 'completed' && sv3.answers.rate_care === '4',
+      'survey split: declining the household questions does not stop the visit questions being answered');
+
+    // The stage map in the data layer must match the sections in the renderer.
+    const sx = await import('../src/renderer/i18n/exitSurvey.js');
+    for (const stage of ['registration', 'exit']) {
+      const ui = sx.questionsForStage(stage).map((q) => q.key).sort();
+      const dbq = db.STAGE_QUESTIONS[stage].slice().sort();
+      log(JSON.stringify(ui) === JSON.stringify(dbq),
+        `survey split: the form and the data layer agree on which questions are asked at ${stage}`);
+    }
+    log(sx.questionsForStage('registration').length === 22 && sx.questionsForStage('exit').length === 12,
+      'survey split: 22 questions at registration, 12 at check-out, 34 in total');
+    // By key, not by wording: "What services do you or your household need in
+    // the future?" mentions a household but is a forward-looking question that
+    // belongs at check-out.
+    const DEMOGRAPHIC = ['household_size', 'children_under_18', 'income', 'employment', 'education',
+      'living_situation', 'health_insurance', 'dental_insurance', 'vision_insurance', 'assistance'];
+    const exitKeys = sx.questionsForStage('exit').map((q) => q.key);
+    log(DEMOGRAPHIC.every((k) => !exitKeys.includes(k)),
+      'survey split: no household, income or insurance question is left at check-out');
+    // And the reverse: nothing that needs the visit to have happened is asked
+    // during registration, which is the whole reason for splitting it.
+    const POST_VISIT = ['rate_care', 'rate_staff', 'rate_wait', 'explained_care', 'comfortable_questions',
+      'will_improve_health', 'reduced_financial_burden'];
+    const regKeys = sx.questionsForStage('registration').map((q) => q.key);
+    log(POST_VISIT.every((k) => !regKeys.includes(k)),
+      'survey split: registration never asks about care the patient has not received yet');
   }
 
   /* ===== C1 + C4 — age, race, and how the waiver was signed ==================

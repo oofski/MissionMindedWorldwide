@@ -1,4 +1,4 @@
-import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE } from '../i18n/strings.js';
+import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE, US_STATES } from '../i18n/strings.js';
 
 let lang = 'en';
 
@@ -115,4 +115,4 @@ export function isSpeaking() {
 }
 
 // Re-exported so views import route derivation from the same place as labels.
-export { routeForVisitType };
+export { routeForVisitType, US_STATES };

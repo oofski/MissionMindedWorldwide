@@ -48,7 +48,7 @@ export function renderCheckout(ctx, params = {}) {
       // rather than being disabled — the desk's next action is the same either
       // way, and a dead button with no explanation is how this gets worked
       // around instead of used.
-      const needsSurvey = !p.exit_survey;
+      const needsSurvey = !(p.exit_survey && p.exit_survey.exit_status);
       const tickBtn = el('button', {
         class: 'btn btn--sm tick-btn ' + (needsSurvey ? 'btn--primary' : 'btn--success'),
         title: needsSurvey ? `Exit survey for ${p.first_name}` : `Check ${p.first_name} out`,
@@ -159,7 +159,7 @@ export function renderCheckout(ctx, params = {}) {
                   class: 'btn btn--block ' + (surveyDone ? 'btn--ghost' : 'btn--primary'),
                   onClick: () => takeSurvey(p),
                 }, [icon('clipboard', { size: 16 }), surveyDone ? 'Review or change answers' : 'Hand tablet to patient']),
-                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, ['Needed before check-out. The patient can decline inside.']),
+                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, ['12 questions about today\u2019s visit. The household questions were answered at registration. The patient can decline inside.']),
               ]),
               // Optional artefacts, grouped and de-emphasised so they read as
               // secondary to the single primary action below.
@@ -194,6 +194,7 @@ export function renderCheckout(ctx, params = {}) {
       // needs no switching; the patient can still change it themselves.
       lang: full.language === 'es' ? 'es' : 'en',
       existing: full.exit_survey,
+      stage: 'exit',
     });
     if (saved) { if (params.id) detail(p.id); else queue(); }
     return saved;

@@ -186,6 +186,12 @@ function migrate() {
   // name rendered in a script hand must never be mistaken for one the patient
   // drew — the printed consent and the chart both state which it was.
   addColumn('consents', 'signature_method', 'TEXT');
+  // The exit survey is answered in two sittings — the demographic half at
+  // registration, the experience half at check-out. One 'declined' flag cannot
+  // express "told us about their household, declined to rate the care", so each
+  // stage records its own outcome: 'completed' | 'declined' | absent (not asked).
+  addColumn('exit_surveys', 'registration_status', 'TEXT');
+  addColumn('exit_surveys', 'exit_status', 'TEXT');
   addColumn('consents', 'tooth_numbers', 'TEXT');
   addColumn('consents', 'amended_by', 'TEXT');
   addColumn('consents', 'amended_at', 'TEXT');
@@ -1130,6 +1136,15 @@ function createPatient(actor, data) {
   // Persist consents
   (d.consents || []).forEach((c) => addConsent(id, c));
 
+  // The demographic half of the survey is answered during registration, before
+  // this row existed, so it arrives with the patient rather than through its own
+  // call. Never fatal: a survey that fails to save must not lose the patient.
+  if (d.survey && (d.survey.answers || d.survey.declined)) {
+    try {
+      saveExitSurvey(actor, id, { ...d.survey, stage: 'registration' });
+    } catch (e) { /* the registration itself stands */ }
+  }
+
   audit(actor || { id: null, full_name: 'kiosk' }, 'create', 'patient', id,
     `${d.first_name || ''} ${d.last_name || ''}`.trim());
   return getPatient(id);
@@ -1738,32 +1753,50 @@ function saveExitSurvey(actor, patientId, data) {
   const pt = db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId);
   if (!pt) throw new Error('Patient not found.');
   const d = data || {};
+  const stage = d.stage === 'registration' ? 'registration' : 'exit';
   const declined = d.declined ? 1 : 0;
   // Keep only keys the survey actually defines, and only values those questions
   // offer. A renamed question or a hand-edited payload would otherwise put
   // answers in the blob that no report can ever explain.
-  const answers = declined ? {} : sanitizeSurveyAnswers(d.answers);
+  // MERGE, never replace. The two halves are saved by different screens hours
+  // apart; a check-out that replaced the blob would silently erase everything
+  // the patient told registration about their household and income.
+  const prior = db.prepare('SELECT answers FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  const kept = prior ? safeJson(prior.answers, {}) : {};
+  const fresh = declined ? {} : sanitizeSurveyAnswers(d.answers);
+  // A decline clears only ITS OWN stage's answers, so declining at check-out
+  // cannot take the registration half down with it.
+  const stageKeys = new Set(STAGE_QUESTIONS[stage]);
+  const answers = { ...kept };
+  for (const k of stageKeys) delete answers[k];
+  for (const [k, v] of Object.entries(fresh)) answers[k] = v;
   const version = String(d.version || 'mmw-exit-v1');
   const language = d.language ? String(d.language) : null;
   const existing = db.prepare('SELECT id FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  const status = declined ? 'declined' : 'completed';
+  const col = stage === 'registration' ? 'registration_status' : 'exit_status';
+  // `declined` stays the EXIT answer: it is what check-out gates on, so it must
+  // not start reporting true because somebody skipped the household questions.
   if (existing) {
     db.prepare(
-      `UPDATE exit_surveys SET version=?, language=?, answers=?, declined=?,
+      `UPDATE exit_surveys SET version=?, language=?, answers=?, ${col}=?,
+         declined = CASE WHEN ? = 'exit' THEN ? ELSE declined END,
          completed_at=?, completed_by=?, completed_by_name=? WHERE patient_id=?`
-    ).run(version, language, JSON.stringify(answers), declined, now(),
+    ).run(version, language, JSON.stringify(answers), status, stage, declined, now(),
           actor ? actor.id : null, actor ? actor.full_name : null, patientId);
   } else {
     db.prepare(
       `INSERT INTO exit_surveys (patient_id, version, language, answers, declined,
-         completed_at, completed_by, completed_by_name, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`
-    ).run(patientId, version, language, JSON.stringify(answers), declined, now(),
+         ${col}, completed_at, completed_by, completed_by_name, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    ).run(patientId, version, language, JSON.stringify(answers),
+          stage === 'exit' ? declined : 0, status, now(),
           actor ? actor.id : null, actor ? actor.full_name : null, now());
   }
   // No dirty-marking here on purpose: sync decides dirtiness by hashing a row's
   // syncable columns (see collectSyncRows), so a plain write is enough.
   audit(actor, 'survey.save', 'patient', patientId,
-        declined ? 'Exit survey declined by patient' : `Exit survey completed (${Object.keys(answers).length} answered)`);
+        declined ? `Survey (${stage}) declined by patient` : `Survey (${stage}) completed — ${Object.keys(answers).length} answered in total`);
   return getExitSurvey(patientId);
 }
 
@@ -1818,6 +1851,17 @@ const SURVEY_SCHEMA = {
 };
 // Select-all-that-apply questions, which store an array rather than a string.
 const SURVEY_MULTI = new Set(['assistance', 'access_barriers', 'future_needs']);
+// Which stage each question belongs to. Mirrors the `stage` on each section in
+// src/renderer/i18n/exitSurvey.js; the harness pins the two together.
+const STAGE_QUESTIONS = {
+  registration: ['first_time', 'heard_about', 'household_size', 'children_under_18', 'disability',
+    'living_situation', 'education', 'household_in_school', 'employment', 'work_type', 'income',
+    'assistance', 'health_insurance', 'health_insurance_type', 'dental_insurance', 'vision_insurance',
+    'last_checkup', 'last_eye_exam', 'delayed_care_cost', 'access_barriers', 'unmet_need', 'food_insecurity'],
+  exit: ['rate_care', 'rate_staff', 'rate_wait', 'comfortable_questions', 'explained_care', 'recommend',
+    'health_concern_daily', 'will_improve_health', 'reduced_financial_burden', 'available_elsewhere',
+    'future_needs', 'future_interest'],
+};
 
 function sanitizeSurveyAnswers(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
@@ -2305,9 +2349,24 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
   // tally of them carries nothing that belongs to a person — which is the whole
   // point: these figures are what a grant return is written from, and they have
   // to survive the clinic purging its patient records.
-  const survey = { responses: 0, declined: 0, not_asked: 0, answers: {} };
+  // Counted per stage now: the survey is filled in two sittings, so one pair of
+  // totals cannot say "told us about their household, declined to rate the
+  // care" — which is the commonest outcome and a real figure for a funder.
+  const survey = {
+    responses: 0, declined: 0, not_asked: 0, answers: {},
+    registration: { completed: 0, declined: 0, not_asked: 0 },
+    exit: { completed: 0, declined: 0, not_asked: 0 },
+  };
   for (const p of patients) {
     const sv = surveyOf ? surveyOf(p) : null;
+    for (const stage of ['registration', 'exit']) {
+      const st = sv ? sv[`${stage}_status`] : null;
+      if (st === 'completed') survey[stage].completed++;
+      else if (st === 'declined') survey[stage].declined++;
+      else survey[stage].not_asked++;
+    }
+    // The headline trio stays the CHECK-OUT figures, so a report kept by an
+    // older build still means the same thing when the two are merged.
     if (!sv) { survey.not_asked++; continue; }
     if (sv.declined) { survey.declined++; continue; }
     survey.responses++;
@@ -2349,7 +2408,7 @@ function buildEventSummary(eventId) {
     (p) => db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT COUNT(*) AS n FROM xrays WHERE patient_id = ?').get(p.id).n,
     (p) => db.prepare('SELECT flags FROM triage WHERE patient_id = ?').get(p.id),
-    (p) => db.prepare('SELECT answers, declined FROM exit_surveys WHERE patient_id = ?').get(p.id),
+    (p) => db.prepare('SELECT answers, declined, registration_status, exit_status FROM exit_surveys WHERE patient_id = ?').get(p.id),
   );
 }
 
@@ -2366,7 +2425,11 @@ function mergeSummaries(list) {
   const out = { generated_at: now() };
   NUM.forEach((k) => { out[k] = 0; });
   MAPS.forEach((k) => { out[k] = {}; });
-  out.survey = { responses: 0, declined: 0, not_asked: 0, answers: {} };
+  out.survey = {
+    responses: 0, declined: 0, not_asked: 0, answers: {},
+    registration: { completed: 0, declined: 0, not_asked: 0 },
+    exit: { completed: 0, declined: 0, not_asked: 0 },
+  };
   const days = {};
   // Totals kept by an older version hold only the headline counts. Coercing
   // their missing fields to 0 is right for the sum, but the page must be able to
@@ -2385,6 +2448,11 @@ function mergeSummaries(list) {
     // none, which contributes zero rather than breaking the merge.
     if (s.survey) {
       SURVEY_NUM.forEach((k) => { out.survey[k] += Number(s.survey[k]) || 0; });
+      for (const stage of ['registration', 'exit']) {
+        const src = (s.survey[stage] || {});
+        out.survey[stage] = out.survey[stage] || { completed: 0, declined: 0, not_asked: 0 };
+        ['completed', 'declined', 'not_asked'].forEach((k) => { out.survey[stage][k] += Number(src[k]) || 0; });
+      }
       Object.entries(s.survey.answers || {}).forEach(([q, opts]) => {
         const bucket = (out.survey.answers[q] = out.survey.answers[q] || {});
         Object.entries(opts || {}).forEach(([o, v]) => { bucket[o] = (bucket[o] || 0) + (Number(v) || 0); });
@@ -2641,7 +2709,7 @@ const SYNC_COLS = {
   report: ['summary', 'patients_seen', 'finished_at', 'finished_by_name', 'created_at'],
   // The exit survey. Closed-choice answers only, so the blob carries no free
   // text a patient could be identified by.
-  survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at'],
+  survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
 };
 // Denormalized name field -> the local user-id column it is resolved from.
 const NAME_SOURCE = {
@@ -3009,7 +3077,7 @@ function close() {
 module.exports = {
   init, close,
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
-  saveExitSurvey, getExitSurvey, SURVEY_SCHEMA, SURVEY_MULTI,
+  saveExitSurvey, getExitSurvey, SURVEY_SCHEMA, SURVEY_MULTI, STAGE_QUESTIONS,
   needsSetup, createFirstAdmin, defaultAdminActive,
   DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,

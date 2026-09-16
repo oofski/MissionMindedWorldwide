@@ -14,7 +14,7 @@
 import { el, toast, withBusy } from '../dom.js';
 import { icon } from '../icons.js';
 import { api } from '../api.js';
-import { SECTIONS, QUESTIONS, SURVEY_VERSION } from '../../i18n/exitSurvey.js';
+import { SECTIONS, SURVEY_VERSION, EXIT_SECTIONS, questionsForStage } from '../../i18n/exitSurvey.js';
 
 const UI = {
   en: {
@@ -54,7 +54,11 @@ const UI = {
  * the volunteer closed it without finishing (which records nothing, so it can
  * be picked up again).
  */
-export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
+export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 'exit' } = {}) {
+  // Only this stage's sections, so check-out is a twelve-question ask rather
+  // than re-presenting the twenty-two already answered at registration.
+  const MY_SECTIONS = stage === 'exit' ? EXIT_SECTIONS : SECTIONS.filter((x) => x.stage === stage);
+  const MY_QUESTIONS = questionsForStage(stage);
   return new Promise((resolve) => {
     let L = UI[lang] ? lang : 'en';
     // Seeded from an existing response so reopening corrects rather than retypes.
@@ -69,7 +73,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
     const declineBtn = el('button', { class: 'btn btn--ghost' }, ['']);
 
     const answeredCount = () =>
-      QUESTIONS.filter((q) => {
+      MY_QUESTIONS.filter((q) => {
         const v = answers[q.key];
         return Array.isArray(v) ? v.length > 0 : v != null && v !== '';
       }).length;
@@ -78,9 +82,9 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
       const t = UI[L];
       progress.replaceChildren(
         el('div', { class: 'survey-progress-bar' }, [
-          el('span', { style: `width:${Math.round((answeredCount() / QUESTIONS.length) * 100)}%` }),
+          el('span', { style: `width:${Math.round((answeredCount() / MY_QUESTIONS.length) * 100)}%` }),
         ]),
-        el('span', { class: 'survey-progress-text' }, [t.progress(answeredCount(), QUESTIONS.length)]),
+        el('span', { class: 'survey-progress-text' }, [t.progress(answeredCount(), MY_QUESTIONS.length)]),
       );
     }
 
@@ -153,7 +157,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
           el('p', {}, [t.lede]),
           el('p', { class: 'survey-privacy' }, [icon('lock', { size: 14 }), el('span', {}, [t.privacy])]),
         ]),
-        ...SECTIONS.map((sec) => el('section', { class: 'survey-section' }, [
+        ...MY_SECTIONS.map((sec) => el('section', { class: 'survey-section' }, [
           el('h3', { class: 'survey-section-title' }, [sec[L] || sec.en]),
           ...sec.questions.map(questionNode),
         ])),
@@ -174,7 +178,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
     finishBtn.addEventListener('click', async () => {
       try {
         const saved = await withBusy(finishBtn, () =>
-          api.saveExitSurvey(patient.id, { version: SURVEY_VERSION, language: L, answers, declined: false }));
+          api.saveExitSurvey(patient.id, { version: SURVEY_VERSION, language: L, answers, declined: false, stage }));
         toast(UI[L].saved, 'success');
         close(saved);
       } catch (e) { toast(e.message || 'Could not save the survey.', 'error'); }
@@ -183,7 +187,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
     declineBtn.addEventListener('click', async () => {
       try {
         const saved = await withBusy(declineBtn, () =>
-          api.saveExitSurvey(patient.id, { version: SURVEY_VERSION, language: L, declined: true }));
+          api.saveExitSurvey(patient.id, { version: SURVEY_VERSION, language: L, declined: true, stage }));
         toast(UI[L].declined, 'success');
         close(saved);
       } catch (e) { toast(e.message || 'Could not save the survey.', 'error'); }
@@ -217,8 +221,14 @@ export function openExitSurvey(patient, { lang = 'en', existing = null } = {}) {
 
 /** A short line describing where a patient's survey stands, for the desk. */
 export function surveyStatus(sv) {
-  if (!sv) return { key: 'none', label: 'Not yet taken', pill: 'pill--warning' };
-  if (sv.declined) return { key: 'declined', label: 'Patient declined', pill: 'pill--neutral' };
-  const n = Object.keys(sv.answers || {}).length;
-  return { key: 'done', label: `Completed · ${n} of ${QUESTIONS.length} answered`, pill: 'pill--success' };
+  // About the CHECK-OUT half only — that is what this desk is being asked for.
+  // The registration half was taken hours earlier by a different person.
+  if (!sv || !sv.exit_status) return { key: 'none', label: 'Not yet taken', pill: 'pill--warning' };
+  if (sv.exit_status === 'declined') return { key: 'declined', label: 'Patient declined', pill: 'pill--neutral' };
+  const mine = questionsForStage('exit');
+  const n = mine.filter((q) => {
+    const v = (sv.answers || {})[q.key];
+    return Array.isArray(v) ? v.length > 0 : v != null && v !== '';
+  }).length;
+  return { key: 'done', label: `Completed · ${n} of ${mine.length} answered`, pill: 'pill--success' };
 }

@@ -1,8 +1,9 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions } from '../i18n.js';
+import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions, US_STATES } from '../i18n.js';
 import { textField, selectField, yesNo, chipGrid, limitDigits } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
+import { REGISTRATION_SECTIONS } from '../../i18n/exitSurvey.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -15,6 +16,7 @@ export function renderKiosk(ctx) {
   const data = {
     language: 'en',
     demographics: {}, medical_history: {}, dental_history: {}, consents: [],
+    survey: { answers: {}, declined: false },
   };
   const root = el('div', { class: 'kiosk' });
   let started = false;
@@ -33,6 +35,7 @@ export function renderKiosk(ctx) {
     // implied by what the patient said they need on the dental step, and asking
     // twice let the two disagree — a patient could ask for a cleaning and then
     // pick the dentist, and the queue believed the second answer.
+    list.push(stepSurvey);
     list.push(stepReview);
     return list;
   }
@@ -112,6 +115,19 @@ export function renderKiosk(ctx) {
 
   /* ---------------- Steps ---------------- */
 
+  // Records taken before the dropdown hold free text — "Oregon", "or", "Ore.".
+  // Match them to a code where it is unambiguous so opening an old record does
+  // not silently blank the field; anything unrecognised falls back to no
+  // selection rather than a wrong one.
+  function normalizeState(v) {
+    const raw = String(v || '').trim();
+    if (!raw) return '';
+    const up = raw.toUpperCase().replace(/\.$/, '');
+    if (US_STATES.some(([c]) => c === up)) return up;
+    const byName = US_STATES.find(([, n]) => n.toUpperCase() === up);
+    return byName ? byName[0] : '';
+  }
+
   function stepDemographics() {
     const d = data.demographics;
     const first = textField(t('intake.firstName'), { value: data.first_name, required: true });
@@ -128,7 +144,13 @@ export function renderKiosk(ctx) {
     const address = textField(t('intake.address'), { value: d.address });
     // Required: grant-funded clinics report how many patients came from their town.
     const city = textField(t('intake.city'), { value: d.city, required: true });
-    const stateF = textField(t('intake.state'), { value: d.state, required: true });
+    // A dropdown, not a text box: "OR", "Oregon" and "ore" were landing in the
+    // city/state report as three different places.
+    const stateF = selectField(
+      t('intake.state'),
+      [{ value: '', label: '\u2014' }, ...US_STATES.map(([code, name]) => ({ value: code, label: `${name} (${code})` }))],
+      { value: normalizeState(d.state), required: true },
+    );
     const mailing = textField(t('intake.mailing'), { value: d.mailing_address });
     const marital = selectField(t('intake.marital'), [
       { value: '', label: '—' },
@@ -681,6 +703,111 @@ export function renderKiosk(ctx) {
     };
   }
 
+  // The demographic half of the grant survey, asked at the end of registration
+  // while the patient is sitting and waiting anyway. Choice-only, like the rest
+  // of it — nothing here is typed.
+  //
+  // Entirely optional: this is a free clinic, and a question about somebody's
+  // income must never sit between them and care. A patient who skips it is
+  // recorded as having been asked and declined, which is a different and more
+  // honest figure than never having been asked.
+  function stepSurvey() {
+    const answers = data.survey.answers;
+    let declined = data.survey.declined === true;
+
+    const questionNode = (q) => {
+      const isMulti = q.type === 'multi';
+      const isOn = (v) => (isMulti ? (answers[q.key] || []).includes(v) : answers[q.key] === v);
+      const group = el('div', { class: 'survey-options' + (q.options.length > 6 ? ' survey-options--dense' : '') });
+      const repaint = () => [...group.children].forEach((b, i) => {
+        const on = isOn(q.options[i].value);
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      q.options.forEach((o) => group.append(el('button', {
+        type: 'button', class: 'survey-opt', 'aria-pressed': 'false',
+        onClick: () => {
+          declined = false;
+          if (isMulti) {
+            const cur = new Set(answers[q.key] || []);
+            // "None" and "Prefer not to answer" are answers ABOUT the list, so
+            // they replace it rather than joining it.
+            const exclusive = o.value === 'none' || o.value === 'pna';
+            if (cur.has(o.value)) cur.delete(o.value);
+            else if (exclusive) { cur.clear(); cur.add(o.value); }
+            else { cur.delete('none'); cur.delete('pna'); cur.add(o.value); }
+            if (cur.size) answers[q.key] = [...cur]; else delete answers[q.key];
+          } else if (answers[q.key] === o.value) delete answers[q.key];
+          else answers[q.key] = o.value;
+          repaint();
+          syncSkip();
+        },
+      }, [el('span', { class: 'survey-opt-box' }), el('span', {}, [o[getLang()] || o.en])])));
+      repaint();
+      return el('div', { class: 'survey-q' }, [
+        el('div', { class: 'survey-q-head' }, [
+          el('span', { class: 'survey-q-text' }, [q[getLang()] || q.en]),
+          el('span', { class: 'survey-q-opt' }, [L({ en: 'Optional', es: 'Opcional' })]),
+        ]),
+        (getLang() === 'es' ? q.hintEs : q.hintEn)
+          ? el('p', { class: 'survey-q-hint' }, [getLang() === 'es' ? q.hintEs : q.hintEn]) : null,
+        group,
+      ]);
+    };
+
+    const skipBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, []);
+    function syncSkip() {
+      skipBtn.replaceChildren(declined
+        ? L({ en: 'Skipped — tap any answer to change your mind', es: 'Omitida — toque cualquier respuesta para cambiar' })
+        : L({ en: 'I would rather not answer these', es: 'Prefiero no responder estas preguntas' }));
+      skipBtn.classList.toggle('chip-btn--on', declined);
+    }
+    skipBtn.addEventListener('click', () => {
+      declined = !declined;
+      if (declined) for (const k of Object.keys(answers)) delete answers[k];
+      syncSkip();
+      paintSurvey();
+    });
+
+    const body = el('div', {});
+    function paintSurvey() {
+      body.replaceChildren(...REGISTRATION_SECTIONS.map((sec) => el('section', { class: 'survey-section' }, [
+        el('h3', { class: 'survey-section-title' }, [sec[getLang()] || sec.en]),
+        ...sec.questions.map(questionNode),
+      ])));
+    }
+    paintSurvey();
+    syncSkip();
+
+    const node = el('div', { class: 'survey-inline' }, [
+      el('div', { class: 'survey-lede' }, [
+        el('p', {}, [L({
+          en: 'These last questions help Mission Minded Worldwide show what this clinic did for the community, and apply for the funding that keeps it free.',
+          es: 'Estas últimas preguntas ayudan a Mission Minded Worldwide a mostrar lo que esta clínica hizo por la comunidad y a solicitar los fondos que la mantienen gratuita.',
+        })]),
+        el('p', { class: 'survey-privacy' }, [icon('lock', { size: 14 }), el('span', {}, [L({
+          en: 'Every question is optional, your answers are reported as totals only, and none of this changes the care you receive today.',
+          es: 'Cada pregunta es opcional, sus respuestas se reportan solo como totales y nada de esto cambia la atención que recibe hoy.',
+        })])]),
+      ]),
+      body,
+      el('div', { class: 'inline-row', style: 'justify-content:center;margin-top:8px' }, [skipBtn]),
+    ]);
+
+    return {
+      title: L({ en: 'A few last questions', es: 'Unas últimas preguntas', ru: 'Несколько последних вопросов' }),
+      node,
+      collect: () => {
+        data.survey.answers = answers;
+        // Answering anything overrides a skip; skipping with nothing answered is
+        // recorded as a decline so "asked and declined" stays distinguishable
+        // from "never asked".
+        data.survey.declined = declined && Object.keys(answers).length === 0;
+        return true;
+      },
+    };
+  }
+
   function stepReview() {
     const m = data.medical_history, dh = data.dental_history;
     const condLabels = conditions().filter((c) => (m.conditions || []).includes(c.key)).map((c) => c.label);
@@ -706,6 +833,12 @@ export function renderKiosk(ctx) {
             : ''
         ),
         row(t('intake.s_consent'), data.consents.map((c) => c.type === 'general' ? 'General — signed' : 'Oral Surgery — signed').join(' · ')),
+        row(
+          L({ en: 'Community questions', es: 'Preguntas de la comunidad', ru: 'Вопросы сообщества' }),
+          Object.keys(data.survey.answers).length
+            ? L({ en: `${Object.keys(data.survey.answers).length} answered`, es: `${Object.keys(data.survey.answers).length} respondidas` })
+            : L({ en: 'Skipped', es: 'Omitidas' }),
+        ),
       ]),
     ]);
     return { title: t('intake.s_review'), node, collect: () => true };
