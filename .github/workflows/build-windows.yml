@@ -228,26 +228,27 @@ jobs:
 
             ### New in this build
 
-            **The grant survey is now split across the visit.** The 22 questions
-            about the patient's circumstances — household, income, insurance,
-            housing, barriers to care, food security — are asked at the **end of
-            registration**, while they are sitting and waiting anyway. The 12
-            questions about the visit itself stay at **check-out**, because
-            nobody can rate care they have not yet received.
+            **Check-in now knows the clinic's medication list.** The "current
+            medications" box suggests from MMW's list of the 100 medications
+            patients most commonly take, ordered commonest-first — type two
+            letters and the matches appear. It still accepts anything typed, on
+            purpose: a patient taking something outside that hundred must still
+            be recordable, because the provider reads this before deciding what
+            is safe to give them.
 
-            Check-out is now a 12-question ask instead of 34, which is the
-            difference between a survey people finish on their way out and one
-            they abandon. Both halves are choice-only — nothing is typed — and
-            both are optional in full or question by question.
+            **Allergies now cover every drug the clinic actually carries.** All
+            five local anaesthetics (lidocaine, articaine, mepivacaine,
+            bupivacaine, prilocaine) and all five antibiotics (penicillin,
+            amoxicillin, amoxicillin + clavulanate, clindamycin, azithromycin)
+            can be recorded. Those are the allergies that change what a provider
+            may safely give someone on the day.
 
-            Reports now shows the two stages separately, so "told us about their
-            household, declined to rate the care" is visible rather than hidden
-            in a single total.
+            **The chairside anaesthetic picker offers all five**, not the two it
+            had. A mepivacaine or bupivacaine block previously had to be written
+            into an "Other" box, where nothing could count it.
 
-            **State is a dropdown.** It was a text box, so "OR", "Oregon" and
-            "ore" were landing in the city/state grant breakdown as three
-            different places. Walk-in and online forms both, with the online one
-            validated server-side.
+            All of it applies to the online pre-registration form too, and every
+            new allergy is in English and Spanish.
 
             ### Signing in
             Every install now comes with an administrator already set up:

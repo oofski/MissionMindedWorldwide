@@ -57,10 +57,163 @@ export const CONDITIONS = [
   { key: 'weight_mgmt', flag: false, en: 'Weight management program', es: 'Programa de manejo de peso' },
 ];
 
+// The local anaesthetics MMW carries, with the concentrations on the carpule.
+// Shared so the chairside agent picker and anything reporting on it cannot
+// drift apart.
+export const ANESTHETICS = [
+  { key: 'lidocaine', en: 'Lidocaine 2%' },
+  { key: 'articaine', en: 'Articaine 4%' },
+  { key: 'mepivacaine', en: 'Mepivacaine 3%' },
+  { key: 'bupivacaine', en: 'Bupivacaine 0.5%' },
+  { key: 'prilocaine', en: 'Prilocaine 4%' },
+];
+
+// The antibiotics MMW carries. Used for the allergy list above; kept named here
+// so the source of that list is obvious and one place changes both.
+export const ANTIBIOTICS = [
+  { key: 'amoxicillin', en: 'Amoxicillin' },
+  { key: 'clindamycin', en: 'Clindamycin' },
+  { key: 'penicillin_vk', en: 'Penicillin V potassium' },
+  { key: 'azithromycin', en: 'Azithromycin' },
+  { key: 'amoxicillin_clavulanate', en: 'Amoxicillin + clavulanate' },
+];
+
+// The 100 medications a patient is most likely to be taking, from MMW's own
+// list. `rank` is that list's ordering — 1 is the most commonly prescribed — and
+// the picker offers them in that order, so the handful of drugs most patients
+// are on are the first things a volunteer sees.
+//
+// These are SUGGESTIONS, never a closed set. The picker accepts anything typed,
+// because a patient on a drug outside this hundred must still be recordable: the
+// provider reads this list before deciding what is safe to give them, and a
+// medication that could not be entered is a medication nobody sees.
+//
+// Drug names are not translated — a brand or generic name is the same word in
+// every language, and "translating" one would be a prescribing error.
+export const MEDICATIONS = [
+  { key: 'atorvastatin', rank: 1, name: 'Atorvastatin' },
+  { key: 'levothyroxine', rank: 2, name: 'Levothyroxine' },
+  { key: 'metformin', rank: 3, name: 'Metformin' },
+  { key: 'amlodipine', rank: 4, name: 'Amlodipine' },
+  { key: 'lisinopril', rank: 5, name: 'Lisinopril' },
+  { key: 'albuterol', rank: 6, name: 'Albuterol' },
+  { key: 'losartan', rank: 7, name: 'Losartan' },
+  { key: 'metoprolol', rank: 8, name: 'Metoprolol' },
+  { key: 'rosuvastatin', rank: 9, name: 'Rosuvastatin' },
+  { key: 'omeprazole', rank: 10, name: 'Omeprazole' },
+  { key: 'gabapentin', rank: 11, name: 'Gabapentin' },
+  { key: 'sertraline', rank: 12, name: 'Sertraline' },
+  { key: 'escitalopram', rank: 13, name: 'Escitalopram' },
+  { key: 'semaglutide', rank: 14, name: 'Semaglutide' },
+  { key: 'amphetamine_dextroamphetamine', rank: 15, name: 'Amphetamine/dextroamphetamine' },
+  { key: 'pantoprazole', rank: 16, name: 'Pantoprazole' },
+  { key: 'bupropion', rank: 17, name: 'Bupropion' },
+  { key: 'hydrochlorothiazide', rank: 18, name: 'Hydrochlorothiazide' },
+  { key: 'fluoxetine', rank: 19, name: 'Fluoxetine' },
+  { key: 'trazodone', rank: 20, name: 'Trazodone' },
+  { key: 'montelukast', rank: 21, name: 'Montelukast' },
+  { key: 'amoxicillin', rank: 22, name: 'Amoxicillin' },
+  { key: 'fluticasone', rank: 23, name: 'Fluticasone' },
+  { key: 'tamsulosin', rank: 24, name: 'Tamsulosin' },
+  { key: 'apixaban', rank: 25, name: 'Apixaban' },
+  { key: 'simvastatin', rank: 26, name: 'Simvastatin' },
+  { key: 'insulin_glargine', rank: 27, name: 'Insulin glargine' },
+  { key: 'empagliflozin', rank: 28, name: 'Empagliflozin' },
+  { key: 'furosemide', rank: 29, name: 'Furosemide' },
+  { key: 'meloxicam', rank: 30, name: 'Meloxicam' },
+  { key: 'hydrocodone_acetaminophen', rank: 31, name: 'Hydrocodone/acetaminophen' },
+  { key: 'tirzepatide', rank: 32, name: 'Tirzepatide' },
+  { key: 'methylphenidate', rank: 33, name: 'Methylphenidate' },
+  { key: 'duloxetine', rank: 34, name: 'Duloxetine' },
+  { key: 'prednisone', rank: 35, name: 'Prednisone' },
+  { key: 'carvedilol', rank: 36, name: 'Carvedilol' },
+  { key: 'famotidine', rank: 37, name: 'Famotidine' },
+  { key: 'ibuprofen', rank: 38, name: 'Ibuprofen' },
+  { key: 'buspirone', rank: 39, name: 'Buspirone' },
+  { key: 'venlafaxine', rank: 40, name: 'Venlafaxine' },
+  { key: 'tramadol', rank: 41, name: 'Tramadol' },
+  { key: 'potassium_chloride', rank: 42, name: 'Potassium chloride' },
+  { key: 'hydroxyzine', rank: 43, name: 'Hydroxyzine' },
+  { key: 'allopurinol', rank: 44, name: 'Allopurinol' },
+  { key: 'clopidogrel', rank: 45, name: 'Clopidogrel' },
+  { key: 'ergocalciferol', rank: 46, name: 'Ergocalciferol (Vitamin D2)' },
+  { key: 'cetirizine', rank: 47, name: 'Cetirizine' },
+  { key: 'ondansetron', rank: 48, name: 'Ondansetron' },
+  { key: 'cyclobenzaprine', rank: 49, name: 'Cyclobenzaprine' },
+  { key: 'spironolactone', rank: 50, name: 'Spironolactone' },
+  { key: 'oxycodone', rank: 51, name: 'Oxycodone' },
+  { key: 'estradiol', rank: 52, name: 'Estradiol' },
+  { key: 'aspirin', rank: 53, name: 'Aspirin' },
+  { key: 'glipizide', rank: 54, name: 'Glipizide' },
+  { key: 'zolpidem', rank: 55, name: 'Zolpidem' },
+  { key: 'lamotrigine', rank: 56, name: 'Lamotrigine' },
+  { key: 'alprazolam', rank: 57, name: 'Alprazolam' },
+  { key: 'citalopram', rank: 58, name: 'Citalopram' },
+  { key: 'pregabalin', rank: 59, name: 'Pregabalin' },
+  { key: 'cholecalciferol', rank: 60, name: 'Cholecalciferol (Vitamin D3)' },
+  { key: 'clonazepam', rank: 61, name: 'Clonazepam' },
+  { key: 'azithromycin', rank: 62, name: 'Azithromycin' },
+  { key: 'pravastatin', rank: 63, name: 'Pravastatin' },
+  { key: 'valsartan', rank: 64, name: 'Valsartan' },
+  { key: 'ezetimibe', rank: 65, name: 'Ezetimibe' },
+  { key: 'diclofenac', rank: 66, name: 'Diclofenac' },
+  { key: 'insulin_lispro', rank: 67, name: 'Insulin lispro' },
+  { key: 'ethinyl_estradiol_norethindrone', rank: 68, name: 'Ethinyl estradiol/norethindrone' },
+  { key: 'propranolol', rank: 69, name: 'Propranolol' },
+  { key: 'latanoprost', rank: 70, name: 'Latanoprost' },
+  { key: 'atenolol', rank: 71, name: 'Atenolol' },
+  { key: 'lisdexamfetamine', rank: 72, name: 'Lisdexamfetamine' },
+  { key: 'doxycycline', rank: 73, name: 'Doxycycline' },
+  { key: 'amoxicillin_clavulanate', rank: 74, name: 'Amoxicillin/clavulanate' },
+  { key: 'dulaglutide', rank: 75, name: 'Dulaglutide' },
+  { key: 'hydrochlorothiazide_lisinopril', rank: 76, name: 'Hydrochlorothiazide/lisinopril' },
+  { key: 'lorazepam', rank: 77, name: 'Lorazepam' },
+  { key: 'fluticasone_salmeterol', rank: 78, name: 'Fluticasone/salmeterol' },
+  { key: 'insulin_aspart', rank: 79, name: 'Insulin aspart' },
+  { key: 'celecoxib', rank: 80, name: 'Celecoxib' },
+  { key: 'finasteride', rank: 81, name: 'Finasteride' },
+  { key: 'quetiapine', rank: 82, name: 'Quetiapine' },
+  { key: 'clonidine', rank: 83, name: 'Clonidine' },
+  { key: 'aripiprazole', rank: 84, name: 'Aripiprazole' },
+  { key: 'cephalexin', rank: 85, name: 'Cephalexin' },
+  { key: 'alendronate', rank: 86, name: 'Alendronate' },
+  { key: 'topiramate', rank: 87, name: 'Topiramate' },
+  { key: 'tizanidine', rank: 88, name: 'Tizanidine' },
+  { key: 'dapagliflozin', rank: 89, name: 'Dapagliflozin' },
+  { key: 'oxycodone_acetaminophen', rank: 90, name: 'Oxycodone/acetaminophen' },
+  { key: 'hydrochlorothiazide_losartan', rank: 91, name: 'Hydrochlorothiazide/losartan' },
+  { key: 'olmesartan', rank: 92, name: 'Olmesartan' },
+  { key: 'testosterone', rank: 93, name: 'Testosterone' },
+  { key: 'amitriptyline', rank: 94, name: 'Amitriptyline' },
+  { key: 'folic_acid', rank: 95, name: 'Folic acid' },
+  { key: 'rivaroxaban', rank: 96, name: 'Rivaroxaban' },
+  { key: 'fenofibrate', rank: 97, name: 'Fenofibrate' },
+  { key: 'triamcinolone', rank: 98, name: 'Triamcinolone' },
+  { key: 'paroxetine', rank: 99, name: 'Paroxetine' },
+  { key: 'ferrous_sulfate', rank: 100, name: 'Ferrous sulfate' },
+];
+
+// Allergies offered at check-in.
+//
+// Ordered by what this clinic actually puts in a patient — every local
+// anaesthetic and every antibiotic on MMW's dental drug list is here, because
+// those are the allergies that change what a provider may safely give someone
+// on the day. The general ones follow.
 export const ALLERGIES = [
+  // Local anaesthetics — the five MMW carries.
   { key: 'lidocaine', en: 'Lidocaine', es: 'Lidocaína' },
   { key: 'articaine', en: 'Articaine', es: 'Articaína' },
+  { key: 'mepivacaine', en: 'Mepivacaine', es: 'Mepivacaína' },
+  { key: 'bupivacaine', en: 'Bupivacaine', es: 'Bupivacaína' },
+  { key: 'prilocaine', en: 'Prilocaine', es: 'Prilocaína' },
+  // Antibiotics — the five MMW carries. Penicillin stays first of these: it is
+  // the allergy patients most often know they have.
   { key: 'penicillin', en: 'Penicillin', es: 'Penicilina' },
+  { key: 'amoxicillin', en: 'Amoxicillin', es: 'Amoxicilina' },
+  { key: 'amoxicillin_clavulanate', en: 'Amoxicillin + clavulanate', es: 'Amoxicilina + clavulanato' },
+  { key: 'clindamycin', en: 'Clindamycin', es: 'Clindamicina' },
+  { key: 'azithromycin', en: 'Azithromycin', es: 'Azitromicina' },
+  // General.
   { key: 'codeine', en: 'Codeine', es: 'Codeína' },
   { key: 'erythromycin', en: 'Erythromycin', es: 'Eritromicina' },
   { key: 'nsaids', en: 'NSAIDs (Ibuprofen, Aspirin)', es: 'AINEs (Ibuprofeno, Aspirina)' },

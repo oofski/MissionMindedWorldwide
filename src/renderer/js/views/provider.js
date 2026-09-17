@@ -1,5 +1,5 @@
 import { el, clear, mount, toast, modal } from '../dom.js';
-import { t, conditions, allergies } from '../i18n.js';
+import { t, conditions, allergies, ANESTHETICS } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { SignaturePad } from '../components/signature.js';
@@ -286,14 +286,15 @@ export function renderProvider(ctx, params = {}) {
     // multiple entries are captured (e.g. #14 1.5 carps buccal; #30 1 carp lingual).
     // Saved as an ARRAY (see collectTreatment); legacy object-keyed data is parsed
     // on load so prior records pre-fill correctly.
-    const ANES_AGENTS = [
-      ['lidocaine', 'Lidocaine 2%'],
-      ['articaine', 'Articaine 4%'],
-      ['other', 'Other'],
-    ];
+    // All five anaesthetics MMW carries, from the clinic's own drug list, plus
+    // Other. Offering only two of the five meant a mepivacaine or bupivacaine
+    // block had to be recorded as "Other" free text, where nothing could count
+    // it — and what was given is exactly what a later provider needs to read.
+    const ANES_AGENTS = [...ANESTHETICS.map((a) => [a.key, a.en]), ['other', 'Other']];
+    const ANES_KEYS = ANES_AGENTS.map(([k]) => k);
     const anesRows = el('div', { class: 'tx-rows' });
     function anesFromStored(stored) {
-      const known = (k) => ['lidocaine', 'articaine', 'other'].includes(k);
+      const known = (k) => ANES_KEYS.includes(k);
       if (Array.isArray(stored)) {
         return stored.map((a) => ({
           agent: known(a.agent) ? a.agent : 'other',
@@ -316,7 +317,7 @@ export function renderProvider(ctx, params = {}) {
       });
     }
     function addAnes(a = {}) {
-      const agent = ['lidocaine', 'articaine', 'other'].includes(a.agent) ? a.agent : 'lidocaine';
+      const agent = ANES_KEYS.includes(a.agent) ? a.agent : 'lidocaine';
       const agentSel = el('select', { class: 'input input--sm' }, ANES_AGENTS.map(([k, l]) =>
         el('option', { value: k, selected: k === agent }, [l])));
       const nameInput = el('input', { class: 'input input--sm', placeholder: 'Agent name', value: a.name || '', style: agent === 'other' ? '' : 'display:none' });

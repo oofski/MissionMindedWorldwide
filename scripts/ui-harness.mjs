@@ -2315,6 +2315,70 @@ async function main() {
       'MMW survey: merging adds option counts question by question');
   }
 
+  /* ===== The clinic's own drug and medication lists =========================
+     MMW supplied two spreadsheets: 100 medications patients commonly take, and
+     the anaesthetics and antibiotics this clinic actually carries. Both feed
+     check-in, and both are duplicated into the Worker, so they are pinned. */
+  {
+    const fsD = await import('node:fs');
+    const readSrc = (rel) => fsD.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const st = await import('../src/renderer/i18n/strings.js');
+
+    log(st.MEDICATIONS.length === 100, `meds: all 100 medications from the clinic list are offered (${st.MEDICATIONS.length})`);
+    log(st.MEDICATIONS.every((m) => m.name && m.key && typeof m.rank === 'number'),
+      'meds: every medication has a name, a stable key and its ranking');
+    // Ordered by how commonly prescribed, so the drugs most patients are on are
+    // the first a volunteer sees rather than buried alphabetically.
+    const ranks = st.MEDICATIONS.map((m) => m.rank);
+    log(ranks.every((r, i) => i === 0 || ranks[i - 1] < r) && ranks[0] === 1 && ranks[99] === 100,
+      'meds: the picker lists them commonest-first, with no gaps or duplicates');
+    log(st.MEDICATIONS[0].name === 'Atorvastatin' && st.MEDICATIONS[2].name === 'Metformin',
+      'meds: the clinic list ordering is preserved exactly');
+    const medKeys = new Set(st.MEDICATIONS.map((m) => m.key));
+    log(medKeys.size === 100, 'meds: no two medications collide on the same key');
+
+    // The five anaesthetics and five antibiotics MMW carries.
+    log(st.ANESTHETICS.length === 5 && st.ANESTHETICS.map((a) => a.en).join('|')
+      === 'Lidocaine 2%|Articaine 4%|Mepivacaine 3%|Bupivacaine 0.5%|Prilocaine 4%',
+      'drugs: all five local anaesthetics carry their concentration');
+    log(st.ANTIBIOTICS.length === 5, 'drugs: all five antibiotics are listed');
+
+    // Every drug the clinic can put IN a patient must be offerable as an
+    // allergy — that is the answer that changes what a provider may safely give.
+    const allergyKeys = new Set(st.ALLERGIES.map((a) => a.key));
+    log(st.ANESTHETICS.every((a) => allergyKeys.has(a.key)),
+      'allergies: every anaesthetic the clinic carries can be recorded as an allergy');
+    for (const k of ['amoxicillin', 'clindamycin', 'azithromycin', 'amoxicillin_clavulanate', 'penicillin']) {
+      log(allergyKeys.has(k), `allergies: ${k} can be recorded`);
+    }
+    log(st.ALLERGIES.every((a) => a.en && a.es), 'allergies: every option is translated into Spanish');
+    // Never drop one that has been logged against a real record.
+    log(allergyKeys.has('novocain') && st.ALLERGIES.find((a) => a.key === 'novocain').intake === false,
+      'allergies: a retired option is kept for display so an old record still shows it');
+
+    // The chairside agent picker offers all five, not the two it used to.
+    const provSrc = readSrc('../src/renderer/js/views/provider.js');
+    log(/ANES_AGENTS = \[\.\.\.ANESTHETICS\.map/.test(provSrc),
+      'drugs: the chairside anaesthetic picker is driven by the clinic list, not its own copy');
+
+    // The Worker keeps its own copies; drift there is silent.
+    const wSrc = readSrc('../cloud/worker.js');
+    const wMeds = (wSrc.match(/const MED_OPTIONS = '([^']*)'/) || [])[1] || '';
+    const wNames = Array.from(wMeds.matchAll(/value="([^"]*)"/g)).map((m) => m[1]);
+    log(wNames.length === 100 && wNames[0] === st.MEDICATIONS[0].name && wNames[99] === st.MEDICATIONS[99].name,
+      'meds: the online form offers the same 100 in the same order');
+    const wAll = (wSrc.match(/const FORM_ALLERGIES = \[([\s\S]*?)\n\];/) || [])[1] || '';
+    const wAllKeys = Array.from(wAll.matchAll(/\['([a-z_]+)'/g)).map((m) => m[1]);
+    const intakeKeys = st.ALLERGIES.filter((a) => a.intake !== false).map((a) => a.key);
+    log(JSON.stringify(wAllKeys) === JSON.stringify(intakeKeys),
+      'allergies: the online form offers exactly the same list as the walk-in form');
+    // The attribute is written inside a JS string literal in the Worker, so it
+    // appears backslash-escaped in the source; what matters is that the RENDERED
+    // input carries it, which cloud/test-worker.mjs asserts against real output.
+    log(/list=\\?"medlist\\?"/.test(wSrc) && /<datalist id="medlist"/.test(wSrc),
+      'meds: the online form suggests from the list while still accepting anything typed');
+  }
+
   /* ===== The survey, split across the visit =================================
      The demographic half is asked at the end of registration and the experience
      half at check-out. They are one row, filled in two sittings hours apart by

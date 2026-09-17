@@ -1,6 +1,6 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions, US_STATES } from '../i18n.js';
+import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions, US_STATES, MEDICATIONS } from '../i18n.js';
 import { textField, selectField, yesNo, chipGrid, limitDigits } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
 import { REGISTRATION_SECTIONS } from '../../i18n/exitSurvey.js';
@@ -355,9 +355,25 @@ export function renderKiosk(ctx) {
       addBtn.disabled = disabled;
       medRows.querySelectorAll('input, button').forEach((x) => { x.disabled = disabled; });
     };
+    // One shared <datalist> for every row: the 100 medications MMW listed, in
+    // order of how commonly they are prescribed.
+    //
+    // A datalist rather than a <select>, deliberately. It behaves as a picker —
+    // type two letters and the matches appear — but it still accepts anything
+    // typed. A closed dropdown would be both unusable at 100 entries on a tablet
+    // AND unable to record a patient on a drug outside the list, and the
+    // provider reads this before deciding what is safe to give them. A
+    // medication that cannot be entered is a medication nobody sees.
+    const MED_LIST_ID = 'mmw-med-list';
+    const medDatalist = el('datalist', { id: MED_LIST_ID },
+      MEDICATIONS.map((x) => el('option', { value: x.name })));
+
     function addMedRow(med = {}) {
       if (noMeds.checked) { noMeds.checked = false; refreshMedsDisabled(); } // adding a med clears "none"
-      const name = el('input', { class: 'input', placeholder: t('intake.medName'), value: med.name || '' });
+      const name = el('input', {
+        class: 'input', placeholder: t('intake.medName'), value: med.name || '',
+        list: MED_LIST_ID, autocomplete: 'off',
+      });
       const dose = el('input', { class: 'input', placeholder: t('intake.medDose'), value: med.dose || '' });
       const reason = el('input', { class: 'input', placeholder: t('intake.medReason'), value: med.reason || '' });
       const row = el('div', { class: 'med-row' }, [name, dose, reason,
@@ -381,6 +397,7 @@ export function renderKiosk(ctx) {
       el('div', { class: 'field' }, [
         el('span', { class: 'field-label' }, [t('intake.medsTitle') + ' *']),
         el('label', { class: 'agree-row' }, [noMeds, el('span', {}, [noMedsLabel])]),
+        medDatalist,
         medRows,
         addBtn,
       ]),

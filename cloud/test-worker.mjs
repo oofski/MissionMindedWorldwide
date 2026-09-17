@@ -571,6 +571,18 @@ async function main() {
   check('the pre-registration form marks date of birth and gender required',
     /id="dob"/.test(fullForm.text) && /id="gender"/.test(fullForm.text) &&
     fullForm.text.includes("if(!val('dob'))") && fullForm.text.includes("if(!val('gender'))"));
+  // The clinic's own medication list, on the rendered form. A datalist rather
+  // than a select: it suggests, but a patient on a drug outside the hundred must
+  // still be recordable — the provider reads this before deciding what is safe.
+  check('the form suggests the clinic medication list',
+    /<datalist id="medlist">/.test(fullForm.text) &&
+    /value="Atorvastatin"/.test(fullForm.text) && /value="Metformin"/.test(fullForm.text) &&
+    (fullForm.text.match(/<option value="[^"]*"><\/option>/g) || []).length >= 100);
+  // Every anaesthetic and antibiotic the clinic carries is offerable as an allergy.
+  check('the form offers the clinic drug list as allergies',
+    /Mepivacaine/.test(fullForm.text) && /Bupivacaine/.test(fullForm.text) && /Prilocaine/.test(fullForm.text) &&
+    /Clindamycin/.test(fullForm.text) && /Azithromycin/.test(fullForm.text) && /Amoxicillin \+ clavulanate/.test(fullForm.text));
+
   // The English form offers a link to switch to Spanish.
   check('the English form links to the Spanish version',
     /\?lang=es/.test(fullForm.text) && fullForm.text.includes('Español'));
