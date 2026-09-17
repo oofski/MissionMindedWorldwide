@@ -2315,6 +2315,82 @@ async function main() {
       'MMW survey: merging adds option counts question by question');
   }
 
+  /* ===== The report, exported ===============================================
+     CSV, Excel and PDF are three renderings of ONE set of section definitions.
+     A grant return quoting the spreadsheet and a board paper quoting the PDF
+     must never give different numbers for the same clinic, so the thing worth
+     testing is that the three agree — not that each one runs. */
+  {
+    currentUser = signInAdmin();
+    const rex = require('../src/main/reportExport.js');
+    const mkP = (i) => db.createPatient(currentUser, {
+      first_name: 'Rep' + i, last_name: 'Ort', dob: '1985-03-02', gender: i % 2 ? 'male' : 'female',
+      language: i % 3 ? 'en' : 'es',
+      demographics: { city: i % 2 ? 'Sandy' : 'Boring', state: 'OR', race: [i % 2 ? 'white' : 'hispanic_latino'], preregistered: i % 2 === 0 },
+      medical_history: { conditions: i % 2 ? ['diabetes'] : ['high_bp'] },
+      dental_history: { visit_type: 'cleaning' },
+    });
+    for (let i = 1; i <= 6; i++) mkP(i);
+    const sum = db.buildEventSummary();
+    const labels = { conditions: { diabetes: 'Diabetes', high_bp: 'High blood pressure' } };
+    const secs = rex.reportSections(sum, 'This clinic', labels);
+    const byTitle = Object.fromEntries(secs.map((x) => [x.title, x]));
+
+    // Everything the report was asked to include.
+    for (const t of ['Patient counts', 'How patients registered', 'Gender', 'Age band',
+                     'Race and ethnicity', 'Language', 'City', 'Most common conditions']) {
+      log(!!byTitle[t], `report: includes "${t}"`);
+    }
+    // Relative, not absolute: this database already holds every patient the
+    // earlier checks created, so what matters is that the report agrees with the
+    // summary rather than hitting a number this block happens to know.
+    const seenCount = byTitle['Patient counts'].rows.find((r) => r[0] === 'Patients seen')[1];
+    log(seenCount === sum.patients_seen && seenCount >= 6,
+      `report: the patient count matches the clinic summary (${seenCount})`);
+    // Pre-registered vs registered at the desk, which is the split the online
+    // form exists to be judged on.
+    const reg = byTitle['How patients registered'].rows;
+    log(reg.length === 2 && reg[0][0] === 'Pre-registered online' && reg[1][0] === 'Registered at the clinic',
+      'report: separates patients who pre-registered from those who registered at the desk');
+    log(reg[0][1] + reg[1][1] === seenCount,
+      'report: every patient falls into one registration route or the other, with none lost between them');
+    log(byTitle.City.rows.some((r) => /Sandy/.test(r[0])), 'report: city breakdown carries real places');
+    log(byTitle.Language.rows.some((r) => r[0] === 'English'),
+      'report: language is shown by name, not by its code');
+    log(byTitle['Most common conditions'].rows.some((r) => r[0] === 'High blood pressure'),
+      'report: conditions are shown by name — a funder never sees "high_bp"');
+    log(byTitle['Race and ethnicity'].note && /more than 100%/.test(byTitle['Race and ethnicity'].note),
+      'report: the race table says why its shares can exceed 100%');
+
+    // The three formats, from the same sections.
+    const csv = rex.reportCsv(sum, 'This clinic', labels);
+    const xlsxBuf = rex.reportWorkbook(sum, 'This clinic', labels);
+    const html = rex.reportHtml(sum, 'This clinic', labels);
+    log(typeof csv === 'string' && csv.length > 200, 'report: CSV is produced');
+    log(csv.charCodeAt(0) === 0xFEFF, 'report: the CSV carries a BOM so Excel reads accents rather than mojibake');
+    log(/\r\n/.test(csv), 'report: the CSV uses CRLF line endings');
+    log(Buffer.isBuffer(xlsxBuf) && xlsxBuf.slice(0, 2).toString() === 'PK',
+      'report: the Excel workbook is a real .xlsx file');
+    log(/<table>/.test(html) && /Mission Minded Worldwide/.test(html), 'report: the printable PDF body is produced');
+
+    // The agreement that actually matters: one number, three files.
+    log(csv.includes(`Patients seen,${seenCount}`), 'report: the CSV carries the same patient count as the sections');
+    log(html.includes(`<td class="num">${seenCount}</td>`), 'report: the PDF carries the same patient count');
+    for (const t of Object.keys(byTitle)) {
+      // Every section title appears in every format, so none can silently drop one.
+      if (!csv.includes(t) || !html.includes(t)) { log(false, `report: "${t}" is missing from CSV or PDF`); }
+    }
+    log(secs.every((x) => csv.includes(x.title) && html.includes(x.title)),
+      'report: every section appears in all three formats');
+
+    // Built from the de-identified summary, so no patient name can reach a file
+    // that gets emailed to a funder.
+    log(!/Rep1|Ort/.test(csv) && !/Rep1|Ort/.test(html),
+      'report: no patient name appears in an exported report');
+    log(rex.reportSections({}, 'Empty').length > 0,
+      'report: a clinic with no patients still produces a report rather than failing');
+  }
+
   /* ===== The clinic's own drug and medication lists =========================
      MMW supplied two spreadsheets: 100 medications patients commonly take, and
      the anaesthetics and antibiotics this clinic actually carries. Both feed

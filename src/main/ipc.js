@@ -21,6 +21,7 @@ const xrayFolder = require('./xrayFolder');
 const zipStore = require('./zipStore');
 const xlsx = require('./xlsx');
 const { clinicSheets } = require('./clinicSheets');
+const reportExport = require('./reportExport');
 const os = require('os');
 
 let currentUser = null;
@@ -77,6 +78,7 @@ const PERMS = {
   'xray:get': ['admin', 'doctor', 'triage', 'emt', 'hygienist'],
   'xray:list': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'xray:delete': ['admin', 'doctor', 'triage', 'emt'],
+  'report:export': ['admin', 'doctor'],
   'pdf:generate': ['admin', 'doctor', 'checkout'],
   'pdf:preview': ['admin', 'doctor', 'checkout'],
   'pdf:print': ['admin', 'doctor', 'checkout'],
@@ -202,6 +204,47 @@ function register(getMainWindow) {
     currentUser = null;             // the account that asked no longer exists
     return r;
   });
+  /**
+   * Export the clinic report as CSV, Excel or PDF.
+   *
+   * All three are rendered from ONE set of section definitions, so a grant
+   * return quoting the spreadsheet and a board paper quoting the PDF can never
+   * give different numbers for the same clinic.
+   *
+   * Built from the de-identified summary, never from patient rows — which means
+   * a report is still exportable after the records have been purged, and that is
+   * the case these totals exist for.
+   */
+  handle('report:export', async ({ scope, format, labels } = {}) => {
+    const fmt = ['csv', 'xlsx', 'pdf'].includes(format) ? format : 'csv';
+    // Same scope the tab is showing: 'all', or an event id. reportRollup treats
+    // null/'all' as every clinic, so it is passed straight through.
+    const rollup = db.reportRollup(scope === 'all' ? 'all' : scope);
+    const summary = (rollup && rollup.summary) || {};
+    const scopeLabel = rollup && rollup.all
+      ? 'All clinics'
+      : ((rollup.event && rollup.event.name) || summary.event_name || 'This clinic');
+    const evName = String(scopeLabel).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'clinic';
+    const stamp = new Date().toISOString().slice(0, 10);
+    const base = `MMW-Report-${evName}-${stamp}`;
+    const FILTERS = {
+      csv: { name: 'CSV spreadsheet', extensions: ['csv'] },
+      xlsx: { name: 'Excel workbook', extensions: ['xlsx'] },
+      pdf: { name: 'PDF document', extensions: ['pdf'] },
+    };
+    const res = await dialog.showSaveDialog({
+      title: 'Save clinic report',
+      defaultPath: path.join(os.homedir(), `${base}.${fmt}`),
+      filters: [FILTERS[fmt]],
+    });
+    if (res.canceled || !res.filePath) return { saved: false };
+    const out = res.filePath.toLowerCase().endsWith('.' + fmt) ? res.filePath : res.filePath + '.' + fmt;
+    if (fmt === 'csv') fs.writeFileSync(out, reportExport.reportCsv(summary, scopeLabel, labels));
+    else if (fmt === 'xlsx') fs.writeFileSync(out, reportExport.reportWorkbook(summary, scopeLabel, labels));
+    else fs.writeFileSync(out, await pdf.renderHtmlPdf(reportExport.reportHtml(summary, scopeLabel, labels)));
+    return { saved: true, path: out, format: fmt };
+  });
+
   /* ---- Clinic export / restore / purge (v1.6.0) ---- */
   // Two files: a readable workbook, and the backup that can actually put the
   // clinic back (signatures and x-ray images cannot live in a spreadsheet).

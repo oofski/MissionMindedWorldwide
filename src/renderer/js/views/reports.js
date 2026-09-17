@@ -1,6 +1,6 @@
-import { el, clear, toast } from '../dom.js';
+import { el, clear, toast, withBusy } from '../dom.js';
 import { conditions, raceLabel } from '../i18n.js';
-import { SECTIONS, QUESTION_BY_KEY } from '../../i18n/exitSurvey.js';
+import { SECTIONS, QUESTION_BY_KEY, QUESTIONS } from '../../i18n/exitSurvey.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
@@ -113,8 +113,35 @@ function conditionLabels(obj) {
 }
 
 export function renderReports(ctx) {
+  // One button per format. withBusy because a PDF render spins up an offscreen
+  // window and takes a moment — without it the button looks dead and gets
+  // clicked twice, producing two save dialogs.
+  // The names for the codes the summary stores. The main process cannot import
+  // this catalogue, so the tab that already has it hands it over — which is also
+  // why the export can never print a label the app has stopped using.
+  function exportLabels() {
+    return {
+      conditions: Object.fromEntries(conditions().map((c) => [c.key, c.label])),
+      surveyQuestions: Object.fromEntries(QUESTIONS.map((q) => [q.key, q.en])),
+      surveyOptions: Object.fromEntries(QUESTIONS.map((q) => [q.key,
+        Object.fromEntries(q.options.map((o) => [o.value, o.en]))])),
+    };
+  }
+
+  function exportBtn(format, label, ic) {
+    const btn = el('button', { class: 'btn btn--ghost btn--sm' }, [icon(ic, { size: 15 }), label]);
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await withBusy(btn, () => api.exportReport(currentScope(), format, exportLabels()));
+        if (r && r.saved) toast(`Report saved: ${r.path}`, 'success');
+      } catch (e) { toast(e.message || 'Could not save the report.', 'error'); }
+    });
+    return btn;
+  }
+
   const root = el('div', { class: 'view' });
   let scope = 'all';
+  const currentScope = () => scope;
 
   function scopeSelFor(events) {
     const sel = el('select', { class: 'input select input--sm', onChange: (e) => { scope = e.target.value === 'all' ? 'all' : Number(e.target.value); load(); } });
@@ -176,9 +203,17 @@ export function renderReports(ctx) {
         el('div', { class: 'view-head-actions' }, [
           scopeSel,
           el('button', { class: 'btn btn--ghost btn--sm', onClick: load }, [icon('refresh', { size: 15 }), 'Refresh']),
-          store.is('admin') && patients.length ? el('button', { class: 'btn btn--primary btn--sm', onClick: async () => {
+          // The report itself, in the three formats a funder actually asks for.
+          // All three are rendered from one set of section definitions, so the
+          // spreadsheet and the PDF can never disagree about the same clinic.
+          exportBtn('pdf', 'PDF', 'print'),
+          exportBtn('xlsx', 'Excel', 'reports'),
+          exportBtn('csv', 'CSV', 'database'),
+          // The raw records, which is a different thing: patient rows for
+          // re-import, not the de-identified totals above.
+          store.is('admin') && patients.length ? el('button', { class: 'btn btn--ghost btn--sm', onClick: async () => {
             try { const r = await api.exportEvent(scope); if (r.saved) toast(`Exported ${r.count} record(s)`, 'success'); } catch (e) { toast(e.message, 'error'); }
-          } }, [icon('download', { size: 15 }), 'Export JSON']) : null,
+          } }, [icon('download', { size: 15 }), 'Raw records (JSON)']) : null,
         ]),
       ]),
 

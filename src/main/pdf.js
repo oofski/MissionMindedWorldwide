@@ -532,4 +532,27 @@ async function renderPdf(patient, format) {
   }
 }
 
-module.exports = { renderPdf, buildHtml };
+/**
+ * Render arbitrary report HTML to a PDF buffer.
+ *
+ * Same offscreen-window mechanism as the patient PDFs; separate entry point
+ * because a report is not a patient and has no chart to build from.
+ */
+async function renderHtmlPdf(html) {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { offscreen: true, sandbox: true, contextIsolation: true },
+  });
+  try {
+    await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    return await win.webContents.printToPDF({
+      printBackground: true,
+      margins: { marginType: 'none' },
+      pageSize: 'Letter',
+    });
+  } finally {
+    win.destroy();
+  }
+}
+
+module.exports = { renderPdf, buildHtml, renderHtmlPdf };

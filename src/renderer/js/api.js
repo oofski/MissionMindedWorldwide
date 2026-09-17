@@ -86,6 +86,7 @@ export const api = {
 
   backup: () => call('backupRun'),
   exportEvent: (eventId) => call('exportEvent', { eventId }),
+  exportReport: (scope, format, labels) => call('reportExport', { scope, format, labels }),
   exportZip: () => call('exportZip'),
   exportClinic: (eventId) => call('exportClinic', { eventId }),
   importClinic: () => call('importClinic'),
