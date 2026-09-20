@@ -2514,6 +2514,23 @@ async function main() {
       'supplies: units are pluralised properly next to their count');
     log(/39 carpules/.test(txt2) && /0 boxes/.test(txt2),
       'supplies: a box is "boxes" and a carpule is "carpules"');
+
+    // Opening an item. A new screen's detail view is where a wiring mistake
+    // hides, because the list can render perfectly without it.
+    Array.from(invView.querySelectorAll('tr')).find((r) => r.textContent.includes('Lidocaine')).click();
+    for (let i = 0; i < 8; i++) await tick();
+    // The LAST overlay: an earlier check left one open, and the first match
+    // would be that stale one rather than the item just clicked.
+    const overlays = document.querySelectorAll('.modal-overlay');
+    const card = overlays.length ? overlays[overlays.length - 1].querySelector('.modal-card') : null;
+    const cardTxt = card ? card.textContent : '';
+    log(/Lidocaine/.test(cardTxt), 'supplies: opening an item shows that item');
+    log(/Reorder at/.test(cardTxt) && /Counted in/.test(cardTxt),
+      'supplies: the item can be edited from there');
+    log(/received|Received/.test(cardTxt) && /100/.test(cardTxt),
+      'supplies: and its history is on the same screen, delivery and all');
+    const rec = Array.from(card ? card.querySelectorAll('button') : []).find((b) => /Record/.test(b.textContent));
+    log(!!rec, 'supplies: a movement can be recorded without leaving the item');
   }
 
   /* ===== The report, exported ===============================================
