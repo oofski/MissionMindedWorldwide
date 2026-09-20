@@ -69,6 +69,10 @@ const PERMS = {
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
   'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
+  'inventoryList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventoryGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventoryMove': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventorySave': ['admin'], 'inventoryDelete': ['admin'],
   'xrayAdd': ['admin', 'doctor', 'triage'], 'xraySetTooth': ['admin', 'doctor'], 'xrayGet': ['admin', 'doctor', 'triage', 'hygienist'], 'xrayList': ['admin', 'doctor', 'triage', 'hygienist'], 'xrayDelete': ['admin', 'doctor', 'triage'],
   'xrayFolderConfig': ['admin', 'doctor'], 'xrayFolderChoose': ['admin', 'doctor'], 'xrayFolderLock': ['admin', 'doctor'], 'xrayFolderDelete': ['admin', 'doctor'], 'xrayDeleteFile': ['admin', 'doctor'],
   'pdfPreview': ['admin', 'doctor'], 'pdfGenerate': ['admin', 'doctor'], 'pdfPrint': ['admin', 'doctor'],
@@ -124,6 +128,11 @@ window.api = {
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
   triageSave: okWrap(({ patientId, data }) => db.saveTriage(currentUser, patientId, data), 'triageSave'),
   surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data), 'surveySave'),
+  inventoryList: okWrap(({ eventId } = {}) => db.listInventory({ eventId }), 'inventoryList'),
+  inventoryGet: okWrap(({ id }) => db.getInventoryItem(id), 'inventoryGet'),
+  inventorySave: okWrap(({ data }) => db.saveInventoryItem(currentUser, data), 'inventorySave'),
+  inventoryMove: okWrap(({ data }) => db.recordInventoryMove(currentUser, data), 'inventoryMove'),
+  inventoryDelete: okWrap(({ id }) => db.deleteInventoryItem(currentUser, id), 'inventoryDelete'),
   treatmentSave: okWrap(({ patientId, data, finalize }) => db.saveTreatment(currentUser, patientId, data, finalize), 'treatmentSave'),
   vitalsSave: okWrap(({ patientId, data }) => db.saveVitals(currentUser, patientId, data), 'vitalsSave'),
   patientsRoute: okWrap(({ patientId, route }) => db.routePatient(currentUser, patientId, route), 'patientsRoute'),
@@ -2403,6 +2412,108 @@ async function main() {
     const wSrc = require('node:fs').readFileSync(new URL('../cloud/worker.js', import.meta.url), 'utf8');
     log(/v === 'na'/.test(wSrc), 'na: the online form counts "Not applicable" as answered');
     log(/id === 'pregnancy' \?/.test(wSrc), 'na: and offers it on the pregnancy question only');
+  }
+
+  /* ===== Supplies ===========================================================
+     On hand is SUMMED from a ledger, never stored as an editable number. The
+     property that matters is that a correction is recorded rather than
+     overwriting history — a clinic packing a van needs to answer "did we use 40
+     boxes or leave them behind", and an edited count cannot answer it. */
+  {
+    currentUser = signInAdmin();
+    const gloves = db.saveInventoryItem(currentUser, { name: 'Exam gloves — medium', category: 'PPE', unit: 'box', par_level: 5 });
+    const lido = db.saveInventoryItem(currentUser, { name: 'Lidocaine 2%', category: 'Anaesthetic', unit: 'carpule', par_level: 50 });
+    log(gloves.on_hand === 0, 'supplies: a new item starts at zero — adding it is not the same as having it');
+
+    db.recordInventoryMove(currentUser, { item_id: gloves.id, delta: 12, reason: 'received', note: 'Donation' });
+    db.recordInventoryMove(currentUser, { item_id: gloves.id, delta: -3, reason: 'used' });
+    log(db.getInventoryItem(gloves.id).on_hand === 9, 'supplies: on hand is the running total of what moved');
+
+    // The point of the ledger.
+    db.recordInventoryMove(currentUser, { item_id: gloves.id, delta: -2, reason: 'adjusted', note: 'Recount' });
+    const g = db.getInventoryItem(gloves.id);
+    log(g.on_hand === 7, 'supplies: a correction changes the count');
+    log(g.moves.length === 3, 'supplies: and it is recorded as a correction rather than overwriting the history');
+    log(g.moves.some((m) => m.reason === 'received' && m.delta === 12),
+      'supplies: the original delivery is still on the record after a correction');
+    log(g.moves.every((m) => m.created_by_name), 'supplies: every movement records who made it');
+
+    // Low and out are different problems and a clinic reads them differently.
+    db.recordInventoryMove(currentUser, { item_id: lido.id, delta: 100, reason: 'received' });
+    db.recordInventoryMove(currentUser, { item_id: lido.id, delta: -60, reason: 'used' });
+    const list = db.listInventory();
+    const L = Object.fromEntries(list.map((i) => [i.name, i]));
+    log(L['Lidocaine 2%'].status === 'low', 'supplies: at or below the reorder level reads as low');
+    log(L['Exam gloves — medium'].status === 'ok', 'supplies: comfortably stocked reads as in stock');
+    db.recordInventoryMove(currentUser, { item_id: gloves.id, delta: -7, reason: 'used' });
+    log(db.listInventory().find((i) => i.id === gloves.id).status === 'out',
+      'supplies: nothing left reads as out, not as low');
+
+    // Consumption is per clinic, which is what a restock list is built from.
+    log(L['Lidocaine 2%'].used_here === 60, 'supplies: what this clinic consumed is counted separately from the balance');
+
+    // Supplies are clinic property, not patient data: a patient purge must not
+    // take the stock list with it.
+    const beforePurge = db.listInventory().length;
+    db.purgeEventPatients(currentUser, Number(db.getSetting('active_event_id')));
+    log(db.listInventory().length === beforePurge,
+      'supplies: purging patient records leaves the supply list alone');
+
+    // Deleting an item takes its ledger with it — and tombstones both, or the
+    // cloud would rebuild the item on the next pull.
+    const tmp = db.saveInventoryItem(currentUser, { name: 'Temp item', unit: 'each' });
+    db.recordInventoryMove(currentUser, { item_id: tmp.id, delta: 5, reason: 'received' });
+    const raw = rawDb();
+    const uid = raw.prepare('SELECT uid FROM inventory_items WHERE id = ?').get(tmp.id);
+    raw.close();
+    db.deleteInventoryItem(currentUser, tmp.id);
+    log(!db.getInventoryItem(tmp.id), 'supplies: a deleted item is gone');
+    const raw2 = rawDb();
+    const moves = raw2.prepare('SELECT COUNT(*) AS n FROM inventory_moves WHERE item_id = ?').get(tmp.id).n;
+    const tombed = uid && uid.uid
+      ? raw2.prepare('SELECT COUNT(*) AS n FROM tombstones WHERE uid = ?').get(uid.uid).n : 0;
+    raw2.close();
+    log(moves === 0, 'supplies: its ledger goes with it');
+    log(!uid || !uid.uid || tombed === 1, 'supplies: and the deletion is recorded so another laptop cannot resurrect it');
+
+    // Refusals.
+    let bad = 0;
+    try { db.saveInventoryItem(currentUser, { name: '   ' }); } catch (e) { bad++; }
+    try { db.recordInventoryMove(currentUser, { item_id: gloves.id, delta: 0, reason: 'used' }); } catch (e) { bad++; }
+    try { db.recordInventoryMove(currentUser, { item_id: 999999, delta: 1, reason: 'received' }); } catch (e) { bad++; }
+    log(bad === 3, 'supplies: a nameless item, a zero movement and an unknown item are all refused');
+
+    // The screen itself.
+    const storeInv = (await import('../src/renderer/js/store.js')).store;
+    storeInv.setUser(currentUser);
+    const ctxInv = { navigate: () => {}, toast: () => {}, store: storeInv, setDetail: () => {} };
+    const invView = (await import('../src/renderer/js/views/inventory.js')).renderInventory(ctxInv);
+    document.body.append(invView);
+    for (let i = 0; i < 8; i++) await tick();
+    const txt = invView.textContent;
+    log(/Supplies/.test(txt), 'supplies: the screen renders');
+    log(/Exam gloves/.test(txt) && /Lidocaine/.test(txt), 'supplies: it lists the tracked items');
+    log(/On hand/.test(txt) && /Reorder at/.test(txt) && /Used this clinic/.test(txt),
+      'supplies: it shows the balance, the reorder level and what this clinic used');
+    log(/run out|reorder level/i.test(txt), 'supplies: what is wrong right now is stated at the top of the screen');
+    const quick = Array.from(invView.querySelectorAll('button')).filter((b) => b.textContent === '−1' || b.textContent === '+1');
+    log(quick.length >= 2, 'supplies: stock can be moved from the list without opening the item');
+    const before = db.getInventoryItem(lido.id).on_hand;
+    quick.find((b) => b.textContent === '−1' && b.closest('tr').textContent.includes('Lidocaine')).click();
+    for (let i = 0; i < 8; i++) await tick();
+    log(db.getInventoryItem(lido.id).on_hand === before - 1,
+      'supplies: the one-tap control records a real movement');
+
+    // Wording. A clinic lead reads this screen aloud to whoever is packing the
+    // van, so it has to be English: no "item(s)", no "14 boxs", no "70 eachs".
+    const txt2 = invView.textContent;
+    log(!/\(s\)/.test(txt2), 'supplies: the screen counts things in English, never "item(s)"');
+    // textContent runs the cells together ("39 carpules501"), so these match on
+    // the count-and-unit pair rather than on a trailing word boundary.
+    log(!/\d+ (boxs|eachs|carpuless|setss)/.test(txt2),
+      'supplies: units are pluralised properly next to their count');
+    log(/39 carpules/.test(txt2) && /0 boxes/.test(txt2),
+      'supplies: a box is "boxes" and a carpule is "carpules"');
   }
 
   /* ===== The report, exported ===============================================

@@ -46,6 +46,36 @@ function migrate() {
       created_at   TEXT NOT NULL
     );
 
+    -- Clinic supplies. Two tables on purpose: WHAT the clinic stocks, and every
+    -- MOVEMENT of it. On-hand is the sum of the movements rather than a column
+    -- somebody edits, so a wrong count is corrected by recording the correction
+    -- — the history of how the number got there is never overwritten, and "where
+    -- did 200 gloves go" is answerable.
+    CREATE TABLE IF NOT EXISTS inventory_items (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      category    TEXT,
+      unit        TEXT,              -- what one counts: box, carpule, each
+      par_level   INTEGER NOT NULL DEFAULT 0,   -- reorder at or below this
+      active      INTEGER NOT NULL DEFAULT 1,
+      notes       TEXT,
+      created_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_moves (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id         INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      -- Event-scoped so "what did this clinic use" is a query, not a guess.
+      -- NULL for stock received back at base between clinics.
+      event_id        INTEGER REFERENCES events(id),
+      delta           INTEGER NOT NULL,          -- + received, - used
+      reason          TEXT NOT NULL,             -- received | used | wasted | adjusted
+      note            TEXT,
+      created_by      INTEGER REFERENCES users(id),
+      created_by_name TEXT,
+      created_at      TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS exit_surveys (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
       patient_id        INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
@@ -237,7 +267,8 @@ function migrate() {
   // columns let accountability survive across devices without syncing accounts.
   // v1.4.4: staff accounts sync too, so a team created on one laptop appears on
   // every laptop. The users table gets the same sync bookkeeping columns.
-  for (const tbl of ['events', 'patients', 'triage', 'treatments', 'consents', 'xrays', 'users', 'exit_surveys']) {
+  for (const tbl of ['events', 'patients', 'triage', 'treatments', 'consents', 'xrays', 'users', 'exit_surveys',
+                     'inventory_items', 'inventory_moves']) {
     addColumn(tbl, 'uid', 'TEXT');
     addColumn(tbl, 'updated_at', 'TEXT');
     addColumn(tbl, 'synced_rev', 'TEXT');   // sig last confirmed synced (== sig means clean)
@@ -365,6 +396,7 @@ function resetClinicData() {
       // Sync bookkeeping first, so nothing here can resurrect a record later.
       // A leftover tombstone also blocks a legitimate re-import of the same uid.
       for (const t of ['undeletes', 'tombstones', 'event_reports',
+                       'inventory_moves', 'inventory_items',
                        'xrays', 'consents', 'treatments', 'triage', 'exit_surveys', 'patients',
                        'audit_log',   // detail carries patient names
                        'users', 'events']) {
@@ -1729,6 +1761,147 @@ function searchAllPatients(term) {
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
+/*  Supplies                                                           */
+/* ------------------------------------------------------------------ */
+
+const MOVE_REASONS = ['received', 'used', 'wasted', 'adjusted'];
+
+/**
+ * Every item with what is on hand right now.
+ *
+ * On hand is SUMMED FROM THE MOVEMENTS, never stored. A stored count is a number
+ * somebody edits, and once edited there is no way to answer how it got there or
+ * where two hundred gloves went. Summing a ledger costs nothing at this size and
+ * means a miscount is fixed by recording the correction, which is itself a
+ * fact worth keeping.
+ */
+function listInventory({ eventId } = {}) {
+  const evId = eventId === 'all' ? null : (eventId || Number(getSetting('active_event_id')) || null);
+  const rows = db.prepare(`
+    SELECT i.*,
+           COALESCE((SELECT SUM(m.delta) FROM inventory_moves m WHERE m.item_id = i.id), 0) AS on_hand,
+           COALESCE((SELECT -SUM(m.delta) FROM inventory_moves m
+                      WHERE m.item_id = i.id AND m.delta < 0
+                        AND (? IS NULL OR m.event_id = ?)), 0) AS used_here
+      FROM inventory_items i
+     ORDER BY i.active DESC, i.category, i.name
+  `).all(evId, evId);
+  return rows.map((r) => ({
+    ...r,
+    active: !!r.active,
+    // Out is not the same as low, and a clinic reads them differently: low is a
+    // note for the restock list, out is a problem on the floor right now.
+    status: r.on_hand <= 0 ? 'out' : (r.par_level > 0 && r.on_hand <= r.par_level ? 'low' : 'ok'),
+  }));
+}
+
+function getInventoryItem(id) {
+  const r = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id);
+  if (!r) return null;
+  const onHand = db.prepare('SELECT COALESCE(SUM(delta),0) AS n FROM inventory_moves WHERE item_id = ?').get(id).n;
+  const moves = db.prepare(`
+    SELECT m.*, e.name AS event_name FROM inventory_moves m
+      LEFT JOIN events e ON e.id = m.event_id
+     WHERE m.item_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 200
+  `).all(id);
+  return { ...r, active: !!r.active, on_hand: onHand, moves };
+}
+
+function saveInventoryItem(actor, data) {
+  const d = data || {};
+  const name = String(d.name || '').trim();
+  if (!name) throw new Error('Give the item a name.');
+  const par = Math.max(0, Math.round(Number(d.par_level) || 0));
+  const fields = [name, String(d.category || '').trim() || null, String(d.unit || '').trim() || null,
+                  par, d.active === false ? 0 : 1, String(d.notes || '').trim() || null];
+  if (d.id) {
+    db.prepare(`UPDATE inventory_items SET name=?, category=?, unit=?, par_level=?, active=?, notes=? WHERE id=?`)
+      .run(...fields, d.id);
+    audit(actor, 'inventory.item_update', 'inventory', d.id, name);
+    return getInventoryItem(d.id);
+  }
+  const info = db.prepare(
+    `INSERT INTO inventory_items (name, category, unit, par_level, active, notes, created_at) VALUES (?,?,?,?,?,?,?)`
+  ).run(...fields, now());
+  audit(actor, 'inventory.item_add', 'inventory', info.lastInsertRowid, name);
+  return getInventoryItem(info.lastInsertRowid);
+}
+
+/**
+ * Record stock moving.
+ *
+ * `delta` is signed by the CALLER, not inferred from the reason: a correction
+ * ('adjusted') can go either way, and guessing the sign from a word is how a
+ * count silently doubles. Receiving is positive, using and wasting are negative,
+ * and the caller is expected to have got that right — which the UI enforces.
+ */
+function recordInventoryMove(actor, data) {
+  const d = data || {};
+  const item = db.prepare('SELECT id, name FROM inventory_items WHERE id = ?').get(d.item_id);
+  if (!item) throw new Error('That item is not in the inventory.');
+  const reason = MOVE_REASONS.includes(d.reason) ? d.reason : 'adjusted';
+  const delta = Math.round(Number(d.delta) || 0);
+  if (!delta) throw new Error('Enter how many.');
+  // Stock received between clinics belongs to no event; anything used belongs to
+  // the clinic it was used at, so consumption can be reported per clinic.
+  const evId = reason === 'received' ? (d.event_id || null) : (d.event_id || Number(getSetting('active_event_id')) || null);
+  db.prepare(
+    `INSERT INTO inventory_moves (item_id, event_id, delta, reason, note, created_by, created_by_name, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).run(item.id, evId, delta, reason, String(d.note || '').trim() || null,
+        actor ? actor.id : null, actor ? actor.full_name : null, now());
+  audit(actor, 'inventory.move', 'inventory', item.id, `${reason} ${delta > 0 ? '+' : ''}${delta} ${item.name}`);
+  return getInventoryItem(item.id);
+}
+
+function deleteInventoryItem(actor, id) {
+  const item = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id);
+  if (!item) return { ok: true };
+  // Tombstone the movements as well as the item: the cloud holds each row
+  // separately, so an item deleted here would otherwise leave its ledger behind
+  // and be rebuilt by the next pull.
+  ensureUids();
+  const tomb = db.prepare(
+    `INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at)
+     VALUES (?,?,?,?,NULL,?) ON CONFLICT(uid) DO UPDATE SET synced_rev = NULL, updated_at = excluded.updated_at`
+  );
+  for (const m of db.prepare('SELECT uid, event_id FROM inventory_moves WHERE item_id = ?').all(id)) {
+    if (m.uid) tomb.run(m.uid, 'inv_move', m.event_id ? uidOf('events', m.event_id) : null, stampNow(), now());
+  }
+  if (item.uid) tomb.run(item.uid, 'inv_item', null, stampNow(), now());
+  db.prepare('DELETE FROM inventory_items WHERE id = ?').run(id);
+  audit(actor, 'inventory.item_delete', 'inventory', id, item.name);
+  return { ok: true };
+}
+
+/**
+ * What the chair RECORDED using, as a cross-check against the ledger.
+ *
+ * Deliberately not an automatic decrement. A provider logging three carpules is
+ * evidence, not an inventory transaction, and quietly moving stock on the back
+ * of a clinical note means a corrected note silently corrupts the count. The
+ * clinic sees both numbers and reconciles them.
+ */
+function inventoryChairUsage(eventId) {
+  const evId = eventId === 'all' ? null : (eventId || Number(getSetting('active_event_id')) || null);
+  const rows = db.prepare(`
+    SELECT t.anesthetic FROM treatments t
+      JOIN patients p ON p.id = t.patient_id
+     WHERE (? IS NULL OR p.event_id = ?)
+  `).all(evId, evId);
+  const carps = {};
+  for (const r of rows) {
+    for (const a of safeJson(r.anesthetic, [])) {
+      const agent = a && a.agent ? String(a.agent) : null;
+      const n = Number(a && a.carps);
+      if (!agent || !Number.isFinite(n) || n <= 0) continue;
+      carps[agent] = (carps[agent] || 0) + n;
+    }
+  }
+  return { carps };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Exit survey                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -2684,10 +2857,12 @@ function exportEventJson(eventId) {
 /*  fields are hashed) so no write path had to change.                 */
 /* ================================================================== */
 
-const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys' };
+const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys', inv_item: 'inventory_items', inv_move: 'inventory_moves' };
 // 'user' is applied right after 'event' (a scoped staff account is parented to an
 // event, exactly like a patient) and before patients.
-const APPLY_ORDER = ['event', 'user', 'report', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
+// inv_item before inv_move: a movement hangs off an item, so the item has to
+// exist locally first or the movement is deferred for nothing.
+const APPLY_ORDER = ['event', 'user', 'report', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
 // Syncable payload columns per entity (fixed order -> stable content hash).
 const SYNC_COLS = {
   event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at'],
@@ -2710,6 +2885,10 @@ const SYNC_COLS = {
   // The exit survey. Closed-choice answers only, so the blob carries no free
   // text a patient could be identified by.
   survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
+  // Supplies. An item is clinic-wide (no parent); a movement is event-scoped so
+  // consumption can be reported per clinic.
+  inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
+  inv_move: ['delta', 'reason', 'note', 'created_by_name', 'created_at'],
 };
 // Denormalized name field -> the local user-id column it is resolved from.
 const NAME_SOURCE = {
@@ -2806,8 +2985,16 @@ function collectSyncRows(max = 400) {
         ...(reviving ? { undelete: true } : {}),
         // Patients and (event-scoped) staff both hang off an event; a global admin
         // has event_id NULL -> event_uid NULL (no parent, never deferred on apply).
-        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report') ? uidOf('events', row.event_id) : null,
-        patient_uid: (entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'report') ? uidOf('patients', row.patient_id) : null,
+        // A supply movement belongs to the clinic it happened at (NULL for stock
+        // received back at base); a supply ITEM belongs to no event at all.
+        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report' || entity === 'inv_move')
+          ? uidOf('events', row.event_id) : null,
+        // patient_uid is the generic parent slot on the wire. For a movement the
+        // parent is its ITEM, not a patient — supplies never touch a chart.
+        patient_uid: entity === 'inv_move'
+          ? uidOf('inventory_items', row.item_id)
+          : ((entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'report' && entity !== 'inv_item')
+            ? uidOf('patients', row.patient_id) : null),
         deleted: 0, updated_at: updatedAt, data,
       });
       mark.push({ table, id: row.id, sig: s, undelete: reviving ? row.uid : null });
@@ -2914,7 +3101,22 @@ function applyRemoteRows(remoteRows) {
     const parentGone = (uid) => !!(uid && db.prepare('SELECT 1 FROM tombstones WHERE uid = ?').get(uid));
     const noParent = (uid) => { if (parentGone(uid)) { skipped++; return 'skip'; } deferred++; deferredRows.push(env); return 'defer'; };
     let parentCol = null, parentId = null;
+    // A supply movement is the one row with TWO parents: the item it moves, and
+    // the clinic it moved at. parentCol carries the item; this carries the event.
+    let moveEventId;
     if (entity === 'patient' || entity === 'report') { parentCol = 'event_id'; parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
+    // A supply item stands alone — clinic property, not part of any event.
+    else if (entity === 'inv_item') { parentCol = null; parentId = null; }
+    else if (entity === 'inv_move') {
+      // Parented to its ITEM; the event rides alongside and is optional, because
+      // stock received between clinics belongs to no event.
+      parentCol = 'item_id';
+      parentId = localIdByUid('inventory_items', env.patient_uid);
+      if (!parentId) { noParent(env.patient_uid); return; }
+      const evId = env.event_uid ? localIdByUid('events', env.event_uid) : null;
+      if (env.event_uid && !evId) { noParent(env.event_uid); return; }
+      moveEventId = evId;
+    }
     else if (entity === 'user') {
       // A staff account is parented to an event (NULL for a global admin). Defer a
       // scoped account whose event hasn't synced here yet; a NULL parent is fine.
@@ -2947,6 +3149,7 @@ function applyRemoteRows(remoteRows) {
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];
     if (parentCol) { extraCols.push(parentCol); extraVals.push(parentId); }
+    if (moveEventId !== undefined) { extraCols.push('event_id'); extraVals.push(moveEventId); }
     if (existing) {
       // Include the parent FK (event_id / patient_id) in the UPDATE so a row that
       // was re-parented on another device (e.g. moved to the shared clinic event)
@@ -2954,6 +3157,7 @@ function applyRemoteRows(remoteRows) {
       const upCols = [...cols, 'updated_at', 'synced_rev', 'content_rev'];
       const upVals = [...vals, env.updated_at, rowSig, rowSig];
       if (parentCol) { upCols.push(parentCol); upVals.push(parentId); }
+      if (moveEventId !== undefined) { upCols.push('event_id'); upVals.push(moveEventId); }
       const setSql = upCols.map((c) => `${c} = ?`).join(', ');
       db.prepare(`UPDATE ${table} SET ${setSql} WHERE id = ?`).run(...upVals, existing.id);
     } else {
@@ -3078,6 +3282,8 @@ module.exports = {
   init, close,
   login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
   saveExitSurvey, getExitSurvey, SURVEY_SCHEMA, SURVEY_MULTI, STAGE_QUESTIONS,
+  listInventory, getInventoryItem, saveInventoryItem, recordInventoryMove, deleteInventoryItem,
+  inventoryChairUsage, MOVE_REASONS,
   needsSetup, createFirstAdmin, defaultAdminActive,
   DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,

@@ -899,3 +899,24 @@ body.survey-open{ overflow:hidden; }
 .survey-inline .survey-lede{ margin-bottom:20px; }
 .survey-inline .survey-section{ margin-bottom:24px; }
 .survey-inline .survey-q{ padding:14px 16px; }
+
+/* Supplies — the ledger view. */
+.inv-count{ font-variant-numeric:tabular-nums; font-size:var(--fs-base); }
+.inv-onhand-row{ display:flex; align-items:baseline; gap:10px; padding:10px 14px; margin-bottom:14px;
+  background:var(--surface-sunken); border-radius:var(--radius-sm); }
+.inv-onhand{ font-size:var(--fs-stat); line-height:1; font-variant-numeric:tabular-nums; }
+.inv-history{ max-height:260px; overflow-y:auto; border:var(--border-line); border-radius:var(--radius-sm); }
+.inv-move{ display:grid; grid-template-columns:56px 130px 1fr; gap:10px; align-items:baseline;
+  padding:8px 12px; border-bottom:1px solid var(--border-subtle); font-size:var(--fs-sm); }
+.inv-move:last-child{ border-bottom:none; }
+.inv-move-delta{ font-variant-numeric:tabular-nums; font-weight:var(--fw-bold); text-align:right; }
+.inv-move-delta.is-in{ color:var(--success); }
+.inv-move-delta.is-out{ color:var(--danger); }
+.inv-move > span:last-child{ grid-column:2 / -1; }
+.banner--warn{ background:var(--warning-soft); color:var(--warning); border:1px solid var(--warning-border); }
+.banner--warn .btn, .banner--alert .btn{ flex:none; margin-left:auto; }
+/* Keep the status pill and the row actions on one line — at six columns they
+   wrap into two rows and the table doubles in height. */
+.inv-status{ white-space:nowrap; width:1%; }
+.inv-actions{ white-space:nowrap; width:1%; }
+.inv-actions .btn{ flex:none; }

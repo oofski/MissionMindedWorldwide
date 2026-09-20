@@ -79,6 +79,16 @@ const PERMS = {
   'xray:list': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'xray:delete': ['admin', 'doctor', 'triage', 'emt'],
   'report:export': ['admin', 'doctor'],
+  // Supplies are clinic operations, not patient data. Admins manage the list;
+  // anyone working a station can record what they took, because a count only
+  // stays true if the person who used the last box can say so without hunting
+  // for an administrator.
+  'inventory:list': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventory:get': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventory:move': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'inventory:save': ['admin'],
+  'inventory:delete': ['admin'],
+  'inventory:chairUsage': ['admin', 'doctor'],
   'pdf:generate': ['admin', 'doctor', 'checkout'],
   'pdf:preview': ['admin', 'doctor', 'checkout'],
   'pdf:print': ['admin', 'doctor', 'checkout'],
@@ -363,6 +373,14 @@ function register(getMainWindow) {
   /* ---- Triage & treatment ---- */
   handle('triage:save', ({ patientId, data }) => db.saveTriage(currentUser, patientId, data));
   handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data));
+
+  /* ---- Supplies ---- */
+  handle('inventory:list', ({ eventId } = {}) => db.listInventory({ eventId }));
+  handle('inventory:get', ({ id }) => db.getInventoryItem(id));
+  handle('inventory:save', ({ data }) => db.saveInventoryItem(currentUser, data));
+  handle('inventory:move', ({ data }) => db.recordInventoryMove(currentUser, data));
+  handle('inventory:delete', ({ id }) => db.deleteInventoryItem(currentUser, id));
+  handle('inventory:chairUsage', ({ eventId } = {}) => db.inventoryChairUsage(eventId));
   // finalize may be false, 'complete' (mark done, no lock), or 'lock'/true — pass
   // it through so v1.2.1's "complete without lock" mode reaches the data layer.
   handle('treatment:save', ({ patientId, data, finalize }) =>

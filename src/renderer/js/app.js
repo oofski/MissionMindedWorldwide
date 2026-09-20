@@ -12,6 +12,7 @@ import { renderProvider } from './views/provider.js';
 import { renderRecords } from './views/records.js';
 import { renderReports } from './views/reports.js';
 import { renderAdmin } from './views/admin.js';
+import { renderInventory } from './views/inventory.js';
 import { renderEmt } from './views/emt.js';
 import { renderCheckout } from './views/checkout.js';
 import { renderHygienist } from './views/hygienist.js';
@@ -41,6 +42,9 @@ const VIEWS = {
   // ---- Admin (collapsible) — management & system ----
   management: { render: renderManagement, roles: ['admin'], icon: 'admin', label: () => 'Management', module: 'admin' },
   staff: { render: (c, p) => renderAdmin(c, { ...p, section: 'staff' }), roles: ['admin'], icon: 'users', label: () => 'Staff & roles', module: 'admin' },
+  // Every clinical role can reach Supplies: a count only stays true if the
+  // person who took the last box can say so without finding an administrator.
+  inventory: { render: renderInventory, roles: ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], icon: 'pill', label: () => 'Supplies', module: 'admin' },
   events: { render: (c, p) => renderAdmin(c, { ...p, section: 'events' }), roles: ['admin'], icon: 'calendar', label: () => 'Events', module: 'admin' },
   cloud: { render: (c, p) => renderAdmin(c, { ...p, section: 'cloud' }), roles: ['admin'], icon: 'globe', label: () => 'Cloud', module: 'admin' },
   data: { render: (c, p) => renderAdmin(c, { ...p, section: 'data' }), roles: ['admin'], icon: 'database', label: () => 'Backup & Export', module: 'admin' },
