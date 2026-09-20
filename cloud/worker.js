@@ -341,11 +341,19 @@ async function handleCheckinPost(eventUid, request, env) {
   // a procedure, so it is not optional.
   if (!clean.demographics.emergency_name) return json({ ok: false, error: esErr ? 'Por favor ingrese el nombre de un contacto de emergencia.' : 'Please enter an emergency contact name.' }, 400);
   if (!clean.demographics.emergency_phone) return json({ ok: false, error: esErr ? 'Por favor ingrese el teléfono del contacto de emergencia.' : 'Please enter an emergency contact phone number.' }, 400);
+  // At least one service, exactly as the walk-in form requires: it decides which
+  // clinics the patient is queued for, so a blank strands them in no queue.
+  if (!clean.demographics.services.length) return json({ ok: false, error: esErr ? 'Elija al menos un servicio.' : 'Please choose at least one service.' }, 400);
   // Every medical and dental history question must carry an answer. A blank is
   // not "no" — the dentist reads these before deciding whether it is safe to
   // treat, and an unanswered question has to be asked in person.
   {
-    const answered = (v) => v === 'yes' || v === 'no';
+    // 'na' counts as answered for pregnancy. The walk-in form offers "Not
+    // applicable" on that question because making a man or a child tap "No"
+    // makes their answer indistinguishable from the clinically loaded No the
+    // dentist needs. The online form has to offer the same, or the two forms
+    // disagree about what a complete history is.
+    const answered = (v) => v === 'yes' || v === 'no' || v === 'na';
     const missingMed = FORM_MED_YESNO.map(([k]) => k).find((k) => !answered(clean.medical_history[k]));
     const missingDent = FORM_DENTAL_YESNO.map(([k]) => k).find((k) => !answered(clean.dental_history[k]));
     if (missingMed || missingDent) {
@@ -361,6 +369,12 @@ async function handleCheckinPost(eventUid, request, env) {
 
   const iso = nowIso();
   const lang = clean.language;
+  const surveyAnswers = sanitizeSurveyAnswers(body.survey);
+  // Skipping is a first-class answer, not an absence: "asked and declined" is a
+  // different — and more honest — figure than "never asked". Answering anything
+  // overrides the skip, so the two can never disagree.
+  const surveyDeclined = (body.survey_declined === true || body.survey_declined === 'on' || body.survey_declined === 'true')
+    && Object.keys(surveyAnswers).length === 0;
   const sig = (v) => { const t = String(v == null ? '' : v); return (/^data:image\/(png|jpe?g);base64,/.test(t) && t.length < 700000) ? t : null; };
 
   // Consent must be SIGNED, not merely ticked. A pre-registration that arrives
@@ -419,6 +433,20 @@ async function handleCheckinPost(eventUid, request, env) {
     } });
   }
 
+  // The end-of-registration half of the grant survey, as the 'survey' entity the
+  // app syncs (src/main/db.js SYNC_COLS.survey -> exit_surveys). `answers`
+  // travels as a JSON STRING because the column is TEXT, the same way the
+  // patient's demographics do above. Only the registration half is answered
+  // here, so exit_status stays unset and check-out still asks its twelve.
+  rows.push({ entity: 'survey', uid: crypto.randomUUID(), patient_uid: patientUid, stamp: iso + '@prereg-s', data: {
+    version: SURVEY_VERSION, language: lang, answers: JSON.stringify(surveyAnswers),
+    // `declined` is the CHECK-OUT answer in the app's schema — it is what
+    // check-out gates on — so skipping these questions must not set it.
+    // registration_status carries this half's outcome instead.
+    declined: 0, completed_at: iso, completed_by_name: null, created_at: iso,
+    registration_status: surveyDeclined ? 'declined' : 'completed', exit_status: null,
+  } });
+
   for (const r of rows) {
     // Same delivery-number rule as a push: a pre-registration is queued at the
     // end of the order, so every laptop picks it up regardless of its clock.
@@ -455,7 +483,7 @@ function buildPreregPatient(b) {
     conditions_other: conditions.includes('other') ? s(b.conditions_other, 200) : '',
     medications: meds,
     under_treatment: yn(b.under_treatment), hospitalized: yn(b.hospitalized),
-    tobacco: yn(b.tobacco), pregnancy: yn(b.pregnancy),
+    tobacco: yn(b.tobacco), pregnancy: ynNa(b.pregnancy),
   };
   if (allergies.includes('none')) medical_history.allergies_none = true;
   if (conditions.includes('none')) medical_history.conditions_none = true;
@@ -492,7 +520,16 @@ function buildPreregPatient(b) {
     demographics: {
       address: s(b.address, 200), city: s(b.city, 80),
       state: US_STATE_CODES.includes(String(b.state || '').toUpperCase()) ? String(b.state).toUpperCase() : '',
-      emergency_name: s(b.emergency_name, 120), emergency_phone: s(b.emergency_phone, 20), referral: s(b.referral, 120),
+      emergency_name: s(b.emergency_name, 120), emergency_phone: s(b.emergency_phone, 20),
+      // Which clinics to queue the patient for, and what prints on the
+      // wristband. Required, so it is filtered to the known keys here and the
+      // emptiness checked by the caller.
+      services: Array.from(new Set(Array.isArray(b.services) ? b.services.filter((x) => SERVICE_KEYS.includes(x)) : [])),
+      // A KEY, not the prose the page displayed: the report counts these, and a
+      // typed-in value would be a bucket of one. 'other' keeps its free text in
+      // its own field, exactly as the walk-in form stores it.
+      referral: REFERRAL_KEYS.includes(b.referral) ? b.referral : '',
+      referral_other: b.referral === 'other' ? s(b.referral_other, 200) : '',
       // Mirrors RACE in src/renderer/i18n/strings.js. Without this the online
       // sign-ups would be permanently "Not recorded" in the race breakdown while
       // walk-ins were counted — a split invisible on the Reports page.
@@ -546,7 +583,25 @@ const FORM_VISITS = [
   ['extraction_pain', 'Extraction — in pain'], ['extraction_no_pain', 'Extraction — no pain'],
   ['filling', 'Filling'], ['cleaning', 'Dental cleaning'],
 ];
+// MMW runs dental, medical and vision under one roof, and the walk-in form asks
+// which the patient is here for (SERVICES in renderer/js/views/kiosk.js). It
+// decides which clinics they queue for and it prints on the wristband, so at
+// least one has to be chosen here too — a blank strands them in no queue.
+const FORM_SERVICES = [
+  ['dental', 'Dental'], ['medical', 'Medical'], ['vision', 'Vision'],
+];
+// Mirrors REFERRALS in src/renderer/i18n/strings.js. Stored as keys, never the
+// prose: the report counts them, and 'other' carries the free text separately.
+const FORM_REFERRALS = [
+  ['email', 'Email'], ['text', 'Text message'], ['sign', 'Sign / banner'], ['friend_referral', 'Friend / referral'],
+  ['flyer', 'Flyer'], ['church', 'Church / community'], ['social_media', 'Social media'], ['other', 'Other'],
+];
+const SERVICE_KEYS = FORM_SERVICES.map(([k]) => k);
+const REFERRAL_KEYS = FORM_REFERRALS.map(([k]) => k);
 // Extra yes/no medical + dental questions — verbatim from the app's check-in.
+// Pregnancy alone accepts a third answer — see the gate in handleCheckinPost.
+const ynNa = (v) => (v === 'yes' || v === 'no' || v === 'na' ? v : '');
+
 const FORM_MED_YESNO = [
   ['under_treatment', 'Are you currently under a doctor’s care?'], ['hospitalized', 'Hospitalized in the last 2 years?'],
   ['tobacco', 'Do you use tobacco?'], ['pregnancy', 'Pregnant, nursing, or taking contraceptives?'],
@@ -599,6 +654,13 @@ const FORM_CONDITIONS_ES = [
 const FORM_VISITS_ES = [
   ['extraction_pain', 'Extracción — con dolor'], ['extraction_no_pain', 'Extracción — sin dolor'], ['filling', 'Empaste'], ['cleaning', 'Limpieza dental'],
 ];
+const FORM_SERVICES_ES = [
+  ['dental', 'Dental'], ['medical', 'Médico'], ['vision', 'Visión'],
+];
+const FORM_REFERRALS_ES = [
+  ['email', 'Correo electrónico'], ['text', 'Mensaje de texto'], ['sign', 'Letrero / pancarta'], ['friend_referral', 'Amigo / referencia'],
+  ['flyer', 'Volante'], ['church', 'Iglesia / comunidad'], ['social_media', 'Redes sociales'], ['other', 'Otro'],
+];
 const FORM_MED_YESNO_ES = [
   ['under_treatment', '¿Está bajo el cuidado de un médico actualmente?'], ['hospitalized', '¿Hospitalizado en los últimos 2 años?'],
   ['tobacco', '¿Usa tabaco?'], ['pregnancy', '¿Embarazada, amamantando o usando anticonceptivos?'],
@@ -616,6 +678,342 @@ const ORAL_SURGERY_ES = [
   'He informado al equipo de todos los medicamentos y condiciones de salud que puedan afectar la cirugía o la recuperación.',
 ];
 
+// ---- The end-of-registration half of the MMW grant survey ----
+// The SAME 22 questions the walk-in kiosk asks (the sections marked stage
+// 'registration' in src/renderer/i18n/exitSurvey.js). Both languages live in one
+// structure, as they do there: with 22 questions and 130-odd options, parallel
+// EN/ES lists would drift the first time one of them was edited, and a question
+// that exists in one place and not another is how a grant return ends up unable
+// to explain its own numbers.
+//
+// `value` is what gets stored and reported, so it must never be renamed.
+const SURVEY_VERSION = 'mmw-exit-v1';
+const SV_YES_NO_UNSURE_PNA = [
+  { value: 'yes', en: 'Yes', es: 'Sí' },
+  { value: 'no', en: 'No', es: 'No' },
+  { value: 'unsure', en: 'Unsure', es: 'No estoy seguro/a' },
+  { value: 'pna', en: 'Prefer not to answer', es: 'Prefiero no responder' },
+];
+const SV_YES_NO_PNA = [
+  { value: 'yes', en: 'Yes', es: 'Sí' },
+  { value: 'no', en: 'No', es: 'No' },
+  { value: 'pna', en: 'Prefer not to answer', es: 'Prefiero no responder' },
+];
+const SV_PNA = { value: 'pna', en: 'Prefer not to answer', es: 'Prefiero no responder' };
+const SURVEY_REGISTRATION = [
+  {
+    key: 'about', en: 'About your visit', es: 'Sobre su visita',
+    questions: [
+      {
+        key: 'first_time', type: 'single',
+        en: 'Is this your first time receiving services from a free community health clinic?',
+        es: '¿Es esta la primera vez que recibe servicios en una clínica comunitaria gratuita?',
+        options: [
+          { value: 'yes', en: 'Yes', es: 'Sí' },
+          { value: 'no', en: 'No', es: 'No' },
+          { value: 'not_sure', en: 'Not sure', es: 'No estoy seguro/a' },
+        ],
+      },
+      {
+        key: 'heard_about', type: 'single',
+        en: 'How did you hear about this clinic?',
+        es: '¿Cómo se enteró de esta clínica?',
+        options: [
+          { value: 'friend_family', en: 'Friend or family member', es: 'Un amigo o familiar' },
+          { value: 'church', en: 'Church', es: 'La iglesia' },
+          { value: 'social_media', en: 'Social media', es: 'Redes sociales' },
+          { value: 'flyer', en: 'Flyer or poster', es: 'Un volante o cartel' },
+          { value: 'community_org', en: 'Community organization', es: 'Una organización comunitaria' },
+          { value: 'healthcare_provider', en: 'Healthcare provider', es: 'Un proveedor de salud' },
+          { value: 'previous_mmw', en: 'Previous MMW clinic', es: 'Una clínica anterior de MMW' },
+        ],
+      },
+    ],
+  },
+  {
+    key: 'household', en: 'Your household', es: 'Su hogar',
+    questions: [
+      {
+        key: 'household_size', type: 'single',
+        en: 'How many people live in your household, including yourself?',
+        es: '¿Cuántas personas viven en su hogar, incluyéndose a usted?',
+        options: [
+          { value: '1', en: '1', es: '1' },
+          { value: '2', en: '2', es: '2' },
+          { value: '3', en: '3', es: '3' },
+          { value: '4', en: '4', es: '4' },
+          { value: '5', en: '5', es: '5' },
+          { value: '6_or_more', en: '6 or more', es: '6 o más' },
+        ],
+      },
+      {
+        key: 'children_under_18', type: 'single',
+        en: 'How many children under 18 live in your household?',
+        es: '¿Cuántos niños menores de 18 años viven en su hogar?',
+        options: [
+          { value: 'none', en: 'None', es: 'Ninguno' },
+          { value: '1', en: '1', es: '1' },
+          { value: '2', en: '2', es: '2' },
+          { value: '3', en: '3', es: '3' },
+          { value: '4_or_more', en: '4 or more', es: '4 o más' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'disability', type: 'single',
+        en: 'Do you or anyone in your household have a disability?',
+        es: '¿Usted o alguien en su hogar tiene una discapacidad?',
+        options: SV_YES_NO_UNSURE_PNA,
+      },
+      {
+        key: 'living_situation', type: 'single',
+        en: 'What is your current living situation?',
+        es: '¿Cuál es su situación de vivienda actual?',
+        options: [
+          { value: 'own', en: 'Own my home', es: 'Soy dueño/a de mi casa' },
+          { value: 'rent', en: 'Rent my home or apartment', es: 'Rento mi casa o apartamento' },
+          { value: 'with_family', en: 'Live with family or friends', es: 'Vivo con familiares o amigos' },
+          { value: 'temporary', en: 'Temporary housing', es: 'Vivienda temporal' },
+          { value: 'shelter', en: 'Shelter', es: 'Un albergue' },
+          { value: 'homeless', en: 'Homeless or without stable housing', es: 'Sin hogar o sin vivienda estable' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'education', type: 'single',
+        en: 'What is the highest level of education you have completed?',
+        es: '¿Cuál es el nivel de estudios más alto que ha completado?',
+        options: [
+          { value: 'none', en: 'No formal education', es: 'Sin educación formal' },
+          { value: 'elementary', en: 'Elementary school', es: 'Escuela primaria' },
+          { value: 'some_high_school', en: 'Some high school', es: 'Algo de escuela secundaria' },
+          { value: 'high_school', en: 'High school diploma or GED', es: 'Diploma de secundaria o GED' },
+          { value: 'some_college', en: 'Some college', es: 'Algo de universidad' },
+          { value: 'associate', en: 'Associate degree', es: 'Título asociado' },
+          { value: 'bachelor', en: 'Bachelor\'s degree', es: 'Licenciatura' },
+          { value: 'graduate', en: 'Graduate or professional degree', es: 'Posgrado o título profesional' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'household_in_school', type: 'single',
+        en: 'Does anyone in your household currently attend school or a training program?',
+        es: '¿Alguien en su hogar asiste actualmente a la escuela o a un programa de capacitación?',
+        options: SV_YES_NO_PNA,
+      },
+    ],
+  },
+  {
+    key: 'work', en: 'Work and income', es: 'Trabajo e ingresos',
+    questions: [
+      {
+        key: 'employment', type: 'single',
+        en: 'What is your current employment status?',
+        es: '¿Cuál es su situación laboral actual?',
+        options: [
+          { value: 'full_time', en: 'Employed full-time', es: 'Empleado/a a tiempo completo' },
+          { value: 'part_time', en: 'Employed part-time', es: 'Empleado/a a tiempo parcial' },
+          { value: 'self_employed', en: 'Self-employed', es: 'Trabajo por cuenta propia' },
+          { value: 'unable_to_work', en: 'Temporarily unable to work', es: 'Temporalmente sin poder trabajar' },
+          { value: 'unemployed_looking', en: 'Unemployed and looking for work', es: 'Desempleado/a y buscando trabajo' },
+          { value: 'unemployed_not_looking', en: 'Unemployed and not currently looking for work', es: 'Desempleado/a y no buscando trabajo actualmente' },
+          { value: 'retired', en: 'Retired', es: 'Jubilado/a' },
+          { value: 'student', en: 'Student', es: 'Estudiante' },
+          { value: 'homemaker', en: 'Homemaker or caregiver', es: 'Ama/o de casa o cuidador/a' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'work_type', type: 'single',
+        en: 'If employed, what type of work do you do?',
+        es: 'Si trabaja, ¿qué tipo de trabajo hace?',
+        options: [
+          { value: 'healthcare', en: 'Healthcare', es: 'Salud' },
+          { value: 'education', en: 'Education', es: 'Educación' },
+          { value: 'construction', en: 'Construction or skilled trades', es: 'Construcción u oficios especializados' },
+          { value: 'retail', en: 'Retail or customer service', es: 'Ventas o servicio al cliente' },
+          { value: 'food_service', en: 'Food service or hospitality', es: 'Servicio de alimentos u hotelería' },
+          { value: 'transportation', en: 'Transportation', es: 'Transporte' },
+          { value: 'agriculture', en: 'Agriculture', es: 'Agricultura' },
+          { value: 'office', en: 'Office or professional services', es: 'Oficina o servicios profesionales' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'income', type: 'single',
+        en: 'What is your approximate annual household income before taxes?',
+        es: '¿Cuál es aproximadamente el ingreso anual de su hogar antes de impuestos?',
+        options: [
+          { value: '0_15k', en: '$0–$15,000', es: '$0–$15,000' },
+          { value: '15k_25k', en: '$15,001–$25,000', es: '$15,001–$25,000' },
+          { value: '25k_35k', en: '$25,001–$35,000', es: '$25,001–$35,000' },
+          { value: '35k_50k', en: '$35,001–$50,000', es: '$35,001–$50,000' },
+          { value: '50k_75k', en: '$50,001–$75,000', es: '$50,001–$75,000' },
+          { value: '75k_100k', en: '$75,001–$100,000', es: '$75,001–$100,000' },
+          { value: 'over_100k', en: 'More than $100,000', es: 'Más de $100,000' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'assistance', type: 'multi',
+        en: 'Does your household currently receive any of the following forms of assistance?',
+        es: '¿Su hogar recibe actualmente alguna de las siguientes formas de asistencia?',
+        hintEn: 'Select all that apply.', hintEs: 'Seleccione todas las que correspondan.',
+        options: [
+          { value: 'snap', en: 'SNAP or food assistance', es: 'SNAP o asistencia alimentaria' },
+          { value: 'medicaid', en: 'Medicaid', es: 'Medicaid' },
+          { value: 'ssi', en: 'Supplemental Security Income (SSI)', es: 'Seguridad de Ingreso Suplementario (SSI)' },
+          { value: 'ssdi', en: 'Social Security Disability Insurance (SSDI)', es: 'Seguro de Incapacidad del Seguro Social (SSDI)' },
+          { value: 'housing', en: 'Housing assistance', es: 'Asistencia de vivienda' },
+          { value: 'wic', en: 'WIC', es: 'WIC' },
+          { value: 'other_public', en: 'Other public assistance', es: 'Otra asistencia pública' },
+          { value: 'none', en: 'No assistance', es: 'Ninguna asistencia' },
+          SV_PNA,
+        ],
+      },
+    ],
+  },
+  {
+    key: 'coverage', en: 'Insurance and access to care', es: 'Seguro y acceso a la atención',
+    questions: [
+      {
+        key: 'health_insurance', type: 'single',
+        en: 'Do you currently have health insurance?',
+        es: '¿Tiene actualmente seguro médico?',
+        options: SV_YES_NO_UNSURE_PNA,
+      },
+      {
+        key: 'health_insurance_type', type: 'single',
+        en: 'If you have health insurance, what type is it?',
+        es: 'Si tiene seguro médico, ¿de qué tipo es?',
+        options: [
+          { value: 'employer', en: 'Employer-sponsored insurance', es: 'Seguro a través del empleador' },
+          { value: 'medicaid', en: 'Medicaid', es: 'Medicaid' },
+          { value: 'medicare', en: 'Medicare', es: 'Medicare' },
+          { value: 'private', en: 'Private', es: 'Privado' },
+          { value: 'military_va', en: 'Military or Veterans Affairs coverage', es: 'Cobertura militar o de Asuntos de Veteranos' },
+          SV_PNA,
+          { value: 'na', en: 'Not applicable', es: 'No aplica' },
+        ],
+      },
+      {
+        key: 'dental_insurance', type: 'single',
+        en: 'Do you currently have dental insurance?',
+        es: '¿Tiene actualmente seguro dental?',
+        options: SV_YES_NO_UNSURE_PNA,
+      },
+      {
+        key: 'vision_insurance', type: 'single',
+        en: 'Do you currently have vision insurance?',
+        es: '¿Tiene actualmente seguro de la vista?',
+        options: SV_YES_NO_UNSURE_PNA,
+      },
+      {
+        key: 'last_checkup', type: 'single',
+        en: 'When was the last time you received a medical checkup?',
+        es: '¿Cuándo fue la última vez que tuvo un chequeo médico?',
+        options: [
+          { value: 'under_6m', en: 'Within the past 6 months', es: 'En los últimos 6 meses' },
+          { value: '6_12m', en: '6–12 months ago', es: 'Hace 6–12 meses' },
+          { value: '1_2y', en: '1–2 years ago', es: 'Hace 1–2 años' },
+          { value: 'over_2y', en: 'More than 2 years ago', es: 'Hace más de 2 años' },
+          { value: 'never', en: 'I have never received a medical checkup', es: 'Nunca he tenido un chequeo médico' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'last_eye_exam', type: 'single',
+        en: 'When was the last time you had an eye examination?',
+        es: '¿Cuándo fue la última vez que tuvo un examen de la vista?',
+        options: [
+          { value: 'under_6m', en: 'Within the past 6 months', es: 'En los últimos 6 meses' },
+          { value: '6_12m', en: '6–12 months ago', es: 'Hace 6–12 meses' },
+          { value: '1_2y', en: '1–2 years ago', es: 'Hace 1–2 años' },
+          { value: 'over_2y', en: 'More than 2 years ago', es: 'Hace más de 2 años' },
+          { value: 'never', en: 'I have never had an eye examination', es: 'Nunca he tenido un examen de la vista' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'delayed_care_cost', type: 'single',
+        en: 'In the past 12 months, have you delayed or avoided healthcare because of cost?',
+        es: 'En los últimos 12 meses, ¿ha retrasado o evitado atención médica por el costo?',
+        options: SV_YES_NO_PNA,
+      },
+      {
+        key: 'access_barriers', type: 'multi',
+        en: 'What are the main reasons you have difficulty accessing healthcare?',
+        es: '¿Cuáles son las razones principales por las que tiene dificultad para acceder a atención médica?',
+        hintEn: 'Select all that apply.', hintEs: 'Seleccione todas las que correspondan.',
+        options: [
+          { value: 'cost', en: 'Cost of services', es: 'El costo de los servicios' },
+          { value: 'no_insurance', en: 'No insurance', es: 'No tengo seguro' },
+          { value: 'high_deductible', en: 'High insurance deductible or copay', es: 'Deducible o copago alto del seguro' },
+          { value: 'transportation', en: 'Lack of transportation', es: 'Falta de transporte' },
+          { value: 'no_providers', en: 'Lack of nearby providers', es: 'Falta de proveedores cercanos' },
+          { value: 'wait_times', en: 'Long waiting times', es: 'Tiempos de espera largos' },
+          { value: 'work_schedule', en: 'Work schedule', es: 'Mi horario de trabajo' },
+          { value: 'childcare', en: 'Childcare responsibilities', es: 'Responsabilidades de cuidado de niños' },
+          { value: 'language', en: 'Language barriers', es: 'Barreras de idioma' },
+          { value: 'no_new_patients', en: 'Difficulty finding a provider accepting new patients', es: 'Dificultad para encontrar un proveedor que acepte pacientes nuevos' },
+          { value: 'none', en: 'No difficulty accessing healthcare', es: 'Ninguna dificultad para acceder a atención médica' },
+          SV_PNA,
+        ],
+      },
+      {
+        key: 'unmet_need', type: 'single',
+        en: 'Before today\'s clinic, did you have an unmet dental, medical, or vision need?',
+        es: 'Antes de la clínica de hoy, ¿tenía una necesidad dental, médica o de la vista sin atender?',
+        options: SV_YES_NO_UNSURE_PNA,
+      },
+      {
+        key: 'food_insecurity', type: 'single',
+        en: 'In the past 12 months, have you had difficulty obtaining enough food for yourself or your household?',
+        es: 'En los últimos 12 meses, ¿ha tenido dificultad para conseguir suficiente comida para usted o su hogar?',
+        options: SV_YES_NO_PNA,
+      },
+    ],
+  },
+];
+
+const SURVEY_QUESTIONS = SURVEY_REGISTRATION.reduce((all, s) => all.concat(s.questions), []);
+// The validator is DERIVED from the very list the page renders, so what is
+// offered and what is accepted cannot drift apart. Mirrors SURVEY_SCHEMA /
+// SURVEY_MULTI in src/main/db.js, which guards the same blob on arrival.
+const SURVEY_ALLOWED = {};
+const SURVEY_MULTI = new Set();
+for (const q of SURVEY_QUESTIONS) {
+  SURVEY_ALLOWED[q.key] = q.options.map((o) => o.value);
+  if (q.type === 'multi') SURVEY_MULTI.add(q.key);
+}
+
+// Keep only questions the survey defines and only values those questions offer.
+// This endpoint is reachable directly, and an invented value would land in the
+// report as a bucket nothing can explain. An unrecognised answer is dropped
+// rather than failing the whole registration: every question here is optional,
+// so "not answered" is an honest record of it, and losing a patient's entire
+// pre-registration over one bad optional field would not be.
+function sanitizeSurveyAnswers(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const [key, allowed] of Object.entries(SURVEY_ALLOWED)) {
+    const v = src[key];
+    if (v == null || v === '') continue;
+    if (SURVEY_MULTI.has(key)) {
+      const picked = Array.from(new Set((Array.isArray(v) ? v : [v]).map(String).filter((x) => allowed.includes(x))));
+      // 'None' and 'Prefer not to answer' are answers ABOUT the list, so they
+      // replace it rather than joining it — as they do on the walk-in form. A
+      // row must not say both "receives SNAP" and "receives no assistance".
+      const exclusive = picked.find((x) => x === 'none' || x === 'pna');
+      if (exclusive) out[key] = [exclusive];
+      else if (picked.length) out[key] = picked;
+    } else if (allowed.includes(String(v))) {
+      out[key] = String(v);
+    }
+  }
+  return out;
+}
+
 // Bilingual dictionary — keys stay identical (they map to the app's data); only
 // the DISPLAY text differs. Spanish uses the app's own translations verbatim.
 const I18N = {
@@ -627,12 +1025,18 @@ const I18N = {
     phone: 'Phone number', email: 'Email', address: 'Home address', city: 'City', state: 'State',
     emName: 'Emergency contact name', emPhone: 'Emergency contact phone',
     need: 'What do you need today?',
+    services: 'Services needed today', servicesList: FORM_SERVICES, serviceHint: 'Choose every clinic you need to be seen at.',
+    referral: 'How did you hear about us?', referralOther: 'Please specify', referralList: FORM_REFERRALS,
+    surveyTitle: 'A few last questions',
+    surveyLede: 'These last questions help Mission Minded Worldwide show what this clinic did for the community, and apply for the funding that keeps it free.',
+    surveyPrivacy: 'Every question is optional, your answers are reported as totals only, and none of this changes the care you receive today.',
+    optional: 'Optional', surveySkip: 'I would rather not answer these', surveySkipped: 'Skipped — tap any answer to change your mind',
     raceTitle: 'Race and ethnicity', raceHint: 'Optional. Choose any that apply — used only for reporting how the clinic served the community.',
     raceList: [['american_indian_alaska_native', 'American Indian or Alaska Native'], ['asian', 'Asian'], ['black_african_american', 'Black or African American'], ['hispanic_latino', 'Hispanic or Latino'], ['middle_eastern_north_african', 'Middle Eastern or North African'], ['native_hawaiian_pacific_islander', 'Native Hawaiian or Pacific Islander'], ['white', 'White'], ['prefer_not', 'Prefer not to answer']],
     allergies: 'Medication allergies', selectAll: 'Select all that apply', allergyOther: 'Other allergy (specify)',
     conditions: 'Do you have any of these conditions?', conditionOther: 'Other condition (specify)', none: 'None of the above', otherOpt: 'Other (type below)',
     meds: 'Current medications', addMed: '+ Add medication', noMeds: 'No medications', medNamePh: 'Medication',
-    medHist: 'Medical History', dentHist: 'Dental History', priorDentist: 'When did you last see a dentist?', yes: 'Yes', no: 'No', dash: '—',
+    medHist: 'Medical History', dentHist: 'Dental History', priorDentist: 'When did you last see a dentist?', yes: 'Yes', no: 'No', notApplicable: 'Not applicable', dash: '—',
     priorDentistOpts: [['within_6_months', 'Within the past 6 months'], ['about_1_year', 'About 1 year ago'], ['about_2_years', 'About 2 years ago'], ['over_3_years', '3 or more years ago'], ['never', 'Never']],
     consent: 'Consent', signName: 'Your name (for the signature)', relationship: 'Relationship (if for a minor)', relPh: 'Self / Parent / Guardian',
     agree: CONSENT_AGREE_TEXT, sigOpt: 'Signature', sigHint: 'Sign with your finger or a stylus.', clear: 'Clear',
@@ -642,6 +1046,7 @@ const I18N = {
     errName: 'Please enter your first and last name.', errDob: 'Please enter your date of birth.', errGender: 'Please choose a gender.',
     errCity: 'Please enter your city.', errState: 'Please enter your state.',
     errEmName: 'Please enter an emergency contact name.', errEmPhone: 'Please enter an emergency contact phone number.',
+    errServices: 'Please choose at least one service.',
     errMedical: 'Please answer every medical and dental history question.',
     errConsent: 'Please read and agree to the consent to finish.', errSurgery: 'An extraction was selected — please read and agree to the Oral Surgery consent too.',
     errSign: 'Please sign the consent to finish.', errSignSurgery: 'Please sign the Oral Surgery consent.', errSigner: 'Please type your name for the signature.',
@@ -657,12 +1062,18 @@ const I18N = {
     phone: 'Teléfono', email: 'Correo electrónico', address: 'Dirección', city: 'Ciudad', state: 'Estado',
     emName: 'Nombre de contacto de emergencia', emPhone: 'Teléfono de contacto de emergencia',
     need: '¿Qué necesita hoy?',
+    services: 'Servicios que necesita hoy', servicesList: FORM_SERVICES_ES, serviceHint: 'Elija todas las clínicas donde necesita ser atendido.',
+    referral: '¿Cómo se enteró de nosotros?', referralOther: 'Por favor especifique', referralList: FORM_REFERRALS_ES,
+    surveyTitle: 'Unas últimas preguntas',
+    surveyLede: 'Estas últimas preguntas ayudan a Mission Minded Worldwide a mostrar lo que esta clínica hizo por la comunidad y a solicitar los fondos que la mantienen gratuita.',
+    surveyPrivacy: 'Cada pregunta es opcional, sus respuestas se reportan solo como totales y nada de esto cambia la atención que recibe hoy.',
+    optional: 'Opcional', surveySkip: 'Prefiero no responder estas preguntas', surveySkipped: 'Omitida — toque cualquier respuesta para cambiar',
     raceTitle: 'Raza y origen étnico', raceHint: 'Opcional. Elija todas las que correspondan — solo se usa para informar cómo la clínica sirvió a la comunidad.',
     raceList: [['american_indian_alaska_native', 'Indígena de América o nativo de Alaska'], ['asian', 'Asiático'], ['black_african_american', 'Negro o afroamericano'], ['hispanic_latino', 'Hispano o latino'], ['middle_eastern_north_african', 'De Medio Oriente o del norte de África'], ['native_hawaiian_pacific_islander', 'Nativo de Hawái o de las islas del Pacífico'], ['white', 'Blanco'], ['prefer_not', 'Prefiero no responder']],
     allergies: 'Alergias a medicamentos', selectAll: 'Seleccione todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
     conditions: '¿Tiene alguna de estas condiciones?', conditionOther: 'Otra condición (especifique)', none: 'Ninguna de las anteriores', otherOpt: 'Otra (escriba abajo)',
     meds: 'Medicamentos actuales', addMed: '+ Agregar medicamento', noMeds: 'Sin medicamentos', medNamePh: 'Medicamento',
-    medHist: 'Historial médico', dentHist: 'Historial dental', priorDentist: '¿Cuándo visitó al dentista por última vez?', yes: 'Sí', no: 'No', dash: '—',
+    medHist: 'Historial médico', dentHist: 'Historial dental', priorDentist: '¿Cuándo visitó al dentista por última vez?', yes: 'Sí', no: 'No', notApplicable: 'No aplica', dash: '—',
     priorDentistOpts: [['within_6_months', 'En los últimos 6 meses'], ['about_1_year', 'Hace aproximadamente 1 año'], ['about_2_years', 'Hace aproximadamente 2 años'], ['over_3_years', 'Hace 3 años o más'], ['never', 'Nunca']],
     consent: 'Consentimiento', signName: 'Su nombre (para la firma)', relationship: 'Parentesco (si es para un menor)', relPh: 'Yo mismo / Padre / Tutor',
     agree: 'He leído y entiendo lo anterior, y doy mi consentimiento.', sigOpt: 'Firma', sigHint: 'Firme con su dedo o un lápiz óptico.', clear: 'Borrar',
@@ -672,6 +1083,7 @@ const I18N = {
     errName: 'Por favor ingrese su nombre y apellido.', errDob: 'Por favor ingrese su fecha de nacimiento.', errGender: 'Por favor elija un género.',
     errCity: 'Por favor ingrese su ciudad.', errState: 'Por favor ingrese su estado.',
     errEmName: 'Por favor ingrese el nombre de un contacto de emergencia.', errEmPhone: 'Por favor ingrese el teléfono del contacto de emergencia.',
+    errServices: 'Elija al menos un servicio.',
     errMedical: 'Por favor responda todas las preguntas del historial médico y dental.',
     errConsent: 'Por favor lea y acepte el consentimiento para terminar.', errSurgery: 'Se seleccionó una extracción — por favor lea y acepte también el consentimiento de cirugía oral.',
     errSign: 'Por favor firme el consentimiento para terminar.', errSignSurgery: 'Por favor firme el consentimiento de cirugía oral.', errSigner: 'Por favor escriba su nombre para la firma.',
@@ -733,6 +1145,10 @@ function checkinShell(title, inner) {
     '.agree{display:flex;gap:9px;align-items:flex-start;margin-top:12px;font-size:14px;font-weight:600}.agree input{width:auto;margin:2px 0 0}' +
     '.sig{border:1px dashed var(--line);border-radius:10px;background:#fff;touch-action:none;width:100%;height:150px;display:block;margin-top:6px}' +
     '.sigbar{display:flex;justify-content:space-between;align-items:center;margin-top:6px}.sigbar a{font-size:13px;color:var(--g);text-decoration:underline;cursor:pointer}' +
+    '.svs{font-size:12px;margin:18px 0 0;color:var(--g);letter-spacing:.06em;text-transform:uppercase}.svs:first-child{margin-top:0}' +
+    '.svq{padding:11px 0;border-bottom:1px solid var(--line)}.svq:last-child{border-bottom:0}' +
+    '.svq-h{display:flex;justify-content:space-between;align-items:baseline;gap:10px}.svq-h .q{font-size:13px;font-weight:600}' +
+    '.svq-h .opt{font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}' +
     '</style></head><body><div class="wrap">' + inner + '</div></body></html>';
 }
 function checkinFormPage(eventUid, eventName, lang) {
@@ -742,14 +1158,38 @@ function checkinFormPage(eventUid, eventName, lang) {
   const condChips = L.conditionList.map(([k, l]) => chip('condition', k, l)).join('') + chip('condition', 'none', L.none) + chip('condition', 'other', L.otherOpt);
   const raceChips = L.raceList.map(([k, l]) => chip('race', k, l)).join('');
   const visitOpts = L.visits.map(([k, l]) => '<label class="chip"><input type="radio" name="visit" value="' + htmlEscape(k) + '">' + htmlEscape(l) + '</label>').join('');
+  const serviceChips = L.servicesList.map(([k, l]) => chip('service', k, l)).join('');
+  const referralOpts = '<option value="">' + htmlEscape(L.dash) + '</option>' +
+    L.referralList.map(([k, l]) => '<option value="' + htmlEscape(k) + '">' + htmlEscape(l) + '</option>').join('');
+  // Choice-only by design: nothing free-text, so the aggregate carries no
+  // sentence a patient could be identified by and can outlive the clinic's own
+  // records.
+  const svQuestion = (q) => {
+    const multi = q.type === 'multi';
+    const hint = lang === 'es' ? q.hintEs : q.hintEn;
+    return '<div class="svq"><div class="svq-h"><span class="q">' + htmlEscape(q[lang] || q.en) + '</span>' +
+      '<span class="opt">' + htmlEscape(L.optional) + '</span></div>' +
+      (hint ? '<p class="hint">' + htmlEscape(hint) + '</p>' : '') +
+      '<div class="chips">' + q.options.map((o) =>
+        '<label class="chip"><input type="' + (multi ? 'checkbox' : 'radio') + '" name="' + (multi ? 'svm_' : 'sv_') + q.key +
+        '" value="' + htmlEscape(o.value) + '">' + htmlEscape(o[lang] || o.en) + '</label>').join('') +
+      '</div></div>';
+  };
+  const surveyBody = SURVEY_REGISTRATION.map((sec) =>
+    '<h3 class="svs">' + htmlEscape(sec[lang] || sec.en) + '</h3>' + sec.questions.map(svQuestion).join('')).join('');
   // Every history question is required: a blank is not the same as "no", and the
   // dentist reads these before deciding whether it is safe to treat.
-  const ynRow = (id, label) => '<div class="yn"><span>' + htmlEscape(label) + ' <span class="req">*</span></span><select id="' + id + '"><option value="">' + htmlEscape(L.dash) + '</option><option value="yes">' + htmlEscape(L.yes) + '</option><option value="no">' + htmlEscape(L.no) + '</option></select></div>';
+  // Pregnancy alone carries a third answer. It is a compound question —
+  // pregnant, nursing, or taking contraceptives — and for a man, a child or a
+  // post-menopausal patient, being made to tap "No" makes their answer
+  // indistinguishable from the clinically loaded No the dentist reads before
+  // deciding what is safe to give. The walk-in form offers it; so must this.
+  const ynRow = (id, label) => '<div class="yn"><span>' + htmlEscape(label) + ' <span class="req">*</span></span><select id="' + id + '"><option value="">' + htmlEscape(L.dash) + '</option><option value="yes">' + htmlEscape(L.yes) + '</option><option value="no">' + htmlEscape(L.no) + '</option>' + (id === 'pregnancy' ? '<option value="na">' + htmlEscape(L.notApplicable) + '</option>' : '') + '</select></div>';
   const medYesNo = L.medYesNo.map(([k, l]) => ynRow(k, l)).join('');
   const dentalYesNo = L.dentalYesNo.map(([k, l]) => ynRow(k, l)).join('');
   const genConsent = '<h3>' + htmlEscape(L.generalTitle) + '</h3>' + (L.generalMode === 'ol' ? ('<ol>' + L.general.map((c) => '<li>' + htmlEscape(c) + '</li>').join('') + '</ol>') : L.general.map((c) => '<p>' + htmlEscape(c) + '</p>').join(''));
   const surConsent = '<h3>' + htmlEscape(L.surgeryTitle) + '</h3>' + L.surgeryText.map((c) => '<p>' + htmlEscape(c) + '</p>').join('');
-  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errMedical: L.errMedical, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr };
+  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh, surveySkip: L.surveySkip, surveySkipped: L.surveySkipped };
 
   const inner =
     '<div class="hero"><div style="display:flex;justify-content:space-between;align-items:center"><div class="ey">Mission Minded · Pre-registration</div>' +
@@ -769,7 +1209,12 @@ function checkinFormPage(eventUid, eventName, lang) {
     '<div><label>' + htmlEscape(L.state) + ' <span class="req">*</span></label><select id="state" autocomplete="address-level1"><option value="">' + htmlEscape(L.dash) + '</option>' + US_STATE_OPTIONS + '</select></div></div>' +
     '<div class="row"><div><label>' + htmlEscape(L.emName) + ' <span class="req">*</span></label><input type="text" id="emergency_name"></div>' +
     '<div><label>' + htmlEscape(L.emPhone) + ' <span class="req">*</span></label><input type="tel" id="emergency_phone" inputmode="numeric"></div></div>' +
+    '<label>' + htmlEscape(L.referral) + '</label><select id="referral">' + referralOpts + '</select>' +
+    '<div id="referralOtherWrap" style="display:none"><label>' + htmlEscape(L.referralOther) + '</label><input type="text" id="referral_other"></div>' +
     '</div>' +
+
+    '<div class="card"><h2>' + htmlEscape(L.services) + ' <span class="req">*</span></h2><p class="hint" style="margin:0 0 6px">' + htmlEscape(L.serviceHint) + '</p>' +
+    '<div class="chips" id="services">' + serviceChips + '</div></div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.need) + '</h2><div class="chips">' + visitOpts + '</div>' +
     '</div>' +
@@ -807,6 +1252,12 @@ function checkinFormPage(eventUid, eventName, lang) {
     '<label style="margin-top:10px">' + htmlEscape(L.sigOpt) + ' <span class="req">*</span></label><canvas id="ssig" class="sig"></canvas>' +
     '<div class="sigbar"><span class="hint">' + htmlEscape(L.sigHint) + '</span><a id="sclear">' + htmlEscape(L.clear) + '</a></div></div>' +
 
+    '<div class="card"><h2>' + htmlEscape(L.surveyTitle) + '</h2>' +
+    '<p class="hint" style="margin:0 0 6px">' + htmlEscape(L.surveyLede) + '</p>' +
+    '<p class="hint" style="margin:0 0 6px">' + htmlEscape(L.surveyPrivacy) + '</p>' +
+    '<div id="survey">' + surveyBody + '</div>' +
+    '<label class="chip" style="margin-top:12px"><input type="checkbox" id="survey_skip"><span id="skipText">' + htmlEscape(L.surveySkip) + '</span></label></div>' +
+
     '<div class="err" id="err"></div>' +
     '<button class="btn" id="submit" type="submit">' + htmlEscape(L.submit) + '</button>' +
     '<p class="hint" style="text-align:center;margin-top:14px">' + htmlEscape(L.footer) + '</p>' +
@@ -816,13 +1267,24 @@ function checkinFormPage(eventUid, eventName, lang) {
     'var T=' + JSON.stringify(T) + ';var LANG=' + JSON.stringify(lang) + ';' +
     'var MEDQ=' + JSON.stringify(L.medYesNo.map(([k]) => k)) + ';' +
     'var DENTQ=' + JSON.stringify(L.dentalYesNo.map(([k]) => k)) + ';' +
+    'var SVQ=' + JSON.stringify(SURVEY_QUESTIONS.map((q) => [q.key, q.type])) + ';' +
     "function el(id){return document.getElementById(id);}function val(id){var e=el(id);return e?e.value:'';}" +
     "function chipwire(id){document.querySelectorAll('#'+id+' .chip input').forEach(function(i){i.addEventListener('change',function(){i.closest('.chip').classList.toggle('on',i.checked);});});}" +
-    "chipwire('allergies');chipwire('conditions');" +
+    "chipwire('allergies');chipwire('conditions');chipwire('services');" +
+    "function syncRefOther(){el('referralOtherWrap').style.display=val('referral')==='other'?'':'none';}el('referral').addEventListener('change',syncRefOther);syncRefOther();" +
     "function checked(name){return Array.prototype.slice.call(document.querySelectorAll('input[name='+name+']:checked')).map(function(i){return i.value;});}" +
     "function mkpad(id){var c=el(id);if(!c)return null;var ctx=c.getContext('2d');var drawing=false,empty=true;function fit(){var r=c.getBoundingClientRect();if(!r.width)return;c.width=r.width;c.height=150;ctx.lineWidth=2.2;ctx.lineCap='round';ctx.strokeStyle='#12303f';}fit();window.addEventListener('resize',fit);function pt(e){var r=c.getBoundingClientRect();var t=(e.touches&&e.touches[0])?e.touches[0]:e;return{x:t.clientX-r.left,y:t.clientY-r.top};}function down(e){drawing=true;empty=false;var p=pt(e);ctx.beginPath();ctx.moveTo(p.x,p.y);e.preventDefault();}function mv(e){if(!drawing)return;var p=pt(e);ctx.lineTo(p.x,p.y);ctx.stroke();e.preventDefault();}function up(){drawing=false;}c.addEventListener('pointerdown',down);c.addEventListener('pointermove',mv);window.addEventListener('pointerup',up);return{data:function(){return empty?null:c.toDataURL('image/png');},clear:function(){ctx.clearRect(0,0,c.width,c.height);empty=true;},fit:fit};}" +
     "var gpad=mkpad('gsig');var spad=mkpad('ssig');el('gclear').onclick=function(){if(gpad)gpad.clear();};if(el('sclear'))el('sclear').onclick=function(){if(spad)spad.clear();};" +
     "document.querySelectorAll('input[name=visit]').forEach(function(i){i.addEventListener('change',function(){document.querySelectorAll('input[name=visit]').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});var v=(document.querySelector('input[name=visit]:checked')||{}).value||'';var ex=(v==='extraction_pain'||v==='extraction_no_pain');el('surgeryCard').style.display=ex?'block':'none';if(ex&&spad)setTimeout(function(){spad.fit();},0);});});" +
+    "function svgroup(name){document.querySelectorAll('input[name='+name+']').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});}" +
+    // 'None' and 'Prefer not to answer' are answers ABOUT the list, so they
+    // replace it rather than joining it — the same rule the walk-in form applies.
+    "function svexclusive(i){if(!i.checked)return;var ex=(i.value==='none'||i.value==='pna');document.querySelectorAll('input[name='+i.name+']').forEach(function(o){if(o!==i&&(ex||o.value==='none'||o.value==='pna'))o.checked=false;});}" +
+    "var skipBox=el('survey_skip');function setSkip(on){skipBox.checked=on;skipBox.closest('.chip').classList.toggle('on',on);el('skipText').textContent=on?T.surveySkipped:T.surveySkip;if(on)document.querySelectorAll('#survey .chip input').forEach(function(i){i.checked=false;i.closest('.chip').classList.remove('on');});}" +
+    "skipBox.addEventListener('change',function(){setSkip(skipBox.checked);});" +
+    // Answering anything overrides a skip, so the two can never both be true.
+    "document.querySelectorAll('#survey .chip input').forEach(function(i){i.addEventListener('change',function(){if(i.type==='checkbox')svexclusive(i);svgroup(i.name);if(i.checked)setSkip(false);});});" +
+    "function survey(){var out={};SVQ.forEach(function(q){if(q[1]==='multi'){var v=checked('svm_'+q[0]);if(v.length)out[q[0]]=v;}else{var r=document.querySelector('input[name=sv_'+q[0]+']:checked');if(r)out[q[0]]=r.value;}});return out;}" +
     "var meds=el('meds');function addmed(){var d=document.createElement('div');d.className='med-row';d.innerHTML='<input type=\"text\" list=\"medlist\" autocomplete=\"off\" placeholder=\"'+T.medNamePh+'\"><button type=\"button\">✕</button>';d.querySelector('button').onclick=function(){d.remove();};meds.appendChild(d);}el('addmed').onclick=addmed;" +
     "el('f').addEventListener('submit',function(e){e.preventDefault();var err=el('err');err.textContent='';" +
     "var fn=val('first_name').trim(),ln=val('last_name').trim();if(!fn||!ln){err.textContent=T.errName;window.scrollTo(0,0);return;}" +
@@ -830,6 +1292,7 @@ function checkinFormPage(eventUid, eventName, lang) {
     "if(!val('city')){err.textContent=T.errCity;return;}if(!val('state')){err.textContent=T.errState;return;}" +
     "if(!val('emergency_name').trim()){err.textContent=T.errEmName;el('emergency_name').focus();return;}" +
     "if(!val('emergency_phone').trim()){err.textContent=T.errEmPhone;el('emergency_phone').focus();return;}" +
+    "if(!checked('service').length){err.textContent=T.errServices;el('services').scrollIntoView({block:'center'});return;}" +
     // Every medical and dental history question must be answered — a blank is
     // not the same as "no", and the dentist reads these before treating.
     "var unanswered=null;" +
@@ -842,6 +1305,7 @@ function checkinFormPage(eventUid, eventName, lang) {
     "if(extraction&&!el('sagree').checked){err.textContent=T.errSurgery;return;}" +
     "if(extraction&&(!spad||!spad.data())){err.textContent=T.errSignSurgery;el('ssig').scrollIntoView({block:'center'});return;}" +
     "var payload={first_name:fn,last_name:ln,dob:val('dob'),gender:val('gender'),phone:val('phone'),email:val('email'),language:LANG,address:val('address'),city:val('city'),state:val('state'),emergency_name:val('emergency_name'),emergency_phone:val('emergency_phone')," +
+    "services:checked('service'),referral:val('referral'),referral_other:val('referral_other'),survey:survey(),survey_declined:skipBox.checked," +
     "visit_type:visit,race:checked('race'),allergies:checked('allergy'),allergies_other:val('allergies_other'),conditions:checked('condition'),conditions_other:val('conditions_other')," +
     "medications:Array.prototype.slice.call(meds.querySelectorAll('input')).map(function(i){return i.value.trim();}).filter(Boolean),medications_none:el('medications_none').checked," +
     "under_treatment:val('under_treatment'),hospitalized:val('hospitalized'),tobacco:val('tobacco'),pregnancy:val('pregnancy')," +

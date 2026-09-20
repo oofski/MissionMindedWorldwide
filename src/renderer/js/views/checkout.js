@@ -5,6 +5,7 @@ import { icon } from '../icons.js';
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
 import { openExitSurvey, surveyStatus } from '../components/exitSurvey.js';
+import { scanBox } from '../components/wristband.js';
 
 const fmtWhen = (ts) => { if (!ts) return '—'; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
 
@@ -80,6 +81,10 @@ export function renderCheckout(ctx, params = {}) {
         el('div', {}, [el('h1', {}, ['Check-Out']), el('p', { class: 'view-sub' }, [`${ready.length} ready to check out · ${done.length} checked out`])]),
         el('div', { class: 'view-head-actions' }, [el('button', { class: 'btn btn--ghost btn--sm', onClick: queue }, [icon('refresh', { size: 15 }), 'Refresh'])]),
       ]),
+      // Scanning the band is the intended way in, the same as the station
+      // screens: the patient is standing there holding it, and the queue at the
+      // end of the day is the longest one in the building.
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: (pt) => onScan(pt) })]),
       el('div', { class: 'card' }, [
         el('div', { class: 'card-title' }, [icon('checkCircle', { size: 15 }), 'Ready to check out']),
         el('div', { class: 'data-table-wrap' }, [el('table', { class: 'data-table' }, [
@@ -100,6 +105,20 @@ export function renderCheckout(ctx, params = {}) {
         el('div', { class: 'collapse-body' }, [await usbBar()]),
       ]),
     );
+  }
+
+  // A scanned band opens that patient's check-out record. The lists above only
+  // hold patients whose visit is over, so a band belonging to someone still in
+  // the clinic would otherwise scan to nothing at all — the record opens either
+  // way, and the toast says which case it is rather than leaving the desk to
+  // work it out from a greyed-out button.
+  function onScan(p) {
+    if (p.status === 'dismissed') {
+      toast(`${p.first_name} ${p.last_name} has already been checked out.`, 'info');
+    } else if (p.status === 'checked_in') {
+      toast(`${p.first_name} ${p.last_name} has not been through the clinic yet — they cannot be checked out.`, 'error');
+    }
+    detail(p.id);
   }
 
   async function detail(id) {
@@ -176,7 +195,7 @@ export function renderCheckout(ctx, params = {}) {
               // Primary action — the climax: last, prominent, on its own.
               p.status === 'dismissed'
                 ? el('div', { class: 'pill pill--neutral', style: 'margin-top:8px' }, [`Dismissed by ${p.dismissed_by_name || '—'} · ${fmtWhen(p.dismissed_at)}`])
-                : el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', title: surveyDone ? null : 'Take the exit survey first — the patient may decline it', onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
+                : el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', title: p.status === 'checked_in' ? 'This patient has not been through the clinic yet — there is nothing to check them out of' : surveyDone ? null : 'Take the exit survey first — the patient may decline it', onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
             ]),
           ]),
         ]),

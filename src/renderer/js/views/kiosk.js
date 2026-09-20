@@ -284,10 +284,24 @@ export function renderKiosk(ctx) {
     const m = data.medical_history;
     // A2: vitals are no longer collected at check-in — the EMT records them.
 
-    const underTx = yesNo(t('intake.underTreatment'), { value: m.under_treatment, yesText: t('common.yes'), noText: t('common.no') });
-    const hosp = yesNo(t('intake.hospitalized'), { value: m.hospitalized, yesText: t('common.yes'), noText: t('common.no') });
-    const tobacco = yesNo(t('intake.tobacco'), { value: m.tobacco, yesText: t('common.yes'), noText: t('common.no') });
-    const pregnancy = yesNo(t('intake.pregnancy'), { value: m.pregnancy, yesText: t('common.yes'), noText: t('common.no') });
+    // Ordered so the refusal below can name the first unanswered question rather
+    // than saying "something is missing" and leaving the patient to hunt.
+    const YN_FIELDS = [
+      ['under_treatment', t('intake.underTreatment'), ''],
+      ['hospitalized', t('intake.hospitalized'), ''],
+      ['tobacco', t('intake.tobacco'), ''],
+      // The pregnancy question is required like the rest, but it is the one
+      // question here that is simply not about most of the people who sit down
+      // at this screen. "Not applicable" is what lets a man, a child or a
+      // post-menopausal woman answer it truthfully instead of being made to
+      // declare they are not pregnant — and it keeps a "No" meaning what the
+      // dentist needs it to mean: this patient could be, and is not.
+      ['pregnancy', t('intake.pregnancy'), t('intake.pregnancyNA')],
+    ].map(([k, label, naText]) => ({
+      key: k, label,
+      field: yesNo(label, { value: m[k], yesText: t('common.yes'), noText: t('common.no'), naText }),
+    }));
+    const [underTx, hosp, tobacco, pregnancy] = YN_FIELDS.map((f) => f.field);
 
     const noneLabel = L({ en: 'None of the above', es: 'Ninguna de las anteriores', ru: 'Ничего из перечисленного' });
 
@@ -410,6 +424,15 @@ export function renderKiosk(ctx) {
         const allergySel = allergyGrid.get();
         const condSel = condGrid.get();
         const medList = Array.from(medRows.children).map((r) => r._get()).filter((x) => x.name);
+        // Every medical question is REQUIRED, the same as the online form already
+        // requires them — the same clinic was getting a complete history from a
+        // patient who signed up at home and a blank one from the patient at the
+        // desk, and the dentist reads these before deciding whether it is safe
+        // to treat. Each refusal names its question: on a column of
+        // near-identical Yes/No rows a generic "please complete this step" is
+        // how people give up on a form.
+        const missingYN = YN_FIELDS.find((f) => !f.field.get());
+        if (missingYN) { toast(t('common.required') + ': ' + missingYN.label, 'error'); return false; }
         // Allergies, conditions and medications are REQUIRED — the patient must
         // actively answer each (a real chip, "Other", or "None of the above" /
         // "No medications"). A blank section no longer silently passes.

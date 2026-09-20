@@ -304,7 +304,7 @@ function fullPacketBody(p) {
     <h2>Medical History</h2>
     <table class="grid">
       <tr>${field('Currently under treatment', m.under_treatment)}${field('Recent hospitalization', m.hospitalized)}</tr>
-      <tr>${field('Tobacco use', m.tobacco)}${field('Pregnant / nursing', m.pregnancy)}</tr>
+      <tr>${field('Tobacco use', m.tobacco)}${field('Pregnant / nursing', m.pregnancy === 'na' ? 'Not applicable' : m.pregnancy)}</tr>
     </table>
     <div><span class="label">Medication allergies</span><div class="chips">${allergies}</div></div>
     <div><span class="label">Conditions</span><div class="chips">${conditions}</div></div>

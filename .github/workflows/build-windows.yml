@@ -228,26 +228,34 @@ jobs:
 
             ### New in this build
 
-            **The report exports as PDF, Excel or CSV.** Three buttons at the top
-            of Reports & analytics, covering whichever clinic the scope selector
-            is showing — one clinic or all of them. All three are rendered from
-            the same definitions, so the spreadsheet and the PDF can never give a
-            funder different numbers for the same clinic.
+            **The pre-registration link now asks everything the desk asks.** A
+            patient who fills it in at home no longer has to be asked again on
+            the day — which is the entire point of the link at ~250 patients a
+            day. Three things it was missing: the 22 community survey questions
+            (so pre-registered patients were contributing nothing to your grant
+            data), which services they need, and how they heard about the clinic.
 
-            The report covers patient counts, how patients registered
-            (**pre-registered online vs. registered at the clinic**, with
-            completion rates for each), gender, age bands and average age, race
-            and ethnicity, language, city, the most common conditions,
-            procedures and imaging, activity by day, and the survey results.
+            **Every medical history question is now required at the desk**, not
+            just online. Allergies, conditions and medications already were; "are
+            you under a doctor's care", "hospitalised in the last 2 years" and
+            "do you use tobacco" were not, so the same clinic got a complete
+            history from someone who signed up at home and a blank one from the
+            patient in front of them. If one is missed the app names it.
 
-            Everything is written from the de-identified totals, never from
-            patient rows — so no patient name can reach a file that gets emailed
-            to a funder, and a report can still be exported after the clinic's
-            records have been purged.
+            **The pregnancy question gains "Not applicable."** Required like the
+            rest, but a man, a child or a post-menopausal patient can now answer
+            it truthfully instead of being made to declare they are not pregnant
+            — which also keeps a "No" meaning what the dentist needs it to mean.
 
-            The old **Export JSON** button is still there, renamed **Raw records
-            (JSON)** so it is not mistaken for the report: it is the patient data
-            for re-importing, not the figures for reporting.
+            **Scan a wristband at Arrivals and Check-out.** The scanner already
+            worked at Clearance, Hygienist and Dentist; these were the two desks
+            still searching by name, where half the room shares three surnames.
+            Any USB or Bluetooth keyboard-wedge scanner works — no driver, no
+            pairing. A scan that lands on the wrong screen says so rather than
+            doing nothing.
+
+            **Fixed:** every "+ Add medication" row on the online form showed
+            `undefined` as its placeholder text, in both languages.
 
             ### Signing in
             Every install now comes with an administrator already set up:

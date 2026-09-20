@@ -2,6 +2,17 @@ import { el } from '../dom.js';
 import { icon } from '../icons.js';
 import { conditions, allergies, visitTypeLabel, priorDentistLabel } from '../i18n.js';
 
+// A history yes/no as the clinician should read it. 'na' is the pregnancy
+// question's third answer — it must not surface as the raw code, because
+// "na" next to "Pregnant / nursing" is exactly the kind of thing a reader
+// resolves by guessing.
+export function historyAnswer(v) {
+  if (v === 'yes') return 'Yes';
+  if (v === 'no') return 'No';
+  if (v === 'na') return 'Not applicable';
+  return v;
+}
+
 // A record created by the old (v1.0) intake bug has no name / empty histories.
 export function isIncompleteRecord(p) {
   const noName = !(p.first_name || '').trim() || !(p.last_name || '').trim();
@@ -63,8 +74,8 @@ export function patientHistoryCards(p, priorVisits = []) {
 
   out.push(card('clipboard', 'Medical history',
     el('div', { class: 'kv-grid' }, [
-      kv('Under doctor’s care', m.under_treatment), kv('Hospitalized (2 yrs)', m.hospitalized),
-      kv('Tobacco use', m.tobacco), kv('Pregnant / nursing', m.pregnancy),
+      kv('Under doctor’s care', historyAnswer(m.under_treatment)), kv('Hospitalized (2 yrs)', historyAnswer(m.hospitalized)),
+      kv('Tobacco use', historyAnswer(m.tobacco)), kv('Pregnant / nursing', historyAnswer(m.pregnancy)),
     ]),
     el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Allergies']),
       el('div', { class: 'chip-row' }, allergyPills.length ? allergyPills : [el('span', { class: 'muted' }, [m.allergies_none ? 'None (reviewed)' : 'None reported'])])]),

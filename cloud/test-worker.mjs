@@ -410,6 +410,8 @@ async function main() {
     post_extraction_bleeding: 'no', ortho: 'no',
     // Required since the last-dental-visit question became a closed dropdown.
     prior_dentist: 'about_2_years',
+    // Required since the online form started asking which clinics to queue for.
+    services: ['dental'],
   };
   async function getText(path) {
     const res = await worker.fetch(new Request('https://sync.example.com' + path, { method: 'GET' }), env, {});
@@ -583,6 +585,32 @@ async function main() {
     /Mepivacaine/.test(fullForm.text) && /Bupivacaine/.test(fullForm.text) && /Prilocaine/.test(fullForm.text) &&
     /Clindamycin/.test(fullForm.text) && /Azithromycin/.test(fullForm.text) && /Amoxicillin \+ clavulanate/.test(fullForm.text));
 
+  // The two forms must agree about what a COMPLETE medical history is. The
+  // walk-in form gives pregnancy a third answer, because making a man or a child
+  // tap "No" makes their answer indistinguishable from the clinically loaded No
+  // the dentist reads. This form has to accept the same, and only on that
+  // question.
+  check('the form offers "Not applicable" on the pregnancy question only',
+    /id="pregnancy"[\s\S]{0,240}?value="na"/.test(fullForm.text) &&
+    !/id="tobacco"[\s\S]{0,240}?value="na"/.test(fullForm.text));
+  const naPreg = await call(env, 'POST', '/checkin/evt-1', {
+    body: { ...REQ, first_name: 'Not', last_name: 'Applicable', dob: '1970-01-02', gender: 'male',
+      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning', pregnancy: 'na',
+      consent_agree: true, signer_name: 'Not Applicable', signature_png: 'data:image/png;base64,AAAA' },
+  });
+  check('a pregnancy answer of "Not applicable" is accepted, not refused as unanswered', naPreg.status === 200);
+  const naRow = Array.from(env.DB._store.values())
+    .filter((r) => r.entity === 'patient').map((r) => JSON.parse(r.data))
+    .find((x) => x.last_name === 'Applicable');
+  check('and it is stored as "na", the same code the walk-in form uses',
+    !!naRow && JSON.parse(naRow.medical_history).pregnancy === 'na');
+  const junkPreg = await call(env, 'POST', '/checkin/evt-1', {
+    body: { ...REQ, first_name: 'Junk', last_name: 'Preg', dob: '1970-01-02', gender: 'male',
+      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning', pregnancy: 'maybe',
+      consent_agree: true, signer_name: 'Junk Preg', signature_png: 'data:image/png;base64,AAAA' },
+  });
+  check('a value that is not yes/no/na is still refused', junkPreg.status === 400);
+
   // The English form offers a link to switch to Spanish.
   check('the English form links to the Spanish version',
     /\?lang=es/.test(fullForm.text) && fullForm.text.includes('Español'));
@@ -597,6 +625,8 @@ async function main() {
     esForm.text.includes('En los últimos 6 meses') &&        // C2: Spanish dropdown options
     esForm.text.includes('Nunca') &&
     esForm.text.includes('Ciudad') && esForm.text.includes('Estado'));
+  check('the Spanish form offers "No aplica" on the pregnancy question',
+    /value="na">No aplica/.test(esForm.text));
   check('the Spanish form carries the Spanish consent + agree text',
     esForm.text.includes('Consentimiento General para Tratamiento Dental') &&
     esForm.text.includes('He leído y entiendo lo anterior, y doy mi consentimiento.'));
@@ -710,6 +740,132 @@ async function main() {
       /Do you use tobacco\? <span class="req">\*<\/span>/.test(f.text) &&
       /Do your gums bleed\? <span class="req">\*<\/span>/.test(f.text) &&
       /var MEDQ=/.test(f.text) && /var DENTQ=/.test(f.text) && f.text.includes('T.errMedical'));
+  }
+
+  // --- Online parity: services, referral and the registration survey ---
+  // Everything the online form fails to ask has to be asked again at the desk,
+  // which is the whole point of pre-registering.
+  {
+    const post = (body) => call(env, 'POST', '/checkin/evt-1', { body });
+    const base = {
+      ...REQ, dob: '1990-01-01', gender: 'female', city: 'Sandy', state: 'OR',
+      visit_type: 'cleaning', consent_agree: true, signer_name: 'Pre Registrant', signature_png: 'data:image/png;base64,AAAA',
+    };
+    const patientNamed = (last) => Array.from(env.DB._store.values())
+      .find((r) => r.entity === 'patient' && JSON.parse(r.data).last_name === last);
+    const demoOf = (last) => { const p = patientNamed(last); return p ? JSON.parse(JSON.parse(p.data).demographics) : null; };
+    const surveyOf = (last) => {
+      const p = patientNamed(last);
+      const row = p && Array.from(env.DB._store.values()).find((r) => r.entity === 'survey' && r.patient_uid === p.uid);
+      return row ? { row, data: JSON.parse(row.data) } : null;
+    };
+    const en = await getText('/checkin/evt-1');
+    const es = await getText('/checkin/evt-1?lang=es');
+
+    // --- GAP 2: which services the patient needs ---
+    check('the online form asks which services are needed, in both languages',
+      /id="services"/.test(en.text) && en.text.includes('Services needed today') &&
+      /name="service" value="dental"/.test(en.text) && /name="service" value="medical"/.test(en.text) && /name="service" value="vision"/.test(en.text) &&
+      es.text.includes('Servicios que necesita hoy') && es.text.includes('Médico') && es.text.includes('Visión'));
+    check('the online form marks the services question required and blocks submit',
+      /Services needed today <span class="req">\*<\/span>/.test(en.text) && en.text.includes("checked('service').length") && en.text.includes('T.errServices'));
+    const svcOk = await post({ ...base, first_name: 'Multi', last_name: 'Service', services: ['dental', 'vision'] });
+    check('a submission stores every service the patient chose (it prints on the wristband)',
+      svcOk.status === 200 && JSON.stringify((demoOf('Service') || {}).services) === JSON.stringify(['dental', 'vision']));
+    const noSvc = await post({ ...base, first_name: 'No', last_name: 'Service', services: [] });
+    check('POST /checkin with no service chosen -> 400', noSvc.status === 400 && /at least one service/i.test(noSvc.data.error));
+    const noSvcEs = await post({ ...base, first_name: 'Sin', last_name: 'Servicio', language: 'es', services: [] });
+    check('POST /checkin (es) with no service chosen -> Spanish 400', noSvcEs.status === 400 && /al menos un servicio/i.test(noSvcEs.data.error));
+    const junkSvc = await post({ ...base, first_name: 'Junk', last_name: 'Service', services: ['dental-ish', 'podiatry'] });
+    check('a junk service posted straight to the endpoint is rejected',
+      junkSvc.status === 400 && /at least one service/i.test(junkSvc.data.error));
+
+    // --- GAP 3: how they heard about us ---
+    check('the online form asks how the patient heard about us, in both languages',
+      /id="referral"/.test(en.text) && en.text.includes('How did you hear about us?') &&
+      /<option value="friend_referral">Friend \/ referral<\/option>/.test(en.text) && /<option value="sign">/.test(en.text) &&
+      es.text.includes('¿Cómo se enteró de nosotros?') && es.text.includes('Amigo / referencia'));
+    check('the referral question reveals a free-text box for "Other", as the walk-in form does',
+      /id="referral_other"/.test(en.text) && en.text.includes('Please specify') && es.text.includes('Por favor especifique') &&
+      en.text.includes("val('referral')==='other'"));
+    const refOk = await post({ ...base, first_name: 'Heard', last_name: 'Flyer', referral: 'flyer' });
+    check('a submission stores the referral source as a countable key',
+      refOk.status === 200 && (demoOf('Flyer') || {}).referral === 'flyer');
+    const refOther = await post({ ...base, first_name: 'Heard', last_name: 'Other', referral: 'other', referral_other: 'Saw the bus' });
+    check('"Other" keeps its free text in its own field',
+      refOther.status === 200 && (demoOf('Other') || {}).referral === 'other' && (demoOf('Other') || {}).referral_other === 'Saw the bus');
+    const refJunk = await post({ ...base, first_name: 'Heard', last_name: 'Dream', referral: 'from a dream' });
+    check('a junk referral posted straight to the endpoint is rejected (never stored as prose)',
+      refJunk.status === 200 && (demoOf('Dream') || {}).referral === '');
+
+    // --- GAP 1: the 22 end-of-registration survey questions ---
+    check('the online form asks all 22 end-of-registration survey questions',
+      (en.text.match(/class="svq"/g) || []).length === 22 &&
+      ['About your visit', 'Your household', 'Work and income', 'Insurance and access to care'].every((t) => en.text.includes(t)));
+    check('the survey questions carry the app\'s exact wording, in English',
+      en.text.includes('Is this your first time receiving services from a free community health clinic?') &&
+      en.text.includes('How many people live in your household, including yourself?') &&
+      en.text.includes('What is your current employment status?') &&
+      en.text.includes('In the past 12 months, have you delayed or avoided healthcare because of cost?') &&
+      en.text.includes('Prefer not to answer') && en.text.includes('Select all that apply.'));
+    check('the survey questions carry the app\'s exact wording, in Spanish',
+      (es.text.match(/class="svq"/g) || []).length === 22 &&
+      es.text.includes('Sobre su visita') && es.text.includes('Trabajo e ingresos') && es.text.includes('Seguro y acceso a la atención') &&
+      es.text.includes('¿Es esta la primera vez que recibe servicios en una clínica comunitaria gratuita?') &&
+      es.text.includes('¿Cuál es su situación laboral actual?') &&
+      es.text.includes('Prefiero no responder') && es.text.includes('Seleccione todas las que correspondan.'));
+    check('every survey question is marked optional and the whole survey is skippable',
+      /class="opt">Optional</.test(en.text) && /class="opt">Opcional</.test(es.text) &&
+      /id="survey_skip"/.test(en.text) && en.text.includes('I would rather not answer these') &&
+      es.text.includes('Prefiero no responder estas preguntas'));
+    // Select-all questions are checkboxes, one-choice questions radio groups —
+    // choice-only either way, so the blob carries no free text.
+    check('the survey offers choice-only controls (no free text)',
+      /name="sv_household_size" value="6_or_more"/.test(en.text) &&
+      /type="checkbox" name="svm_assistance" value="snap"/.test(en.text) &&
+      /type="radio" name="sv_first_time"/.test(en.text));
+
+    const answered = await post({ ...base, first_name: 'Survey', last_name: 'Answered',
+      survey: { first_time: 'yes', household_size: '4', income: '0_15k', assistance: ['snap', 'medicaid'], food_insecurity: 'no' } });
+    const sv = surveyOf('Answered');
+    check('a pre-registration survey is stored as a survey row bound to that patient',
+      answered.status === 200 && !!sv && sv.row.event_uid === 'evt-1' && /@prereg-s$/.test(String(sv.row.updated_at)) && sv.row.deleted === 0);
+    check('the survey row carries the answers the patient gave',
+      !!sv && JSON.parse(sv.data.answers).household_size === '4' && JSON.parse(sv.data.answers).first_time === 'yes' &&
+      JSON.stringify(JSON.parse(sv.data.answers).assistance) === JSON.stringify(['snap', 'medicaid']));
+    // The registration half is done; check-out still has its twelve to ask.
+    check('the survey row records the registration half and leaves check-out\'s open',
+      !!sv && sv.data.registration_status === 'completed' && sv.data.exit_status === null &&
+      sv.data.declined === 0 && sv.data.version === 'mmw-exit-v1');
+    check('the survey row carries exactly the columns the app syncs',
+      !!sv && JSON.stringify(Object.keys(sv.data)) === JSON.stringify(
+        ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status']));
+
+    const junkSurvey = await post({ ...base, first_name: 'Survey', last_name: 'Nonsense',
+      survey: { household_size: '400', made_up_question: 'yes', income: '0_15k', assistance: ['snap', 'bitcoin'] } });
+    const jsv = surveyOf('Nonsense');
+    check('a junk survey answer posted straight to the endpoint is rejected (never stored)',
+      junkSurvey.status === 200 && !!jsv && (() => { const a = JSON.parse(jsv.data.answers);
+        return a.household_size === undefined && a.made_up_question === undefined && a.income === '0_15k' &&
+          JSON.stringify(a.assistance) === JSON.stringify(['snap']); })());
+    const exclusive = await post({ ...base, first_name: 'Survey', last_name: 'Exclusive',
+      survey: { assistance: ['snap', 'none'], access_barriers: ['cost', 'pna'] } });
+    check('"None" and "Prefer not to answer" replace the list rather than joining it',
+      exclusive.status === 200 && (() => { const a = JSON.parse(surveyOf('Exclusive').data.answers);
+        return JSON.stringify(a.assistance) === JSON.stringify(['none']) && JSON.stringify(a.access_barriers) === JSON.stringify(['pna']); })());
+
+    const skipped = await post({ ...base, first_name: 'Survey', last_name: 'Skipped', survey: {}, survey_declined: true });
+    const ssv = surveyOf('Skipped');
+    check('skipping the survey is recorded as asked-and-declined, not as never-asked',
+      skipped.status === 200 && !!ssv && ssv.data.registration_status === 'declined' &&
+      ssv.data.answers === '{}' && ssv.data.exit_status === null && ssv.data.declined === 0);
+    const bothWays = await post({ ...base, first_name: 'Survey', last_name: 'Both', survey: { first_time: 'no' }, survey_declined: true });
+    check('answering anything overrides a skip, so the record cannot say both',
+      bothWays.status === 200 && surveyOf('Both').data.registration_status === 'completed');
+    const untouched = await post({ ...base, first_name: 'Survey', last_name: 'Untouched' });
+    check('a submission that never mentions the survey still files the row check-out needs',
+      untouched.status === 200 && surveyOf('Untouched').data.registration_status === 'completed' &&
+      surveyOf('Untouched').data.exit_status === null);
   }
 
   // --- v1.6.1: a deletion is sticky in the cloud ---

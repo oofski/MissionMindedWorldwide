@@ -47,22 +47,30 @@ export function selectField(label, options, { value = '', required = false } = {
 }
 
 // Yes/No toggle (returns 'yes' | 'no' | '').
-export function yesNo(label, { value = '', yesText = 'Yes', noText = 'No' } = {}) {
+//
+// `naText` adds a third choice, returning 'na'. It is for a question that a
+// required form must still let everyone answer honestly — where neither Yes nor
+// No is true of the patient, rather than where the patient would rather not say.
+export function yesNo(label, { value = '', yesText = 'Yes', noText = 'No', naText = '' } = {}) {
   let val = value;
-  const mkBtn = (v, txt) => el('button', {
-    type: 'button',
-    class: 'chip-btn' + (val === v ? ' chip-btn--on' : ''),
-    onClick: () => { val = val === v ? '' : v; sync(); },
-  }, [txt]);
-  const yes = mkBtn('yes', yesText);
-  const no = mkBtn('no', noText);
+  const btns = [];
+  const mkBtn = (v, txt) => {
+    const b = el('button', {
+      type: 'button',
+      class: 'chip-btn' + (val === v ? ' chip-btn--on' : ''),
+      onClick: () => { val = val === v ? '' : v; sync(); },
+    }, [txt]);
+    btns.push([v, b]);
+    return b;
+  };
+  const row = [mkBtn('yes', yesText), mkBtn('no', noText)];
+  if (naText) row.push(mkBtn('na', naText));
   function sync() {
-    yes.classList.toggle('chip-btn--on', val === 'yes');
-    no.classList.toggle('chip-btn--on', val === 'no');
+    btns.forEach(([v, b]) => b.classList.toggle('chip-btn--on', val === v));
   }
   const node = el('div', { class: 'field' }, [
     el('span', { class: 'field-label' }, [label]),
-    el('div', { class: 'chip-row' }, [yes, no]),
+    el('div', { class: 'chip-row' }, row),
   ]);
   return { node, get: () => val, set: (v) => { val = v; sync(); } };
 }

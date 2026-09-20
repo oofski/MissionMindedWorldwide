@@ -111,6 +111,14 @@ window.api = {
   patientsList: okWrap((o) => db.listPatients(o || {}), 'patientsList'),
   patientsRecords: okWrap((o) => db.listPatients(o || {}), 'patientsRecords'),
   patientsSearchAll: okWrap((t) => db.searchAllPatients(t), 'patientsSearchAll'),
+  // Ungated in ipc.js, like the real channel: any signed-in station may resolve a
+  // scanned band, and an unknown code errors rather than returning a null the
+  // caller has to guess at.
+  patientsFindByCode: okWrap((code) => {
+    const found = db.findPatientByCode(code);
+    if (!found) throw new Error('No patient found for that wristband.');
+    return found;
+  }),
   patientsHistory: okWrap((id) => db.patientHistory(id), 'patientsHistory'),
   patientsIncomplete: okWrap(() => db.listIncompletePatients(), 'patientsIncomplete'),
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
@@ -284,8 +292,44 @@ async function main() {
   // click a known allergy (Penicillin) and a condition (Diabetes)
   const pen = chips.find((c) => /Penicillin/i.test(c.textContent)); if (pen) pen.click();
   const dia = chips.find((c) => /Diabet/i.test(c.textContent)); if (dia) dia.click();
-  // a yes/no chip (tobacco)
-  const yesBtn = $all('.kiosk-body .chip-btn').find((b) => /Yes|S[ií]/.test(b.textContent)); if (yesBtn) yesBtn.click();
+  // The four yes/no questions are now REQUIRED, the same as the online form has
+  // always required them. Each refusal has to NAME the question: the step is a
+  // column of near-identical Yes/No rows, and "please complete this step" is how
+  // a patient gives up on a form.
+  const ynRow = (re) => $all('.kiosk-body .field')
+    .find((f) => f.querySelector('.chip-row') && re.test(((f.querySelector('.field-label') || {}).textContent || '')));
+  const answerYn = (re, txt) => {
+    const f = ynRow(re);
+    const b = f && Array.from(f.querySelectorAll('.chip-btn')).find((x) => txt.test(x.textContent));
+    if (b) b.click();
+    return !!b;
+  };
+  const lastToast = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+  // The exact wording each refusal has to quote back, so a generic "please
+  // complete this step" could not pass this check.
+  const MED_Q = [
+    [/under a doctor/i, 'Are you currently under a doctor\u2019s care?'],
+    [/Hospitalized/i, 'Hospitalized in the last 2 years?'],
+    [/tobacco/i, 'Do you use tobacco?'],
+    [/Pregnant/i, 'Pregnant, nursing, or taking contraceptives?'],
+  ];
+  // Pregnancy is the one question here that is not about most of the people who
+  // sit down at this screen, so it carries a third answer rather than staying
+  // optional — a man or a child can answer it truthfully, and a "No" keeps
+  // meaning "this patient could be, and is not".
+  log(!!ynRow(/Pregnant/i) && ynRow(/Pregnant/i).querySelectorAll('.chip-btn').length === 3
+    && /Not applicable/i.test(ynRow(/Pregnant/i).textContent),
+    'the pregnancy question offers Not applicable alongside Yes and No');
+  log(MED_Q.slice(0, 3).every(([re]) => ynRow(re) && ynRow(re).querySelectorAll('.chip-btn').length === 2),
+    'the other three medical questions stay a plain Yes / No');
+  // Refused one question at a time, each refusal naming the question it wants.
+  for (const [re, name] of MED_Q) {
+    clickText('Next'); await tick();
+    log(/Medical|Historia/i.test($('.kiosk-step-label').textContent) && new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(lastToast()),
+      'medical step refuses Next by name: ' + name);
+    log(answerYn(re, re === MED_Q[3][0] ? /Not applicable/i : /^(Yes|No)$/i),
+      'the medical question can be answered: ' + name);
+  }
   // v1.4.9: with allergies + conditions answered but MEDICATIONS not, Next is blocked.
   clickText('Next'); await tick();
   log(/Medical|Historia/i.test($('.kiosk-step-label').textContent), 'v1.4.9: medical step blocks Next until medications are answered');
@@ -405,6 +449,14 @@ async function main() {
     log(['gum_bleeding', 'sores', 'jaw_injury', 'grinding', 'post_extraction_bleeding', 'ortho']
       .every((k) => full.dental_history[k] === 'yes' || full.dental_history[k] === 'no'),
       'C2: every dental yes/no question is answered on a submitted record');
+    // The walk-in record now carries the same complete history the online form
+    // has always insisted on — a blank is not a "no", and the dentist reads
+    // these before deciding whether it is safe to treat.
+    log(['under_treatment', 'hospitalized', 'tobacco']
+      .every((k) => full.medical_history[k] === 'yes' || full.medical_history[k] === 'no'),
+      'every medical yes/no question is answered on a submitted record');
+    log(full.medical_history.pregnancy === 'na',
+      'a "Not applicable" pregnancy answer is stored as an answer, not left blank (' + full.medical_history.pregnancy + ')');
     // C3: the station was derived from the visit type, with nobody asked.
     log(full.triage && full.triage.route === 'dentist',
       'C3: choosing Filling routed the patient to the dentist automatically');
@@ -425,6 +477,8 @@ async function main() {
     await tick(); await tick();
     const recText = recRoot.textContent;
     log(/About 2 years ago/i.test(recText), 'C2: the records view shows the last-dental-visit answer as a readable label');
+    log(/Not applicable/i.test(recText),
+      'records view reads a not-applicable pregnancy answer back in words, not as the stored code');
     log(/Diabetes/i.test(recText), 'records view shows condition');
     log(/Penicillin/i.test(recText), 'records view shows allergy');
   }
@@ -2315,6 +2369,42 @@ async function main() {
       'MMW survey: merging adds option counts question by question');
   }
 
+  /* ===== "Not applicable" must not leak as a raw code ======================
+     Pregnancy gained a third answer at check-in. Two files outside the renderer
+     print that value straight through, so the patient's printed record and the
+     clinic export would have read "na" next to "Pregnant / nursing". This is the
+     seam between the screen that collects a value and everything that prints it
+     — the place a new option quietly escapes. */
+  {
+    currentUser = signInAdmin();
+    const naP = db.createPatient(currentUser, {
+      first_name: 'Not', last_name: 'Applicable', dob: '1970-01-02', gender: 'male',
+      demographics: { city: 'Sandy', state: 'OR' },
+      medical_history: { pregnancy: 'na', tobacco: 'no', conditions: ['none'], allergies: ['none'] },
+      dental_history: { visit_type: 'cleaning' },
+    });
+    const { buildHtml } = require('../src/main/pdf.js');
+    // 'full' is the packet that carries the medical history block; 'summary'
+    // and 'progress' do not print this field at all.
+    const recHtml = buildHtml(db.getPatient(naP.id), 'full');
+    log(/Pregnant \/ nursing/.test(recHtml), 'na: the full patient packet prints the pregnancy answer');
+    log(/Not applicable/.test(recHtml), 'na: it says "Not applicable", not "na"');
+    log(!/<div class="val">na<\/div>/.test(recHtml), 'na: no raw code reaches the printed record');
+
+    const { clinicSheets } = require('../src/main/clinicSheets.js');
+    const sheets = clinicSheets(db.exportClinicBundle());
+    const patientSheet = sheets.find((x) => /patient/i.test(x.name));
+    const flat = JSON.stringify(patientSheet.rows);
+    log(!/"na"/.test(flat), 'na: no raw code reaches the clinic spreadsheet');
+    log(/Not applicable/.test(flat), 'na: the spreadsheet spells it out');
+
+    // Both forms must agree on what a complete history is. The walk-in form
+    // offers the third answer; the online one has to accept it.
+    const wSrc = require('node:fs').readFileSync(new URL('../cloud/worker.js', import.meta.url), 'utf8');
+    log(/v === 'na'/.test(wSrc), 'na: the online form counts "Not applicable" as answered');
+    log(/id === 'pregnancy' \?/.test(wSrc), 'na: and offers it on the pregnancy question only');
+  }
+
   /* ===== The report, exported ===============================================
      CSV, Excel and PDF are three renderings of ONE set of section definitions.
      A grant return quoting the spreadsheet and a board paper quoting the PDF
@@ -2731,6 +2821,110 @@ async function main() {
     const os2 = db.getPatient(fp.id).consents.find((c) => c.type === 'oral_surgery');
     log(!!os2 && os2.tooth_numbers === '18,19',
       'MMW forms: the oral surgery consent records the tooth numbers it covers');
+  }
+
+  // ---- the wristband scan box reaches the two desk screens ----
+  // A band is a keyboard that types fast and presses Enter, which is what makes
+  // it the fastest way to identify one person in a room where half the queue
+  // shares three surnames. Arrivals and Check-Out are the two screens where a
+  // clinic running 250 patients a day feels that most.
+  {
+    currentUser = signInAdmin();
+    const evS = db.createEvent(currentUser, { name: 'Scan Clinic' });
+    db.setActiveEvent(currentUser, evS.id);
+    const mkS = (first, last, demographics = {}) => db.createPatient(currentUser, {
+      first_name: first, last_name: last, dob: '1990-06-01', gender: 'female',
+      demographics, medical_history: {}, dental_history: { visit_type: 'cleaning' },
+      consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }],
+    });
+    // Two waiting patients, one per tab, so the scan has to pick the right tab
+    // as well as the right row — Arrivals opens on 'prereg' while someone is
+    // waiting there.
+    mkS('Pia', 'Prereg', { preregistered: true });
+    const walk = mkS('Wanda', 'Walkin');
+    // ...and one who is already through the arrival gate, to scan by mistake.
+    const gone = mkS('Gus', 'Gone');
+    db.confirmArrival(currentUser, gone.id, {});
+    db.saveVitals(currentUser, gone.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '68' });
+    db.routePatient(currentUser, gone.id, 'hygienist');
+
+    const storeS = (await import('../src/renderer/js/store.js')).store; storeS.setUser(currentUser);
+    const toasts = [];
+    const ctxS = { navigate: () => {}, toast: (m) => toasts.push(m), store: storeS, setDetail: () => {} };
+    const scan = async (view, code) => {
+      const input = view.querySelector('.scan-input');
+      if (!input) return null; // the check above has already failed; keep the run going
+      input.value = code;
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      for (let i = 0; i < 8; i++) await tick();
+      return input;
+    };
+
+    const arr = (await import('../src/renderer/js/views/arrivals.js')).renderArrivals(ctxS);
+    document.body.append(arr);
+    for (let i = 0; i < 6; i++) await tick();
+    log(!!arr.querySelector('.scan-box') && !!arr.querySelector('.scan-input'),
+      'Arrivals carries the wristband scan box');
+    log(/Pre-registered online/.test(((arr.querySelector('.arrival-tab.is-active') || {}).textContent || '')),
+      '(setup) Arrivals opens on the pre-registered tab');
+    await scan(arr, walk.patient_code);
+    const hit = arr.querySelector('.arrival-row--scanned');
+    log(!!hit && /Walkin, Wanda/.test(hit.textContent),
+      'scanning a band marks that patient\u2019s own row on Arrivals');
+    log(/Registered at the desk/.test(((arr.querySelector('.arrival-tab.is-active') || {}).textContent || '')),
+      'the scan switches to the tab the patient is actually in, so the row is on screen');
+    log(arr.querySelector('input[type="search"]').value === '',
+      'the scan clears a search that would otherwise hide the scanned patient');
+    // A band belonging to someone already past this screen says so rather than
+    // appearing to do nothing at all.
+    toasts.length = 0;
+    await scan(arr, gone.patient_code);
+    log(toasts.some((m) => /Gus Gone is not waiting to be confirmed/.test(m) && /already through/.test(m)),
+      'scanning a patient who is already past Arrivals explains why, naming them');
+    log(!!arr.querySelector('.arrival-row--scanned') && /Walkin, Wanda/.test(arr.querySelector('.arrival-row--scanned').textContent),
+      'a refused scan leaves the screen where it was');
+
+    // Check-Out: the band opens that patient's own check-out record.
+    const ready = mkS('Rita', 'Ready');
+    db.confirmArrival(currentUser, ready.id, {});
+    db.saveVitals(currentUser, ready.id, { bp_systolic: '120', bp_diastolic: '78', heart_rate: '70' });
+    db.routePatient(currentUser, ready.id, 'hygienist');
+    db.saveTreatment(currentUser, ready.id, { cleaning: { scaling: true }, clinical_notes: 'done' }, true);
+    const co2 = (await import('../src/renderer/js/views/checkout.js')).renderCheckout(ctxS);
+    document.body.append(co2);
+    for (let i = 0; i < 8; i++) await tick();
+    log(!!co2.querySelector('.scan-box') && !!co2.querySelector('.scan-input'),
+      'Check-Out carries the wristband scan box');
+    await scan(co2, ready.patient_code);
+    log(/Rita Ready/.test(co2.textContent) && /Verify & dismiss/.test(co2.textContent),
+      'scanning a finished patient opens their check-out record, ready to dismiss');
+    // Back to the queue, then scan someone who has not been through the clinic.
+    const backBtn = Array.from(co2.querySelectorAll('button')).find((b) => /Back|Atr[a\u00e1]s/i.test(b.textContent));
+    if (backBtn) backBtn.click();
+    for (let i = 0; i < 8; i++) await tick();
+    const waitingP = mkS('Nina', 'Notyet');
+    await scan(co2, waitingP.patient_code);
+    const outToast = Array.from(document.querySelectorAll('#toast-host .toast')).map((x) => x.textContent);
+    log(outToast.some((m) => /Nina Notyet has not been through the clinic yet/.test(m)),
+      'scanning a patient who has not been treated says so instead of opening a dead button');
+    log(/Nina Notyet/.test(co2.textContent),
+      'their record still opens, so the desk can see where the patient actually is');
+  }
+
+  // ---- bilingual: the medical refusals speak the patient's language ----
+  {
+    const i18n = await import('../src/renderer/js/i18n.js');
+    const refusal = (lang, key) => { i18n.setLang(lang); return i18n.t('common.required') + ': ' + i18n.t(key); };
+    log(refusal('es', 'intake.underTreatment') === 'Requerido: \u00bfEst\u00e1 bajo el cuidado de un m\u00e9dico actualmente?',
+      'the medical refusal is fully Spanish for a Spanish-speaking patient');
+    log(refusal('es', 'intake.pregnancy') === 'Requerido: \u00bfEmbarazada, amamantando o usando anticonceptivos?'
+      && i18n.t('intake.pregnancyNA') === 'No aplica',
+      'the pregnancy question and its Not-applicable choice are translated too');
+    // ru/bzj/nya carry their own 'Required'; the question falls back to English
+    // rather than showing a key, which is the existing rule for this file.
+    log(refusal('bzj', 'intake.tobacco') === 'Fi need: Do you use tobacco?',
+      'a language without the question translated still names it, in its own Required');
+    i18n.setLang('en');
   }
 
   await tick();

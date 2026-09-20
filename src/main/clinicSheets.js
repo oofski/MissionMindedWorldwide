@@ -31,7 +31,10 @@ const j = (v, fallback) => {
   if (typeof v === 'object') return v;
   try { const p = JSON.parse(v); return p == null ? fallback : p; } catch { return fallback; }
 };
-const yn = (v) => (v === 'yes' ? 'Yes' : v === 'no' ? 'No' : v || '');
+// 'na' is a real answer on the pregnancy question, not a missing one — a man or
+// a child answering "Not applicable" is saying something, and printing the raw
+// code in an export a funder or a clinician reads is just a leak.
+const yn = (v) => (v === 'yes' ? 'Yes' : v === 'no' ? 'No' : v === 'na' ? 'Not applicable' : v || '');
 
 // Typed-in "other" text is always included, ticked or not — a written allergy
 // must never be missing from an exported record.

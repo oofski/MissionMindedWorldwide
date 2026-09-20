@@ -2,6 +2,7 @@ import { el, mount, clear } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
+import { scanBox } from '../components/wristband.js';
 
 // The front desk's arrival check. Everyone who has checked in — at the desk or
 // online, sometimes days earlier — waits here until someone confirms they are
@@ -15,6 +16,15 @@ const VISIT_LABEL = {
   cleaning: 'Dental cleaning',
 };
 const STATION_LABEL = { dentist: 'Dentist', hygienist: 'Hygienist' };
+// Why a scanned band is not on this screen. Everything past 'checked_in' has
+// already been confirmed here and moved on, so the answer is never "no such
+// patient" — it is "you are looking at the wrong screen", which is worth saying.
+const PAST_ARRIVAL = {
+  triaged: 'they are already through and waiting for their station',
+  in_treatment: 'they are already in treatment',
+  completed: 'their visit is finished — they are waiting at check-out',
+  dismissed: 'they have already been checked out',
+};
 
 // Find someone by what the desk actually has in front of them: a name said out
 // loud, a phone number, or a date of birth off an ID.
@@ -39,6 +49,9 @@ export function renderArrivals(ctx) {
   // the first paint picks whichever queue actually has people waiting, so the
   // desk never opens onto an empty tab; after that the user's choice sticks.
   let tab = null;
+  // The patient a band was last scanned for, so their row can be marked and
+  // brought into view on the repaint.
+  let scannedId = null;
 
   // Built once and re-used across repaints, so a queue refresh mid-typing can't
   // wipe what the desk has entered.
@@ -46,8 +59,29 @@ export function renderArrivals(ctx) {
     class: 'input',
     type: 'search',
     placeholder: 'Search name, phone, or date of birth…',
-    onInput: (e) => { query = e.target.value.trim(); paint(); },
+    onInput: (e) => { query = e.target.value.trim(); scannedId = null; paint(); },
   });
+
+  // A band is the only thing in the room that identifies one person outright,
+  // which is exactly what this screen lacks: half the queue shares three
+  // surnames. A scan lands on that patient's own row rather than opening
+  // another screen, because confirming them is a one-tap action on the row.
+  function onScan(p) {
+    const row = latest.patients.find((x) => x.id === p.id);
+    if (!row || row.status !== 'checked_in') {
+      const why = (row && PAST_ARRIVAL[row.status]) || 'they are not checked in to this event';
+      ctx.toast(`${p.first_name} ${p.last_name} is not waiting to be confirmed — ${why}.`, 'error');
+      return;
+    }
+    // The scan is the desk's answer to "who is this?", so it wins over whatever
+    // is typed in the search — the scanned patient need not match it.
+    tab = row.preregistered ? 'prereg' : 'walkin';
+    query = '';
+    search.value = '';
+    scannedId = row.id;
+    paint();
+    if (row.arrived_at) ctx.toast(`${p.first_name} ${p.last_name} has already been confirmed here.`, 'info');
+  }
 
   async function load() {
     const [event, patients] = await Promise.all([api.activeEvent(), api.listPatients({})]);
@@ -110,7 +144,7 @@ export function renderArrivals(ctx) {
         },
       }, [icon('checkCircle', { size: 15 }), 'They’re here — ready to go']);
 
-      return el('div', { class: 'arrival-row' }, [
+      return el('div', { class: 'arrival-row' + (p.id === scannedId ? ' arrival-row--scanned' : '') }, [
         el('div', { class: 'arrival-who' }, [
           el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
           el('div', { class: 'subtle small' }, [
@@ -170,6 +204,7 @@ export function renderArrivals(ctx) {
           el('button', { class: 'btn btn--ghost btn--sm', onClick: load }, [icon('refresh', { size: 15 }), 'Refresh']),
         ]),
       ]),
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: onScan })]),
       el('div', { class: 'arrival-tabs' }, [
         ['prereg', 'Pre-registered online', 'People who filled the form in before they came'],
         ['walkin', 'Registered at the desk', 'People checked in here at the clinic'],
@@ -201,6 +236,10 @@ export function renderArrivals(ctx) {
     );
 
     if (hadFocus) { search.focus(); if (caret != null) try { search.setSelectionRange(caret, caret); } catch { /* not supported */ } }
+    // Bring the scanned patient into view — on a long list their row is as
+    // likely to be off-screen as the name the desk was hunting for.
+    const scannedRow = scannedId != null ? root.querySelector('.arrival-row--scanned') : null;
+    if (scannedRow) scannedRow.scrollIntoView({ block: 'center' });
   }
 
   load().catch((e) => ctx.toast(e.message, 'error'));

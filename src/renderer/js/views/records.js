@@ -5,7 +5,7 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
-import { incompleteBanner } from '../components/patientHistory.js';
+import { incompleteBanner, historyAnswer } from '../components/patientHistory.js';
 import { bloodThinnerText, bpStatus } from '../medFlags.js';
 import { sortedByName } from '../patientSort.js';
 
@@ -180,8 +180,8 @@ export function renderRecords(ctx, params = {}) {
           el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Medical history']),
             el('div', { class: 'kv-grid' }, [
-              kv('Under care', p.medical_history.under_treatment), kv('Hospitalized', p.medical_history.hospitalized),
-              kv('Tobacco', p.medical_history.tobacco), kv('Pregnancy', p.medical_history.pregnancy),
+              kv('Under care', historyAnswer(p.medical_history.under_treatment)), kv('Hospitalized', historyAnswer(p.medical_history.hospitalized)),
+              kv('Tobacco', historyAnswer(p.medical_history.tobacco)), kv('Pregnancy', historyAnswer(p.medical_history.pregnancy)),
             ]),
             el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Vitals']), recVitals(p)]),
             el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Blood thinner']), recThinner(p)]),
