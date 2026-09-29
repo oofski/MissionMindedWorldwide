@@ -4571,7 +4571,8 @@ async function main() {
 
     // MMW's one number, everywhere a patient could read it.
     const PHONE = '(951) 317-4968';
-    const { CATALOG: catalog } = await import('../src/renderer/i18n/strings.js');
+    const stD = await import('../src/renderer/i18n/strings.js');
+    const catalog = stD.CATALOG;
     log(ac.CONTACT.phone === PHONE && readSrcA('../src/main/main.js').includes(`Telephone: ${PHONE}`)
       && readSrcA('../cloud/worker.js').includes(PHONE) && catalog.en.consent.oralSurgeryFull.join(' ').includes(PHONE),
       'after-care: the sheet prints the same MMW number as the About box, the consent and the online form');
@@ -4627,6 +4628,20 @@ async function main() {
       && /reline/.test(secItems({ restorative: { denture: { on: true, action: 'reline' } } }, 'denture'))
       && !/New dentures|reline/.test(secItems({ restorative: { denture: { on: true, action: 'repair' } } }, 'denture')),
       'after-care: a core build-up says the crown is still needed; a new or relined denture gets its own advice');
+    // Pinned to the lists the dentist and hygienist actually pick from, so an
+    // option added there cannot silently send a patient home with nothing.
+    const optKeys = (src, name) => [...(src.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\n\\];`)) || ['', ''])[1]
+      .matchAll(/\['([a-z_]+)',/g)].map((m) => m[1]);
+    const provSrc = readSrcA('../src/renderer/js/views/provider.js');
+    const extTypes = optKeys(provSrc, 'EXTRACTION_TYPES');
+    log(extTypes.length === 5 && extTypes.every((k) => same(keysOf({ extractions: [{ tooth: '2', types: [k] }] }),
+      k === 'simple' ? ['extraction'] : ['extraction', 'extraction_surgical'])),
+      'after-care: every extraction type on the dentist\'s screen is classified — anything beyond "Simple" gets the surgical care');
+    const cleanOpts = [...new Set([...optKeys(provSrc, 'CLEANING_OPTS'), ...optKeys(readSrcA('../src/renderer/js/views/hygienist.js'), 'CLEANING_OPTS')])];
+    log(cleanOpts.length >= 6 && cleanOpts.every((k) => keysOf({ cleaning: { [k]: true } }).length > 0),
+      'after-care: every cleaning option on the dentist\'s and hygienist\'s screens gets cleaning care');
+    log(ac.LONG_ACTING_ANESTHETICS.every((k) => stD.ANESTHETICS.some((a) => a.key === k)),
+      'after-care: the long-acting agents are keys of the clinic\'s anaesthetic list');
     log(same(keysOf({ extractions: '[{"tooth":"3"}]', cleaning: '{"adult_prophy":true}' }), ['extraction', 'cleaning'])
       && same(keysOf({ extractions: '{not json', restorative: 'null', services: '{}' }), []) && same(keysOf(null), []),
       'after-care: a raw stored row, or a damaged value, is read without failing');

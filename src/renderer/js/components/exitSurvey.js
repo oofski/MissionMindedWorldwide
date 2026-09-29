@@ -148,7 +148,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
         control = sel.input;
       }
 
-      return el('div', { class: 'survey-q', id: `q-${q.key}`, dataset: { type: q.type } }, [
+      return el('div', { class: 'survey-q', id: `q-${q.key}` }, [
         el('div', { class: 'survey-q-head' }, [
           el('span', { class: 'survey-q-text' }, [q[L] || q.en]),
           el('span', { class: 'survey-q-opt' }, [t.optional]),
