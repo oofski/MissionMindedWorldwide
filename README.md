@@ -40,7 +40,7 @@ patient's wristband rather than searching for a name:
 | 2 | **Medical Clearance** | Scan the band. Blood pressure, blood sugar, pulse, respiration; allergies, medications, medical history. Routes to cleaning or x-ray. |
 | 3 | **X-ray / Triage** | Scan the band. Number of films, and what is needed — cleaning, extraction, root canal, filling, referral. |
 | 4 | **Dental Treatment** | Odontogram, fillings by surface, extractions (simple / surgical), cleaning, anaesthetic, signed treatment note. |
-| 5 | **Check-out** | Visit summary, record export, and the patient leaves. |
+| 5 | **Check-out** | The grant exit survey (all 34 questions, in one sitting), printed **after-care instructions** for the procedures actually done, the visit summary, and the patient leaves. |
 
 Reporting keeps **de-identified event totals** that survive a patient-data
 purge, so a clinic can answer a grant return after the records are gone.
@@ -134,8 +134,11 @@ Mirrors the six modules of the product map:
    log** (Lidocaine, Articaine, …), clinical notes, and a provider **sign-off
    that locks the record**.
 4. **Reporting & Export** — **PDF Progress Note** and **full-packet PDF** that
-   match the CHW form, on-screen preview, print to a local wireless printer,
-   "screen display" mode for the patient to photograph, and email hand-off.
+   match the CHW form, a patient **visit summary**, and a one-page
+   **after-care sheet** chosen from the procedures performed and printed in the
+   patient's language (the templates live in `src/main/aftercare.js`); on-screen
+   preview, print to a local wireless printer, "screen display" mode for the
+   patient to photograph, and email hand-off.
 5. **Admin & Settings** — roles (Admin / Doctor / Triage), staff management,
    **event creation & patient grouping**, language-pack overview, backup, and an
    **audit log**.
@@ -181,7 +184,8 @@ src/main/               Electron main process
   preload.js            Secure context-bridge IPC API
   db.js                 SQLite schema, repositories, auth (scrypt)
   ipc.js                IPC handlers + role-based access control
-  pdf.js                Progress Note / full-packet PDF rendering
+  pdf.js                Progress Note / full-packet / summary / after-care PDFs
+  aftercare.js          After-care templates (en + es) and the rules that pick them
 src/renderer/           UI (vanilla ES modules, no bundler)
   index.html
   styles/               Design system (theme + components)

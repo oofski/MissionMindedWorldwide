@@ -69,6 +69,7 @@ const PERMS = {
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
   'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
+  'aftercareGet': ['admin', 'doctor', 'checkout', 'hygienist'],
   'inventoryList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryMove': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -128,6 +129,7 @@ window.api = {
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
   triageSave: okWrap(({ patientId, data }) => db.saveTriage(currentUser, patientId, data), 'triageSave'),
   surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data), 'surveySave'),
+  aftercareGet: okWrap(({ patientId, lang }) => require('../src/main/aftercare.js').aftercareSections(db.getPatient(patientId), lang), 'aftercareGet'),
   inventoryList: okWrap(({ eventId } = {}) => db.listInventory({ eventId }), 'inventoryList'),
   inventoryGet: okWrap(({ id }) => db.getInventoryItem(id), 'inventoryGet'),
   inventorySave: okWrap(({ data }) => db.saveInventoryItem(currentUser, data), 'inventorySave'),
@@ -4527,6 +4529,242 @@ async function main() {
       'Reports: split-era records keep their registration line, with no "not asked" figure');
     repS.remove();
     if (evBefore) db.setActiveEvent(currentUser, evBefore);
+  }
+
+  /* ===== After-care: what the patient takes home ============================
+     "Report — add follow-up care instructions ... dependent on the type of
+     procedure that was performed." The sections are chosen from what the
+     dentist RECORDED as done — never from the visit type booked at check-in —
+     from every shape an older record stores; the sheet prints in the patient's
+     language with an English fallback that says so; and every copy carries its
+     template version, because the wording is a draft until MMW's arrives. */
+  {
+    currentUser = signInAdmin();
+    const ac = require('../src/main/aftercare.js');
+    const pdfA = require('../src/main/pdf.js');
+    const fsA = require('node:fs');
+    const readSrcA = (rel) => fsA.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const plainA = (html) => html.replace(/<style>[\s\S]*?<\/style>/, ' ').replace(/<[^>]+>/g, ' ')
+      .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+    const P = (treatment, extra = {}) => ({
+      first_name: 'Ana', last_name: 'Cuidado', dob: '1980-02-03', language: 'en', status: 'completed',
+      medical_history: {}, dental_history: {}, triage: {}, consents: [], treatment, ...extra,
+    });
+    const keysOf = (t) => ac.aftercareKeys(t);
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const T = ac.TEMPLATES;
+
+    // The templates: one per procedure, both languages, line for line.
+    log(same(Object.keys(T), ['extraction', 'extraction_surgical', 'anesthetic', 'filling', 'temporary_filling',
+      'crown_bridge', 'pulpotomy', 'denture', 'deep_cleaning', 'cleaning', 'fluoride', 'sealant', 'referral', 'general']),
+      'after-care: one template per procedure, in print order, with the general advice last');
+    log(Object.values(T).every((tp) => tp.title.en && tp.title.es && tp.items.en.length && tp.items.es.length === tp.items.en.length
+      && Object.values(tp.variants || {}).every((v) => v.en.length && v.es && v.es.length === v.en.length)),
+      'after-care: every template and variant is written in English and Spanish, line for line');
+    log(ac.AFTERCARE_VERSION === 'mmw-aftercare-v1-draft' && Object.values(T).every((tp) => tp.status === 'draft'),
+      'after-care: the wording is versioned as a draft until MMW\'s own templates replace it');
+    const allText = Object.values(T).flatMap((tp) => [...Object.values(tp.title), ...Object.values(tp.items).flat(),
+      ...Object.values(tp.variants || {}).flatMap((v) => Object.values(v).flat())]);
+    log(allText.every((x) => typeof x === 'string' && !/[<>]/.test(x)), 'after-care: the templates are plain text, never markup');
+    log(allText.every((x) => !/\{(?!phone\}|to\}|tooth\}|reason\})[^}]*\}/.test(x)),
+      'after-care: the templates use only the placeholders the page knows how to fill');
+
+    const PHONE = '(951) 317-4968';
+
+    // What was performed decides the sections.
+    log(same(keysOf({ extractions: [{ tooth: '30', types: ['simple'] }] }), ['extraction']),
+      'after-care: a simple extraction gets the extraction instructions');
+    log(same(keysOf({ extractions: [{ tooth: '17', types: ['impact_bony'] }] }), ['extraction', 'extraction_surgical'])
+      && same(keysOf({ extractions: [{ tooth: '1', type: 'surgical' }] }), ['extraction', 'extraction_surgical'])
+      && same(keysOf({ services: { alveoplasty: '1' } }), ['extraction', 'extraction_surgical']),
+      'after-care: a surgical or impacted extraction (or an alveoplasty) adds the surgical care — the early single "type" included');
+    log(same(keysOf({ extractions: [{ tooth: '', types: [], other: 'Root fragment, UL' }] }), ['extraction'])
+      && same(keysOf({ extractions: [{ other: true }] }), []),
+      'after-care: an extraction typed as "Other" still gets instructions; an early bare marker with nothing recorded does not');
+    log(same(keysOf({ fillings: [{ tooth: '14', surfaces: ['M', 'O'] }] }), ['filling'])
+      && same(keysOf({ fillings: [{ tooth: '' }] }), []),
+      'after-care: a filling with a tooth gets filling care; an empty row does not');
+    log(same(keysOf({ cleaning: { teeth: [], quad_detail: '' } }), []) && same(keysOf({ cleaning: { teeth: '1,2', quad_detail: 'UR' } }), []),
+      'after-care: the chart\'s tapped teeth and quadrant note are not a cleaning (the report counters\' rule)');
+    log(same(keysOf({ cleaning: { adult_prophy: true } }), ['cleaning'])
+      && same(keysOf({ cleaning: { scaling: true } }), ['deep_cleaning'])
+      && same(keysOf({ cleaning: { quad_deep_scaling: true, adult_prophy: true, quad_detail: 'UR' } }), ['deep_cleaning'])
+      && same(keysOf({ cleaning: { adult_prophy: true, adult_fluoride: true, sealant: true } }), ['cleaning', 'fluoride', 'sealant'])
+      && same(keysOf({ cleaning: { fluoride: true } }), ['cleaning', 'fluoride']),
+      'after-care: cleaning, deep cleaning, fluoride and sealants each get their own care — early "scaling" and "fluoride" keys included');
+    log(same(keysOf({ anesthetic: [{ agent: 'lidocaine', carps: '2', tooth: '30' }] }), ['anesthetic'])
+      && same(keysOf({ anesthetic: { articaine: { carps: '1' } } }), ['anesthetic'])
+      && same(keysOf({ anesthetic: [] }), []),
+      'after-care: any anaesthetic given — the early object shape included — gets the numbness advice');
+    const longTxt = (t) => ac.aftercareSections(P(t), 'en').sections.find((s) => s.key === 'anesthetic').items.join(' ');
+    log(/up to 12 hours/.test(longTxt({ anesthetic: [{ agent: 'bupivacaine', carps: '1' }] }))
+      && /up to 12 hours/.test(longTxt({ anesthetic: { bupivacaine: { carps: '2' } } }))
+      && !/up to 12 hours/.test(longTxt({ anesthetic: [{ agent: 'lidocaine', carps: '1' }] })),
+      'after-care: a long-acting anaesthetic (bupivacaine) adds the longer-numbness warning, and only then');
+    log(same(keysOf({ services: { pulpotomy: '1', irm: '2', buccal: '3', alveoplasty: '0' } }), ['temporary_filling', 'pulpotomy'])
+      && same(keysOf({ services: { pulpotomy: '', irm: '0' } }), []),
+      'after-care: the retired Services counts still count on the records that have them ("0" and "" mean not done)');
+    log(same(keysOf({ restorative: { recement: { on: true, tooth: '8' } } }), ['crown_bridge'])
+      && same(keysOf({ restorative: { bridge: { on: true, action: 'repair' } } }), ['crown_bridge'])
+      && same(keysOf({ restorative: { denture: { on: false } } }), []),
+      'after-care: a re-cemented crown or a bridge gets crown-and-bridge care');
+    const secItems = (t, key, lang = 'en') => ((ac.aftercareSections(P(t), lang).sections.find((s) => s.key === key) || {}).items || []).join(' ');
+    log(/core build-up/.test(secItems({ restorative: { core_buildup: { on: true, tooth: '19' } } }, 'filling'))
+      && /New dentures/.test(secItems({ restorative: { denture: { on: true, kind: 'full', action: 'new' } } }, 'denture'))
+      && /reline/.test(secItems({ restorative: { denture: { on: true, action: 'reline' } } }, 'denture'))
+      && !/New dentures|reline/.test(secItems({ restorative: { denture: { on: true, action: 'repair' } } }, 'denture')),
+      'after-care: a core build-up says the crown is still needed; a new or relined denture gets its own advice');
+    log(same(keysOf({ extractions: '[{"tooth":"3"}]', cleaning: '{"adult_prophy":true}' }), ['extraction', 'cleaning'])
+      && same(keysOf({ extractions: '{not json', restorative: 'null', services: '{}' }), []) && same(keysOf(null), []),
+      'after-care: a raw stored row, or a damaged value, is read without failing');
+
+    // Never keyed on what was PLANNED: booked for an extraction, given a filling.
+    const planned = P({ fillings: [{ tooth: '3' }] }, {
+      dental_history: { visit_type: 'extraction_pain', may_need_extraction: 'yes' },
+      consents: [{ type: 'oral_surgery', signer_name: 'Ana', tooth_numbers: '3' }],
+    });
+    log(same(ac.aftercareSections(planned, 'en').keys, ['filling']),
+      'after-care: a patient booked for an extraction who had a filling gets filling care, not extraction care');
+
+    // The referral reads treatments.referral_out, never "how did you hear about us".
+    const refT = { referral_out: { to: ['endodontist', 'other'], to_other: 'Clínica Sandy', urgency: 'urgent', tooth: '19', reason: 'Needs a root canal' } };
+    const refEn = secItems(refT, 'referral');
+    const refEs = secItems(refT, 'referral', 'es');
+    log(/Endodontist \(root canal\), Clínica Sandy/.test(refEn) && /Tooth: #19/.test(refEn) && /Needs a root canal/.test(refEn) && /urgent/.test(refEn),
+      'after-care: a referral names where to go, the tooth, the dentist\'s reason and how urgently');
+    log(/Endodoncista/.test(refEs) && /Esto es urgente/.test(refEs),
+      'after-care: in Spanish, the destinations and the urgency are Spanish too');
+    log(!/Tooth:|Reason/.test(secItems({ referral_out: { to: ['physician'], urgency: 'routine', tooth: '', reason: '' } }, 'referral'))
+      && same(keysOf({ referral_out: { to: [], to_other: '', urgency: 'urgent', reason: 'x' } }), [])
+      && same(keysOf({ referral_out: null }), [])
+      && same(keysOf({ referral_out: { to: ['physician'], urgency: 'constructor' } }), ['referral']),
+      'after-care: blank referral details are left out; a referral with no destination is no referral; an unknown urgency adds nothing');
+    log(same(keysOf({}), []) && ac.aftercareSections(P({}), 'en').sections.map((s) => s.key).join() === 'general',
+      'after-care: with nothing performed, the sheet carries only the general advice');
+
+    // The pages.
+    const extP = P({ extractions: [{ tooth: '30', types: ['simple'] }], anesthetic: [{ agent: 'lidocaine', carps: '2' }], provider_name: 'Dr. K' },
+      { event: { name: 'Sandy Clinic' } });
+    const sumH = pdfA.buildHtml(extP, 'summary');
+    const acH = pdfA.buildHtml(extP, 'aftercare');
+    log(/After a tooth extraction/.test(plainA(sumH)) && sumH.includes(PHONE) && /After a tooth extraction/.test(plainA(acH)) && acH.includes(PHONE),
+      'after-care: the visit summary and the after-care sheet both carry the extraction care and MMW\'s number');
+    log(sumH.indexOf('Confidential Patient Record') < sumH.indexOf('After-Care Instructions')
+      && /<div class="pagebreak"><\/div>\s*<div class="aftercare"/.test(sumH),
+      'after-care: on the summary it is its own page, after the record\'s footer');
+    log(/Patient copy/.test(plainA(acH)) && plainA(acH).includes(ac.AFTERCARE_VERSION) && !/Confidential Patient Record/.test(acH),
+      'after-care: the sheet\'s footer says "Patient copy" and carries the template version');
+    log(!/Medical History|Vitals|X-Rays|Allergies|Procedures Performed|Progress Note/.test(plainA(acH)) && /Cuidado/.test(plainA(acH)) && /1980-02-03/.test(acH),
+      'after-care: the sheet carries the name, date of birth and instructions — no medical record');
+    log(/After a tooth extraction/.test(plainA(pdfA.buildHtml(extP, 'full'))),
+      'after-care: the full record ends with the same page');
+    const progH = plainA(pdfA.buildHtml(extP, 'progress'));
+    log(/After-care given: After a tooth extraction; Numbness; If you have a problem \(mmw-aftercare-v1-draft, English\)/.test(progH)
+      && !/After-Care Instructions/.test(progH),
+      'after-care: the progress note records which sheet applied (sections, version, language) without printing it');
+
+    // Language.
+    const esH = plainA(pdfA.buildHtml({ ...extP, language: 'es' }, 'aftercare'));
+    log(/Instrucciones de cuidado/.test(esH) && /Después de una extracción dental/.test(esH) && /Copia del paciente/.test(esH) && !/not yet available/.test(esH),
+      'after-care: a Spanish-speaking patient gets the sheet in Spanish');
+    log(/After a tooth extraction/.test(plainA(pdfA.buildHtml({ ...extP, language: 'es' }, 'aftercare', { lang: 'en' }))),
+      'after-care: "Print in English" prints it in English for the same patient');
+    const ruH = plainA(pdfA.buildHtml({ ...extP, language: 'ru' }, 'aftercare'));
+    log(/After a tooth extraction/.test(ruH) && /in English because they are not yet available in Russian/.test(ruH),
+      'after-care: a language with no version yet gets English, and the sheet says why');
+    log(/Después de una extracción dental/.test(plainA(pdfA.buildHtml({ ...extP, language: 'es' }, 'summary')))
+      && /Patient Summary/.test(plainA(pdfA.buildHtml({ ...extP, language: 'es' }, 'summary'))),
+      'after-care: the summary\'s record stays English while its after-care page is in the patient\'s language');
+
+    // When the page is left off: nothing to describe yet.
+    const bare = (t, status) => P(t, { status });
+    log(!/After-Care Instructions|After-care given/.test(pdfA.buildHtml(bare(null, 'checked_in'), 'full'))
+      && !/After-Care Instructions/.test(pdfA.buildHtml(bare(null, 'triaged'), 'summary')),
+      'after-care: a record printed before any treatment (the check-in USB, the Vitals queue summary) has no after-care page');
+    log(!/After-Care Instructions/.test(pdfA.buildHtml(bare({ clinical_notes: 'x' }, 'in_treatment'), 'summary'))
+      && /If you have a problem/.test(plainA(pdfA.buildHtml(bare({ clinical_notes: 'x' }, 'completed'), 'summary'))),
+      'after-care: a finished visit with no procedure recorded still sends the patient home with the general advice');
+    log(/If you have a problem/.test(plainA(pdfA.buildHtml(bare(null, 'checked_in'), 'aftercare'))),
+      'after-care: printed on its own, the sheet always has at least the general advice');
+
+    // Patient text is escaped on the sheet.
+    const xss = pdfA.buildHtml(P({ referral_out: { to: ['other'], to_other: '<img src=x onerror=alert(1)>', reason: '"><script>alert(1)</script>' } },
+      { first_name: '<b>Eve</b>' }), 'aftercare');
+    log(!/<script>|<img src=x|<b>Eve/.test(xss) && /&lt;script&gt;/.test(xss),
+      'after-care: typed referral text and the patient\'s name are escaped, never run as markup');
+    log(pdfA.buildHtml(extP, 'summary').indexOf('<div class="val">na</div>') === -1, 'after-care: no raw code reaches the page');
+
+    // The plumbing: the channel exists end to end and is not open to everyone.
+    const ipcSrc = readSrcA('../src/main/ipc.js');
+    log(/'aftercare:get': \['admin', 'doctor', 'checkout', 'hygienist'\]/.test(ipcSrc)
+      && readSrcA('../src/main/preload.js').includes("'aftercare:get'") && /aftercareGet: \(patientId, lang\) =>/.test(readSrcA('../src/renderer/js/api.js')),
+      'after-care: aftercare:get is permissioned in ipc.js, whitelisted in preload and exposed by api.js');
+    log(/summary: 'VisitSummary'/.test(ipcSrc) && /aftercare: 'AfterCare'/.test(ipcSrc) && /full: 'FullRecord'/.test(ipcSrc),
+      'after-care: a saved summary is named VisitSummary (not ProgressNote), and the sheet AfterCare');
+
+    // Check-out: the block, its buttons, and no gate on dismissal.
+    const evPrev = (db.listEvents().find((e) => e.active) || {}).id;
+    const evA = db.createEvent(currentUser, { name: 'After-care Clinic' });
+    db.setActiveEvent(currentUser, evA.id);
+    const pA = db.createPatient(currentUser, {
+      first_name: 'Ester', last_name: 'Salida', dob: '1975-05-05', gender: 'female', language: 'es',
+      demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
+      consents: [{ type: 'general', signer_name: 'E', signature_png: 'data:image/png;base64,AAAA' }],
+    });
+    db.saveVitals(currentUser, pA.id, { bp_systolic: '120', bp_diastolic: '78', heart_rate: '70' });
+    db.routePatient(currentUser, pA.id, 'dentist');
+    db.saveTreatment(currentUser, pA.id, { extractions: [{ tooth: '30', types: ['surgical'] }], anesthetic: [{ agent: 'lidocaine', carps: '2' }], provider_name: 'Dr. K' }, true);
+    db.saveExitSurvey(currentUser, pA.id, { stage: 'exit', declined: true });
+    const calls = [];
+    const origPrint = window.api.pdfPrint, origPreview = window.api.pdfPreview;
+    window.api.pdfPrint = async (payload) => { calls.push(['print', payload]); return origPrint(payload); };
+    window.api.pdfPreview = async (payload) => { calls.push(['preview', payload]); return origPreview(payload); };
+    const storeA2 = (await import('../src/renderer/js/store.js')).store; storeA2.setUser(currentUser);
+    const coA = (await import('../src/renderer/js/views/checkout.js')).renderCheckout({ navigate: () => {}, toast: () => {}, store: storeA2, setDetail: () => {} }, { id: pA.id });
+    document.body.append(coA);
+    for (let i = 0; i < 10; i++) await tick();
+    const chipKeysA = Array.from(coA.querySelectorAll('.aftercare-chips [data-key]')).map((x) => x.dataset.key);
+    log(same(chipKeysA, ['extraction', 'extraction_surgical', 'anesthetic', 'general']),
+      'check-out: the After-care block lists the sections for what was done');
+    log(/After a tooth extraction/.test(coA.textContent) && /Prints in Spanish/.test(coA.textContent) && /Draft wording/.test(coA.textContent),
+      'check-out: the desk sees the sections in English, which language it prints in, and that the wording is a draft');
+    const btnA = (re) => Array.from(coA.querySelectorAll('button')).find((b) => re.test(b.textContent));
+    btnA(/^Print after-care$/).click();
+    await tick();
+    btnA(/^Print in English$/).click();
+    await tick();
+    log(same(calls.filter((c) => c[0] === 'print').map((c) => [c[1].patientId, c[1].format, c[1].lang]), [[pA.id, 'aftercare', 'es'], [pA.id, 'aftercare', 'en']]),
+      'check-out: "Print after-care" prints the sheet in the patient\'s language, "Print in English" in English');
+    btnA(/^Preview$/).click();
+    for (let i = 0; i < 4; i++) await tick();
+    const prevCard = Array.from(document.querySelectorAll('.modal-card')).find((m) => /After-care instructions/.test(m.textContent));
+    log(calls.some((c) => c[0] === 'preview' && c[1].format === 'aftercare' && c[1].lang === 'es') && !!prevCard && !!prevCard.querySelector('iframe.pdf-frame'),
+      'check-out: Preview shows the sheet in a window before anything is printed');
+    if (prevCard) Array.from(prevCard.querySelectorAll('button')).pop().click();
+    await tick();
+    const dismissBtn = btnA(/Verify & dismiss patient/);
+    log(!!dismissBtn && !dismissBtn.disabled,
+      'check-out: printing after-care is optional — dismissal is not held for it');
+    log(/Visit summary \+ after-care PDF/.test(coA.textContent), 'check-out: the summary button says the after-care comes with it');
+    coA.remove();
+    window.api.pdfPrint = origPrint; window.api.pdfPreview = origPreview;
+
+    // An English patient sees no "Print in English"; a lookup that fails never blanks the screen.
+    const pB = db.createPatient(currentUser, {
+      first_name: 'Earl', last_name: 'Nada', language: 'en', demographics: {}, medical_history: {}, dental_history: {},
+    });
+    const origGet = window.api.aftercareGet;
+    window.api.aftercareGet = async () => ({ ok: false, error: 'boom' });
+    const coB = (await import('../src/renderer/js/views/checkout.js')).renderCheckout({ navigate: () => {}, toast: () => {}, store: storeA2, setDetail: () => {} }, { id: pB.id });
+    document.body.append(coB);
+    for (let i = 0; i < 10; i++) await tick();
+    const engB = Array.from(coB.querySelectorAll('button')).find((b) => /^Print in English$/.test(b.textContent));
+    log(/Earl Nada/.test(coB.textContent) && /Could not list the instructions/.test(coB.textContent) && !!Array.from(coB.querySelectorAll('button')).find((b) => /^Print after-care$/.test(b.textContent)),
+      'check-out: if the sections cannot be listed, the screen still opens and printing is still offered');
+    log(!engB || engB.style.display === 'none', 'check-out: an English-speaking patient is not offered "Print in English"');
+    coB.remove();
+    window.api.aftercareGet = origGet;
+    if (evPrev) db.setActiveEvent(currentUser, evPrev);
   }
 
   /* ===== C1 + C4 — age, race, and how the waiver was signed ==================

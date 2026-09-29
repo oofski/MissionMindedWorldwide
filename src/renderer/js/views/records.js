@@ -283,6 +283,9 @@ export function renderRecords(ctx, params = {}) {
         el('div', { class: 'collapse-body action-stack' }, [
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'progress')) }, [icon('clipboard', { size: 16 }), 'Progress note PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'summary')) }, [icon('user', { size: 16 }), 'Patient summary PDF']),
+          // The after-care sheet on its own, in the patient's language — for a
+          // patient who lost theirs, or a record amended after they left.
+          el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'aftercare')) }, [icon('clipboard', { size: 16 }), 'After-care instructions PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => preview(id) }, [icon('eye', { size: 16 }), 'Preview PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfPrint(id, 'full')) }, [icon('print', { size: 16 }), 'Print']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => screenDisplay(p) }, [icon('phone', { size: 16 }), 'Screen display for photo']),

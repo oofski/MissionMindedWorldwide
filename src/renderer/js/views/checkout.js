@@ -1,5 +1,5 @@
 import { el, clear, mount, toast, modal } from '../dom.js';
-import { t } from '../i18n.js';
+import { t, languageList } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { statusPill } from './dashboard.js';
@@ -184,11 +184,14 @@ export function renderCheckout(ctx, params = {}) {
                 // moved back to check-out in one piece.
                 surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, [`${SURVEY_QUESTIONS.length} questions for MMW\u2019s grant reporting. Anything the patient already answered at registration is filled in for them to check. The patient can decline inside.`]),
               ]),
+              aftercareBlock(p),
               // Optional artefacts, grouped and de-emphasised so they read as
               // secondary to the single primary action below.
               el('div', { class: 'action-stack' }, [
                 el('span', { class: 'field-label' }, ['Before dismissing (optional)']),
-                el('button', { class: 'btn btn--ghost btn--block', onClick: async () => { try { const r = await api.pdfGenerate(id, 'summary'); if (r && r.saved) toast('Saved: ' + r.path, 'success'); } catch (e) { toast(e.message, 'error'); } } }, [icon('save', { size: 16 }), 'Patient summary PDF']),
+                // The summary ends with the after-care page, so saving or
+                // emailing it hands the patient their instructions too.
+                el('button', { class: 'btn btn--ghost btn--block', onClick: async () => { try { const r = await api.pdfGenerate(id, 'summary'); if (r && r.saved) toast('Saved: ' + r.path, 'success'); } catch (e) { toast(e.message, 'error'); } } }, [icon('save', { size: 16 }), 'Visit summary + after-care PDF']),
                 p.email
                   ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => emailSummary(p) }, [icon('mail', { size: 16 }), 'Email summary to patient'])
                   : el('div', {}, [
@@ -205,6 +208,56 @@ export function renderCheckout(ctx, params = {}) {
         ]),
       ]),
     );
+  }
+
+  // After-care: the instructions the patient takes home, chosen from what was
+  // done at the chair (src/main/aftercare.js), printed in the patient's own
+  // language when there is a version in it. Printing is optional and never
+  // stands between the desk and "Verify & dismiss": the survey already holds
+  // the desk, and a printer out of paper must not hold a patient.
+  //
+  // The list of sections is fetched after the card is drawn and a failure only
+  // says so, so a slow or refused lookup can never blank the check-out screen.
+  function aftercareBlock(p) {
+    const lang = p.language || 'en';
+    const langName = (code) => ((languageList().find((l) => l.code === code) || {}).label || code);
+    const chips = el('div', { class: 'chip-row aftercare-chips' }, [el('span', { class: 'view-sub' }, ['Checking what was done…'])]);
+    const note = el('p', { class: 'view-sub', style: 'margin-top:2px' });
+    // Offered only when the sheet would otherwise print in another language —
+    // for a patient whose language has no version yet it prints in English
+    // anyway, and a second button doing the same would only confuse.
+    const englishBtn = el('button', { class: 'btn btn--ghost btn--block', style: lang === 'en' ? 'display:none' : null, onClick: () => printAftercare(p, 'en') }, [icon('print', { size: 16 }), 'Print in English']);
+    api.aftercareGet(p.id, lang).then((ac) => {
+      chips.replaceChildren(...ac.sections.map((x) => el('span', { class: 'pill pill--info', dataset: { key: x.key } }, [x.title_en])));
+      note.textContent = [
+        ac.keys.length ? '' : 'No procedure is recorded for this visit, so the sheet carries only the general advice.',
+        ac.fellBack ? `Prints in English: there is no ${langName(ac.requested)} version yet.` : ac.lang !== 'en' ? `Prints in ${langName(ac.lang)}, the patient’s language.` : '',
+        ac.status === 'draft' ? `Draft wording (${ac.version}) until MMW’s own templates replace it.` : '',
+      ].filter(Boolean).join(' ');
+      englishBtn.style.display = ac.lang !== 'en' ? '' : 'none';
+    }).catch(() => {
+      chips.replaceChildren(el('span', { class: 'view-sub' }, ['Could not list the instructions here — Preview shows the sheet.']));
+    });
+    return el('div', { class: 'action-stack' }, [
+      el('span', { class: 'field-label' }, ['After-care instructions']),
+      chips,
+      note,
+      el('button', { class: 'btn btn--ghost btn--block', onClick: () => printAftercare(p, lang) }, [icon('print', { size: 16 }), 'Print after-care']),
+      englishBtn,
+      el('button', { class: 'btn btn--ghost btn--block', onClick: () => previewAftercare(p, lang) }, [icon('eye', { size: 16 }), 'Preview']),
+    ]);
+  }
+
+  async function printAftercare(p, lang) {
+    try { const r = await api.pdfPrint(p.id, 'aftercare', lang); if (r && r.printed) toast('After-care sent to the printer', 'success'); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function previewAftercare(p, lang) {
+    try {
+      const dataUrl = await api.pdfPreview(p.id, 'aftercare', lang);
+      await modal({ title: 'After-care instructions', body: el('iframe', { class: 'pdf-frame', src: dataUrl }), confirmText: t('common.close') });
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   // Hand the device over. Resolves to the saved survey, or null if it was
@@ -239,10 +292,18 @@ export function renderCheckout(ctx, params = {}) {
       body: `This saves the summary PDF and opens your email program addressed to <b>${p.email}</b>. Attach the saved PDF before sending.`,
     });
     if (!ok) return;
+    // The message goes to the patient, so it is in their language where the
+    // after-care sheet is (the same rule as the survey); the PDF carries the
+    // instructions themselves.
+    const es = p.language === 'es';
+    const subject = es ? 'Su resumen de la visita a Mission Minded' : 'Your Mission Minded visit summary';
+    const body = es
+      ? 'Adjunto está el resumen de su visita a Mission Minded Worldwide, con sus instrucciones de cuidado.'
+      : 'Your visit summary from Mission Minded Worldwide is attached, with your after-care instructions.';
     try {
       const r = await api.pdfGenerate(p.id, 'summary');
       if (r && r.saved) {
-        await api.openExternal(`mailto:${encodeURIComponent(p.email)}?subject=${encodeURIComponent('Your Mission Minded visit summary')}&body=${encodeURIComponent('Your visit summary from Mission Minded Worldwide is attached.')}`);
+        await api.openExternal(`mailto:${encodeURIComponent(p.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
         toast('Summary saved — attach it in your email program.', 'success');
       }
     } catch (e) { toast(e.message, 'error'); }
