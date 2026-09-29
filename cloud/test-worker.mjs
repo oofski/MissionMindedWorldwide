@@ -492,7 +492,8 @@ async function main() {
       city: 'Sandy', state: 'OR', visit_type: 'cleaning', prior_dentist: 'a while ago',
       consent_agree: true, signer_name: 'Junk Dent', signature_png: 'data:image/png;base64,AAAA' },
   });
-  check('C2: a free-text last-dental-visit posted straight to the endpoint is rejected', junkDent.status === 400);
+  check('C2: a free-text last-dental-visit posted straight to the endpoint is rejected, naming the question',
+    junkDent.status === 400 && /When did you last see a dentist\?/.test(junkDent.data.error));
 
   // The general consent must be written as a consent row bound to that patient.
   const gConsent = Array.from(env.DB._store.values()).find((r) => r.entity === 'consent' && r.patient_uid === stored.uid && JSON.parse(r.data).type === 'general');

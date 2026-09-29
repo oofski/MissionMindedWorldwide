@@ -397,12 +397,6 @@ async function handleCheckinPost(eventUid, request, env) {
     if (missing) {
       return json({ ok: false, error: L.errMedical.replace(/\.$/, '') + ': ' + historyQuestion(missing, L) }, 400);
     }
-    // Same gate as the walk-in form. Without it a blank stores as '' and lands
-    // in the report as an uncountable row, which is the thing making this a
-    // dropdown was meant to stop.
-    if (!clean.dental_history.prior_dentist) {
-      return json({ ok: false, error: esErr ? 'Por favor indique cuándo visitó al dentista por última vez.' : 'Please choose when you last saw a dentist.' }, 400);
-    }
     // Required at the kiosk, so required here: it decides who the patient sees
     // and whether the oral-surgery consent is needed.
     if (!clean.dental_history.visit_type) return json({ ok: false, error: L.errVisit }, 400);
@@ -621,7 +615,7 @@ function conditionAnswerOk(k, v) {
 
 // The first required answer a history is missing, in the order the form asks
 // them, or null. Mirrors firstMissingMedical in src/renderer/js/medicalHistory.js
-// (ids included), then Step 3's eight questions as 'dental:<key>'.
+// (ids included), then Step 3: 'prior_dentist' and 'dental:<key>'.
 function firstMissingHistory(mh, dh) {
   const m = mh || {};
   const yesNo = (v) => v === 'yes' || v === 'no';
@@ -638,7 +632,11 @@ function firstMissingHistory(mh, dh) {
     if (!picked.length) return 'allergies';
     if (picked.includes('other') && !m.allergies_other) return 'allergies_other';
   }
+  // Then Step 3 in its order: when they last saw a dentist (a blank, or a
+  // free-text value posted straight to the endpoint, stores as '' and would be
+  // a report row nothing can count), then the eight questions.
   const d = dh || {};
+  if (!d.prior_dentist) return 'prior_dentist';
   for (const [k] of FORM_DENTAL_YESNO) if (!yesNo(d[k])) return 'dental:' + k;
   return null;
 }
@@ -647,7 +645,7 @@ function historyQuestion(id, L) {
   const find = (list, key) => ((list.find(([k]) => k === key) || [])[1] || key);
   if (id.startsWith('condition:')) return find(L.conditionList, id.slice(10));
   if (id.startsWith('dental:')) return find(L.dentalYesNo, id.slice(7));
-  const plain = { medications: L.meds, surgery_sites: L.surgerySites, allergy_status: L.allergyQ, allergies: L.allergies, allergies_other: L.allergyOther };
+  const plain = { medications: L.meds, surgery_sites: L.surgerySites, allergy_status: L.allergyQ, allergies: L.allergies, allergies_other: L.allergyOther, prior_dentist: L.priorDentist };
   return plain[id] || find(L.medYesNo, id);
 }
 
