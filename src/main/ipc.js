@@ -116,8 +116,9 @@ const PERMS = {
   'pdf:preview': ['admin', 'doctor', 'checkout'],
   'pdf:print': ['admin', 'doctor', 'checkout'],
   // The after-care sections for one patient, listed on the check-out screen
-  // before printing. The hygienist sends patients home too.
-  'aftercare:get': ['admin', 'doctor', 'checkout', 'hygienist'],
+  // before printing — the same roles that can print them (pdf:*). No
+  // hygienist screen asks for them, and the hygienist cannot print them.
+  'aftercare:get': ['admin', 'doctor', 'checkout'],
   'record:exportUsb': ['admin', 'doctor'],
   'usb:list': ['admin', 'doctor', 'triage', 'emt', 'checkout'],
   'usb:load': ['admin', 'doctor', 'triage', 'checkout'],

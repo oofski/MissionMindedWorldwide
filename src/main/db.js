@@ -2272,7 +2272,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
-    const tx = db.prepare('SELECT locked, unlocked_at, completed_at, provider_name FROM treatments WHERE patient_id = ?').get(p.id);
+    const tx = db.prepare('SELECT locked, unlocked_at, completed_at, provider_name, cleaning FROM treatments WHERE patient_id = ?').get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -2320,6 +2320,10 @@ function listPatients({ eventId, search } = {}) {
       locked: !!(tx && tx.locked),
       amending: isAmending(tx, pt.status),
       lockable: canLockRecord(tx, pt.status),
+      // A cleaning is on the chart (the report's own rule, didCleaning). The
+      // hygienist's queue marks a patient waiting for a treatment chair with
+      // it: finishing their cleaning leaves them waiting, and in that queue.
+      cleaning_recorded: didCleaning(tx),
     };
   });
 }

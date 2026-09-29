@@ -56,14 +56,22 @@ export function renderProvider(ctx, params = {}) {
     const waitingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'treatment_waiting'));
     const treatingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'in_treatment' && p.treatment_waiting_at));
     const atHygienist = sortedByName(ready.filter((p) => p.route === 'hygienist'));
-    const row = (p) => el('tr', {}, [
+    // The pill says where the patient is at this station. In the Dental Triage
+    // list, in_treatment means being examined there; "In treatment" is what
+    // the chair list says, and the same words in both lists read as the
+    // patient being in two places. Only the label differs — the status is
+    // the same in_treatment either way.
+    const stagePill = (p, list) => (list === triageQueue && p.status === 'in_treatment'
+      ? el('span', { class: 'pill pill--warning' }, [el('span', { class: 'pill-dot' }), 'Being examined'])
+      : statusPill(p.status));
+    const row = (p, list) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
         p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:8px' }, ['Blood thinner']) : null,
         (p.flags && p.flags.length) ? flagDot(p.flags.length) : null]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
       el('td', {}, [p.complaint || '—']),
       el('td', {}, [p.assigned_to || '—']),
-      el('td', {}, [statusPill(p.status),
+      el('td', {}, [stagePill(p, list),
         // How long they have been waiting for a chair — the number the floor
         // lead balances fifteen chairs against.
         p.status === 'treatment_waiting' && p.treatment_waiting_at
@@ -73,7 +81,7 @@ export function renderProvider(ctx, params = {}) {
     const table = (list, emptyMsg) => el('div', { class: 'data-table-wrap' }, [
       el('table', { class: 'data-table' }, [
         el('thead', {}, [el('tr', {}, ['Patient', 'Age', 'Complaint', 'Chair', 'Status', ''].map((h) => el('th', {}, [h])))]),
-        el('tbody', {}, list.length ? list.map(row) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
+        el('tbody', {}, list.length ? list.map((p) => row(p, list)) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
       ]),
     ]);
     const listCard = (ic, title, list, emptyMsg) => el('div', { class: 'card' }, [

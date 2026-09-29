@@ -344,7 +344,12 @@ export function renderKiosk(ctx) {
           signer_name: signer.get() || signerFromGeneral(),
           signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
           signature_method: sigPad.isEmpty() ? null : sigPad.getMethod(),
-          version: `oral_surgery-${getLang()}-v1`,
+          // Which text was signed. A language without the full wording signs
+          // the sections above, which end with consent.emergency; its number
+          // changed in v0.0.15 (MMW's line replaced an Oregon one), so a row
+          // signed since then is v2. The full wording (English) did not
+          // change and stays v1.
+          version: `oral_surgery-${getLang()}-${surgeryFull ? 'v1' : 'v2'}`,
         });
         return true;
       },

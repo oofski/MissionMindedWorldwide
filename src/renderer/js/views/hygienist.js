@@ -42,11 +42,16 @@ export function renderHygienist(ctx, params = {}) {
     // chair, which a 'both' patient can be while still due a cleaning) AND they
     // were routed to the hygienist. Checked-in patients stay with the EMT.
     const forCleaning = sortedByName(live.filter((p) => routedToHygienist(p) && ['triaged', 'treatment_waiting', 'in_treatment'].includes(p.status)));
+    // A patient waiting for a treatment chair stays in this list after their
+    // cleaning is saved — the visit is not over until the dentist's treatment
+    // — so the row says the cleaning is on the chart, or it could be done twice.
+    const cleaningRecorded = (p) => p.status === 'treatment_waiting' && p.cleaning_recorded;
     const rows = forCleaning.map((p) => el('tr', { style: 'cursor:pointer', onClick: () => detail(p.id) }, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`])]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
       el('td', {}, [p.complaint || '—']),
-      el('td', {}, [routedToHygienist(p) ? el('span', { class: 'pill pill--teal' }, [icon('sparkle', { size: 12 }), 'Cleaning']) : el('span', { class: 'subtle small' }, ['—'])]),
+      el('td', {}, [cleaningRecorded(p) ? el('span', { class: 'pill pill--success' }, [icon('checkCircle', { size: 12 }), 'Cleaning recorded'])
+        : routedToHygienist(p) ? el('span', { class: 'pill pill--teal' }, [icon('sparkle', { size: 12 }), 'Cleaning']) : el('span', { class: 'subtle small' }, ['—'])]),
       el('td', {}, [statusPill(p.status)]),
       el('td', {}, [el('button', { class: 'btn btn--primary btn--sm', onClick: (e) => { e.stopPropagation(); detail(p.id); } }, ['Open', icon('chevron', { size: 15 })])]),
     ]));
@@ -84,6 +89,11 @@ export function renderHygienist(ctx, params = {}) {
     // Unlocked by an administrator after the visit was finished, to correct it.
     const amending = !!(p.lock && p.lock.amending);
     const alsoDoctor = (p.triage && p.triage.route === 'both') || needsDoctor(cl);
+    // Examined at Dental Triage and waiting for a treatment chair: completing
+    // here saves the cleaning and leaves them waiting, and the data layer
+    // refuses a sign-off from this station (db.hygienistFinalize), so the
+    // buttons say that rather than offering what cannot happen.
+    const waitingForChair = p.status === 'treatment_waiting';
     const me = store.user || null;
 
     // Cleaning state — preserved from any prior save; teeth tracked as a Set.
@@ -284,8 +294,11 @@ export function renderHygienist(ctx, params = {}) {
               el('button', { class: 'btn btn--ghost btn--block', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
             ]) : el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
               el('button', { class: 'btn btn--ghost btn--block', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save cleaning']),
-              el('button', { class: 'btn btn--primary btn--block', title: alsoDoctor ? 'Doctor work is pending — normally the provider finishes' : '', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark cleaning complete']),
-              el('button', { class: 'btn btn--ghost btn--block', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Sign off & lock (optional)']),
+              el('button', { class: 'btn btn--primary btn--block', title: alsoDoctor ? 'Doctor work is pending — normally the provider finishes' : '', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }),
+                waitingForChair ? 'Save cleaning — patient still waiting for a chair' : 'Mark cleaning complete']),
+              waitingForChair
+                ? el('p', { class: 'subtle small' }, ['Waiting for a treatment chair — the treating dentist signs off and locks the record once their treatment is done.'])
+                : el('button', { class: 'btn btn--ghost btn--block', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Sign off & lock (optional)']),
             ]),
           ]),
         ]),

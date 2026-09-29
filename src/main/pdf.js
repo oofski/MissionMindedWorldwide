@@ -302,9 +302,18 @@ const OREGON_CONSENT =
   'liable for any injury, death or other loss arising out of the provision of these services, unless the injury, ' +
   'death or other loss results from gross negligence.';
 
+// The heading over the charted procedures for a patient who has not reached a
+// treatment chair — waiting for one, or checked out before one
+// (aftercare.careStage 'not_treated'). The chart is Dental Triage's plan, not
+// care done: the check-out screen and the after-care sheet both say nothing on
+// it was done, and the record must not list it as performed. The chart itself
+// still prints, so the plan is on file for the next visit.
+const PLANNED_HEADING = 'Planned — not performed';
+
 function progressNoteBody(p, lang) {
   const t = p.treatment || {};
   const tr = p.triage || {};
+  const heading = aftercare.careStage(p) === 'not_treated' ? PLANNED_HEADING : 'Treatment Provided';
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
@@ -341,7 +350,7 @@ function progressNoteBody(p, lang) {
     ${tr.notes ? `<div class="box"><span class="label">Assessment notes</span><br>${esc(tr.notes)}</div>` : ''}
     <div class="box"><span class="label">X-rays taken: </span>${esc(taken)} · <span class="label">Images uploaded: </span>${esc(images)}${tr.xray_station ? ' · X-ray station ' + esc(tr.xray_station) + ' (recorded earlier)' : ''}</div>
 
-    <h2>Treatment Provided</h2>
+    <h2>${heading}</h2>
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
@@ -652,6 +661,7 @@ function healthBlock(p) {
 
 function summaryBody(p) {
   const t = p.treatment || {};
+  const heading = aftercare.careStage(p) === 'not_treated' ? PLANNED_HEADING : 'Procedures Performed';
 
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
 
@@ -677,7 +687,7 @@ function summaryBody(p) {
 
     ${healthBlock(p)}
 
-    <h2>Procedures Performed</h2>
+    <h2>${heading}</h2>
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>

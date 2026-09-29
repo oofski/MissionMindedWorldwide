@@ -70,7 +70,7 @@ const PERMS = {
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
   'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
-  'aftercareGet': ['admin', 'doctor', 'checkout', 'hygienist'],
+  'aftercareGet': ['admin', 'doctor', 'checkout'],
   'inventoryList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryMove': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -5729,14 +5729,20 @@ async function main() {
       'after-care: the sheet prints the same MMW number as the About box, the consent and the online form');
     log(['en', 'es', 'ru', 'bzj', 'nya'].every((l) => String((catalog[l] && catalog[l].consent && catalog[l].consent.emergency) || '').includes(PHONE)),
       'the consent\'s emergency line gives MMW\'s number in all five languages');
-    // The number is a message line, and the after-care sheet sends a true
-    // emergency to the ER: the consent must not send one to voicemail.
-    const emLines = ['en', 'es', 'ru', 'bzj', 'nya'].map((l) => String(catalog[l].consent.emergency || ''));
-    log(emLines.every((x) => !/after-hours|fuera de horario|afta owaz|kunja kwa nthawi|вне рабочих часов/i.test(x))
-      && /leave a message/.test(emLines[0]) && /Emergency Room/.test(emLines[0])
-      && /deje un mensaje/.test(emLines[1]) && /sala de emergencias/.test(emLines[1])
-      && emLines.every((x) => x.split(/[.!]\s/).length >= 2),
-      'the consent calls the number a message line for problems after the visit, and sends breathing or swallowing trouble to the ER, in every language');
+    // The line is part of the oral-surgery consent patients sign: only the
+    // stale number was to change, so every language keeps the sentence it had
+    // (v0.0.14, 115525d) word for word, with MMW's number in place of the old
+    // one. A rewording is new consent text and needs MMW's review first.
+    const EM_ORIGINAL = {
+      en: 'For after-hours emergencies call 541-556-5902.',
+      es: 'Para emergencias fuera de horario llame al 541-556-5902.',
+      bzj: 'Fi emerjensi afta owaz kaal 541-556-5902.',
+      nya: 'Pa zadzidzidzi kunja kwa nthawi imbani 541-556-5902.',
+      ru: 'При неотложной ситуации вне рабочих часов звоните 541-556-5902.',
+    };
+    const emDrift = Object.keys(EM_ORIGINAL).filter((l) => catalog[l].consent.emergency !== EM_ORIGINAL[l].replace('541-556-5902', PHONE));
+    log(!emDrift.length,
+      `the consent's emergency line is each language's original sentence with only the number replaced${emDrift.length ? ' — reworded in ' + emDrift.join(', ') : ''}`);
     const walk = (dir) => fsA.readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
       .flatMap((d) => (d.isDirectory() ? walk(`${dir}${d.name}/`) : /\.(js|mjs|html|css)$/.test(d.name) ? [`${dir}${d.name}`] : []));
     const stale = [...walk('../src/'), ...walk('../cloud/')].filter((f) => /541[-. ]?556[-. ]?5902/.test(readSrcA(f)));
@@ -5960,7 +5966,7 @@ async function main() {
 
     // The plumbing: the channel exists end to end and is not open to everyone.
     const ipcSrc = readSrcA('../src/main/ipc.js');
-    log(/'aftercare:get': \['admin', 'doctor', 'checkout', 'hygienist'\]/.test(ipcSrc)
+    log(/'aftercare:get': \['admin', 'doctor', 'checkout'\]/.test(ipcSrc)
       && readSrcA('../src/main/preload.js').includes("'aftercare:get'") && /aftercareGet: \(patientId, lang\) =>/.test(readSrcA('../src/renderer/js/api.js')),
       'after-care: aftercare:get is permissioned in ipc.js, whitelisted in preload and exposed by api.js');
     log(/summary: 'VisitSummary'/.test(ipcSrc) && /aftercare: 'AfterCare'/.test(ipcSrc) && /full: 'FullRecord'/.test(ipcSrc),
@@ -6198,14 +6204,16 @@ async function main() {
     for (let i = 0; i < 10; i++) await tick();
     const hyChip = Array.from(hyV.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent));
     if (hyChip) hyChip.click();
-    const hyDone = Array.from(hyV.querySelectorAll('button')).find((b) => /^Mark cleaning complete$/.test(b.textContent));
+    // For a patient waiting for a chair the complete button is labelled for
+    // what it does there (see the fix-pass block below).
+    const hyDone = Array.from(hyV.querySelectorAll('button')).find((b) => /^Save cleaning — patient still waiting for a chair$/.test(b.textContent));
     if (hyDone) hyDone.click();
     for (let i = 0; i < 10; i++) await tick();
     const gHy = db.getPatient(pHy.id);
     const aHy = ac.aftercareSections(gHy, 'en');
     log(!!hyDone && gHy.status === 'treatment_waiting' && gHy.triage.status === 'treatment_waiting' && gHy.triage.treatment_waiting_at === waitedAt
       && gHy.treatment.cleaning.adult_prophy === true && !gHy.treatment.completed_at && gHy.treatment.extractions.length === 1,
-      'hygienist: "Mark cleaning complete" for a patient waiting for a treatment chair saves the cleaning and keeps their place in the queue (and their time in it)');
+      'hygienist: the complete button for a patient waiting for a treatment chair saves the cleaning and keeps their place in the queue (and their time in it)');
     log(aHy.stage === 'not_treated' && same(aHy.keys, []) && !/After a surgical extraction/.test(plainA(pdfA.buildHtml(gHy, 'summary')))
       && !/After-care sheet for this visit/.test(plainA(pdfA.buildHtml(gHy, 'progress'))),
       'after-care: so the extraction Dental Triage charted is not printed as care done');
@@ -6277,6 +6285,211 @@ async function main() {
     coQ.remove();
     window.api.pdfPrint = origPrint;
     if (evPrev) db.setActiveEvent(currentUser, evPrev);
+  }
+
+  /* ===== v0.0.15 fix pass — the screens and the printed record ===============
+     What the release review found on the screens and outputs. A patient being
+     examined at Dental Triage wore the chair list's "In treatment" pill. The
+     Visit Summary listed a plan as "Procedures Performed" for a patient who
+     never reached a chair. The hygienist's station offered a sign-off it
+     always refuses for a patient waiting for a chair, and never showed that
+     the cleaning was done. The consent's emergency line was reworded when only
+     its number had to change. And the after-care channel was open to a role
+     that never calls it. */
+  {
+    currentUser = signInAdmin();
+    const pdfF = require('../src/main/pdf.js');
+    const acF = require('../src/main/aftercare.js');
+    const plainF = (html) => html.replace(/<style>[\s\S]*?<\/style>/, ' ').replace(/<[^>]+>/g, ' ')
+      .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+    const settle = async (n = 10) => { for (let i = 0; i < n; i++) await tick(); };
+    const storeF = (await import('../src/renderer/js/store.js')).store; storeF.setUser(currentUser);
+    const ctxF = { navigate: () => {}, toast: () => {}, store: storeF, setDetail: () => {} };
+    const evPrevF = (db.listEvents().find((e) => e.active) || {}).id;
+    const evF = db.createEvent(currentUser, { name: 'Fix-pass Clinic' });
+    db.setActiveEvent(currentUser, evF.id);
+    const newPtF = (first, route) => {
+      const pt = db.createPatient(currentUser, {
+        first_name: first, last_name: 'Revisado', language: 'en', demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
+        consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }],
+      });
+      db.saveVitals(currentUser, pt.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '72' });
+      db.routePatient(currentUser, pt.id, route);
+      return pt;
+    };
+    const chartF = { extractions: [{ tooth: '30', types: ['surgical'] }], anesthetic: [{ agent: 'lidocaine', carps: '2' }], provider_name: 'Dr. T' };
+    const listOf = (node, title) => Array.from(node.querySelectorAll('.card')).find((c) => {
+      const h = c.querySelector('.card-title'); return !!h && h.textContent.startsWith(title + ' (');
+    });
+    const rowOf = (node, name) => (node ? Array.from(node.querySelectorAll('tbody tr')).find((r) => r.textContent.includes(name)) : null);
+    const buttonsOf = (node) => Array.from(node.querySelectorAll('button')).map((b) => b.textContent);
+
+    // Dental Triage's queue: "Being examined" there, "In treatment" only in a chair.
+    const pExam = newPtF('Edna', 'dentist');
+    db.saveTreatment(currentUser, pExam.id, chartF, false);
+    const pChair = newPtF('Chad', 'dentist');
+    db.saveTreatment(currentUser, pChair.id, chartF, 'waiting');
+    db.saveTreatment(currentUser, pChair.id, chartF, false);
+    const pvF = (await import('../src/renderer/js/views/provider.js')).renderProvider(ctxF);
+    document.body.append(pvF);
+    await settle();
+    const pillIn = (title, name) => {
+      const r = rowOf(listOf(pvF, title), name);
+      const pill = r && r.children[4] && r.children[4].querySelector('.pill');
+      return pill ? pill.textContent : null;
+    };
+    log(db.getPatient(pExam.id).status === 'in_treatment' && !db.getPatient(pExam.id).triage.treatment_waiting_at
+      && pillIn('Dental Triage', 'Revisado, Edna') === 'Being examined',
+      'fix pass: in the Dental Triage list a patient being examined reads "Being examined", not the chair list\'s "In treatment" (the status is unchanged)');
+    log(db.getPatient(pChair.id).status === 'in_treatment' && pillIn('In treatment', 'Revisado, Chad') === 'In treatment'
+      && !/In treatment/.test(Array.from(listOf(pvF, 'Dental Triage').querySelectorAll('tbody .pill')).map((x) => x.textContent).join('|')),
+      'fix pass: "In treatment" is left to the patient in a treatment chair');
+    pvF.remove();
+
+    // The printed record of a patient who left before a treatment chair.
+    const pLeft = newPtF('Lena', 'dentist');
+    db.saveTreatment(currentUser, pLeft.id, chartF, 'waiting');
+    const sumWaiting = plainF(pdfF.buildHtml(db.getPatient(pLeft.id), 'summary'));
+    db.dismissPatient(currentUser, pLeft.id);
+    const gLeft = db.getPatient(pLeft.id);
+    const sumLeft = plainF(pdfF.buildHtml(gLeft, 'summary'));
+    log(acF.careStage(gLeft) === 'not_treated' && !/Procedures Performed/.test(sumLeft)
+      && /Planned — not performed Fillings None Extractions #30 · Surgical/.test(sumLeft) && /Lidocaine/.test(sumLeft)
+      && !/Procedures Performed/.test(sumWaiting) && /Planned — not performed/.test(sumWaiting),
+      'fix pass: the Visit Summary of a patient who left before a chair (or is still waiting for one) lists the chart as "Planned — not performed", never "Procedures Performed"');
+    const progLeft = plainF(pdfF.buildHtml(gLeft, 'progress'));
+    const fullLeft = plainF(pdfF.buildHtml(gLeft, 'full'));
+    log(!/Treatment Provided/.test(progLeft) && /Planned — not performed Fillings None Extractions #30/.test(progLeft)
+      && !/Treatment Provided|Procedures Performed/.test(fullLeft) && /Planned — not performed/.test(fullLeft),
+      'fix pass: the progress note and the full record say the same — the chart is a plan, not treatment provided');
+    const pDone = newPtF('Dora', 'dentist');
+    db.saveTreatment(currentUser, pDone.id, chartF, 'complete');
+    const gDone = db.getPatient(pDone.id);
+    const sumDone = plainF(pdfF.buildHtml(gDone, 'summary'));
+    const progDone = plainF(pdfF.buildHtml(gDone, 'progress'));
+    const sumExam = plainF(pdfF.buildHtml(db.getPatient(pExam.id), 'summary'));
+    log(/Procedures Performed Fillings None Extractions #30/.test(sumDone) && /Treatment Provided Fillings None Extractions #30/.test(progDone)
+      && /Procedures Performed/.test(sumExam) && !/Planned — not performed/.test(sumDone + progDone + sumExam),
+      'fix pass: care done (and care under way at the chair) still prints as "Procedures Performed" / "Treatment Provided"');
+
+    // The hygienist and a patient waiting for a treatment chair.
+    const hyMod = await import('../src/renderer/js/views/hygienist.js');
+    const pWait = newPtF('Hilde', 'both');
+    db.saveTreatment(currentUser, pWait.id, chartF, 'waiting');
+    const pWait2 = newPtF('Hugh', 'both');
+    db.saveTreatment(currentUser, pWait2.id, chartF, 'waiting');
+    const pProg = newPtF('Hope', 'hygienist');
+    db.saveTreatment(currentUser, pProg.id, { cleaning: { adult_prophy: true }, provider_name: 'Hy G' }, 'cleaning');
+    const pFresh = newPtF('Hank', 'hygienist');
+    const hyW = hyMod.renderHygienist(ctxF, { id: pWait.id });
+    document.body.append(hyW);
+    await settle();
+    const btnsW = buttonsOf(hyW);
+    log(!btnsW.includes('Sign off & lock (optional)') && !btnsW.includes('Mark cleaning complete')
+      && btnsW.includes('Save cleaning — patient still waiting for a chair') && btnsW.includes('Save cleaning')
+      && /the treating dentist signs off and locks the record/.test(hyW.textContent),
+      'fix pass: for a patient waiting for a chair the hygienist is not offered a sign-off the record refuses (a note says why), and the complete button says what it does');
+    const chipW = Array.from(hyW.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent));
+    if (chipW) chipW.click();
+    const saveW = Array.from(hyW.querySelectorAll('button')).find((b) => b.textContent === 'Save cleaning — patient still waiting for a chair');
+    if (saveW) saveW.click();
+    await settle();
+    const gWait = db.getPatient(pWait.id);
+    const cleanPill = (name) => { const r = rowOf(hyW, name); return r ? /Cleaning recorded/.test(r.textContent) : null; };
+    log(gWait.status === 'treatment_waiting' && gWait.treatment.cleaning.adult_prophy === true
+      && cleanPill('Revisado, Hilde') === true,
+      'fix pass: back in the hygienist\'s queue, the waiting patient whose cleaning is saved is marked "Cleaning recorded"');
+    log(cleanPill('Revisado, Hugh') === false && cleanPill('Revisado, Hope') === false && cleanPill('Revisado, Hank') === false,
+      'fix pass: a waiting patient not yet cleaned, and patients not waiting for a chair, carry no such mark');
+    hyW.remove();
+    const hyH = hyMod.renderHygienist(ctxF, { id: pFresh.id });
+    document.body.append(hyH);
+    await settle();
+    const btnsH = buttonsOf(hyH);
+    log(btnsH.includes('Mark cleaning complete') && btnsH.includes('Sign off & lock (optional)')
+      && !btnsH.includes('Save cleaning — patient still waiting for a chair') && !/the treating dentist signs off and locks the record/.test(hyH.textContent),
+      'fix pass: for a patient not waiting for a chair the hygienist\'s complete and sign-off are offered as before');
+    hyH.remove();
+
+    // The consent a patient signs at the kiosk, and the version stored with it:
+    // the languages that sign consent.emergency signed a changed text (the
+    // number), so their consent rows carry a new version; English signs the
+    // full oral-surgery wording, which did not change.
+    const i18nF = await import('../src/renderer/js/i18n.js');
+    const { renderKiosk: kioskF } = await import('../src/renderer/js/views/kiosk.js');
+    const signSurgery = async (card, last) => {
+      const k = kioskF({ navigate: () => {} }); document.body.append(k);
+      await settle(4);
+      try {
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => card.test(c.textContent)).click();
+        await settle(4);
+        const T = i18nF.t;
+        const fieldOf = (label) => Array.from(k.querySelectorAll('.kiosk-body label.field'))
+          .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
+        const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+        const next = async () => { clickText(T('common.next'), k); await settle(3); };
+        put(T('intake.firstName'), 'Consent'); put(T('intake.lastName'), last); put(T('intake.dob'), '1980-01-01');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        const citySel = fieldOf(T('intake.city')).querySelector('select');
+        put(T('intake.city'), citySel ? citySel.options[1].value : 'Sandy');
+        put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        k.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+        put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        k.querySelector('.chip-select[data-key="acetaminophen"]').click();
+        await next();
+        Array.from(k.querySelectorAll('.kiosk-body select')).forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[0].click(); // Extraction — in pain
+        await next();
+        const agreeG = k.querySelector('.big-check'); agreeG.checked = true; agreeG.dispatchEvent(new window.Event('change', { bubbles: true }));
+        k.querySelector('.deemed-field .chip-btn').click();
+        put(T('intake.signerName'), `Consent ${last}`);
+        await next();
+        const onSurgery = k.querySelector('.kiosk-step-label').textContent.includes(T('intake.s_surgery'));
+        const text = k.querySelector('.kiosk-body').textContent;
+        const agreeS = k.querySelector('.big-check'); agreeS.checked = true; agreeS.dispatchEvent(new window.Event('change', { bubbles: true }));
+        await next();
+        $all('.kiosk-nav button', k).pop().click();
+        await settle(4);
+        const pt = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === last);
+        const os = pt ? (db.getPatient(pt.id).consents || []).find((c) => c.type === 'oral_surgery') : null;
+        return { onSurgery, text, version: os ? os.version : null };
+      } catch (e) {
+        return { error: e.message };
+      } finally {
+        k.remove();
+        i18nF.setLang('en');
+      }
+    };
+    const esK = await signSurgery(/Español/, 'Firmaes');
+    log(esK.onSurgery === true && esK.text.includes('Para emergencias fuera de horario llame al (951) 317-4968.') && esK.version === 'oral_surgery-es-v2',
+      `fix pass: a Spanish patient signs the original emergency sentence with MMW's number, stored as oral_surgery-es-v2${esK.error ? ' — ' + esK.error : ''}`);
+    const enK = await signSurgery(/English/, 'Signsen');
+    log(enK.onSurgery === true && enK.text.includes('(951) 317-4968') && enK.version === 'oral_surgery-en-v1',
+      `fix pass: English signs the unchanged full oral-surgery wording, and keeps oral_surgery-en-v1${enK.error ? ' — ' + enK.error : ''}`);
+
+    // The Records screen display patients photograph gives MMW's number.
+    const recF = (await import('../src/renderer/js/views/records.js')).renderRecords(ctxF, { id: pDone.id });
+    document.body.append(recF);
+    await settle();
+    const sdBtn = Array.from(recF.querySelectorAll('button')).find((b) => b.textContent === 'Screen display for photo');
+    if (sdBtn) sdBtn.click();
+    await settle(3);
+    const sd = document.querySelector('.screen-display');
+    log(!!sd && sd.textContent.includes('(951) 317-4968') && !/541[-. ]?556/.test(sd.textContent),
+      'fix pass: the Records screen display shows MMW\'s number (951) 317-4968');
+    if (sd) Array.from(sd.closest('.modal-card').querySelectorAll('button')).pop().click();
+    recF.remove();
+
+    // After-care sections are for the desks that print them — never the hygienist.
+    db.createUser(currentUser, { username: 'hyg_fixpass', full_name: 'Hy Fixpass', role: 'hygienist', password: 'x' });
+    currentUser = db.login('hyg_fixpass', 'x');
+    const acHyg = await window.api.aftercareGet({ patientId: pDone.id, lang: 'en' });
+    currentUser = signInAdmin();
+    const acAdm = await window.api.aftercareGet({ patientId: pDone.id, lang: 'en' });
+    log(!acHyg.ok && /permission/.test(acHyg.error) && acAdm.ok && PERMS.aftercareGet.join() === 'admin,doctor,checkout',
+      'fix pass: the hygienist cannot read the after-care sections (no screen of theirs asks, and they cannot print them)');
+    if (evPrevF) db.setActiveEvent(currentUser, evPrevF);
   }
 
   /* ===== C1 + C4 — age, race, and how the waiver was signed ==================
