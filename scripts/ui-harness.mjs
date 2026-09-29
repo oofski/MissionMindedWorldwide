@@ -70,7 +70,7 @@ const PERMS = {
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
   'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
-  'aftercareGet': ['admin', 'doctor', 'checkout', 'hygienist'],
+  'aftercareGet': ['admin', 'doctor', 'checkout'],
   'inventoryList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryMove': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -3650,7 +3650,9 @@ async function main() {
     db.saveTreatment(currentUser, pri1.id, { fillings: [{ tooth: '2', surfaces: ['O'] }], cleaning: { teeth: [], quad_detail: '' } }, 'waiting');
     const pri2 = db.createPatient(currentUser, { first_name: 'Priya', last_name: 'Prior', dob: '1979-04-04', consents: GEN });
     const hist = db.patientHistory(pri2.id);
-    log(hist.length >= 1 && hist[0].summary === '1 filling(s)', 'dental triage: a prior visit’s summary no longer calls the teeth list a cleaning');
+    // (Priya's visit is still waiting for a chair, so its chart is listed as
+    // not confirmed as done — the fix-pass rule, pinned there.)
+    log(hist.length >= 1 && hist[0].summary === 'Charted, not confirmed as done: 1 filling(s)', 'dental triage: a prior visit’s summary no longer calls the teeth list a cleaning');
     const { patientHistoryCards: phcB } = await import('../src/renderer/js/components/patientHistory.js');
     const histTxt = phcB(db.getPatient(pri2.id), hist).map((n) => n.textContent).join(' ');
     log(/Treatment waiting/.test(histTxt) && !/treatment_waiting/.test(histTxt), 'dental triage: a prior visit’s status is shown by name, never as a code');
@@ -6081,14 +6083,20 @@ async function main() {
       'after-care: the sheet prints the same MMW number as the About box, the consent and the online form');
     log(['en', 'es', 'ru', 'bzj', 'nya'].every((l) => String((catalog[l] && catalog[l].consent && catalog[l].consent.emergency) || '').includes(PHONE)),
       'the consent\'s emergency line gives MMW\'s number in all five languages');
-    // The number is a message line, and the after-care sheet sends a true
-    // emergency to the ER: the consent must not send one to voicemail.
-    const emLines = ['en', 'es', 'ru', 'bzj', 'nya'].map((l) => String(catalog[l].consent.emergency || ''));
-    log(emLines.every((x) => !/after-hours|fuera de horario|afta owaz|kunja kwa nthawi|вне рабочих часов/i.test(x))
-      && /leave a message/.test(emLines[0]) && /Emergency Room/.test(emLines[0])
-      && /deje un mensaje/.test(emLines[1]) && /sala de emergencias/.test(emLines[1])
-      && emLines.every((x) => x.split(/[.!]\s/).length >= 2),
-      'the consent calls the number a message line for problems after the visit, and sends breathing or swallowing trouble to the ER, in every language');
+    // The line is part of the oral-surgery consent patients sign: only the
+    // stale number was to change, so every language keeps the sentence it had
+    // (v0.0.14, 115525d) word for word, with MMW's number in place of the old
+    // one. A rewording is new consent text and needs MMW's review first.
+    const EM_ORIGINAL = {
+      en: 'For after-hours emergencies call 541-556-5902.',
+      es: 'Para emergencias fuera de horario llame al 541-556-5902.',
+      bzj: 'Fi emerjensi afta owaz kaal 541-556-5902.',
+      nya: 'Pa zadzidzidzi kunja kwa nthawi imbani 541-556-5902.',
+      ru: 'При неотложной ситуации вне рабочих часов звоните 541-556-5902.',
+    };
+    const emDrift = Object.keys(EM_ORIGINAL).filter((l) => catalog[l].consent.emergency !== EM_ORIGINAL[l].replace('541-556-5902', PHONE));
+    log(!emDrift.length,
+      `the consent's emergency line is each language's original sentence with only the number replaced${emDrift.length ? ' — reworded in ' + emDrift.join(', ') : ''}`);
     const walk = (dir) => fsA.readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
       .flatMap((d) => (d.isDirectory() ? walk(`${dir}${d.name}/`) : /\.(js|mjs|html|css)$/.test(d.name) ? [`${dir}${d.name}`] : []));
     const stale = [...walk('../src/'), ...walk('../cloud/')].filter((f) => /541[-. ]?556[-. ]?5902/.test(readSrcA(f)));
@@ -6312,7 +6320,7 @@ async function main() {
 
     // The plumbing: the channel exists end to end and is not open to everyone.
     const ipcSrc = readSrcA('../src/main/ipc.js');
-    log(/'aftercare:get': \['admin', 'doctor', 'checkout', 'hygienist'\]/.test(ipcSrc)
+    log(/'aftercare:get': \['admin', 'doctor', 'checkout'\]/.test(ipcSrc)
       && readSrcA('../src/main/preload.js').includes("'aftercare:get'") && /aftercareGet: \(patientId, lang\) =>/.test(readSrcA('../src/renderer/js/api.js')),
       'after-care: aftercare:get is permissioned in ipc.js, whitelisted in preload and exposed by api.js');
     log(/summary: 'VisitSummary'/.test(ipcSrc) && /aftercare: 'AfterCare'/.test(ipcSrc) && /full: 'FullRecord'/.test(ipcSrc),
@@ -6520,7 +6528,11 @@ async function main() {
       return out;
     };
     const mOut = await emailBody(pMail.id);
-    log(/Checked out before reaching a treatment chair/.test(mOut.text) && same(mOut.chips, ['general']) && mOut.label === 'Visit summary PDF',
+    // It says what the record knows — the chart is not confirmed as done —
+    // never that nothing was done (a hygienist's cleaning while they waited,
+    // or care before an administrator sent them back, reads the same).
+    log(/Checked out without the visit being completed at a treatment chair — nothing charted is confirmed as done/.test(mOut.text)
+      && !/nothing charted was done/.test(mOut.text) && same(mOut.chips, ['general']) && mOut.label === 'Visit summary PDF',
       'check-out: for a patient checked out before a chair the desk is told why only the general advice applies, and the summary button promises no after-care');
     log(mOut.body === 'Adjunto está el resumen de su visita a Mission Minded Worldwide.',
       'check-out: and the email to the patient does not promise after-care instructions the summary does not carry');
@@ -6550,14 +6562,16 @@ async function main() {
     for (let i = 0; i < 10; i++) await tick();
     const hyChip = Array.from(hyV.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent));
     if (hyChip) hyChip.click();
-    const hyDone = Array.from(hyV.querySelectorAll('button')).find((b) => /^Mark cleaning complete$/.test(b.textContent));
+    // For a patient waiting for a chair the complete button is labelled for
+    // what it does there (see the fix-pass block below).
+    const hyDone = Array.from(hyV.querySelectorAll('button')).find((b) => /^Save cleaning — patient still waiting for a chair$/.test(b.textContent));
     if (hyDone) hyDone.click();
     for (let i = 0; i < 10; i++) await tick();
     const gHy = db.getPatient(pHy.id);
     const aHy = ac.aftercareSections(gHy, 'en');
     log(!!hyDone && gHy.status === 'treatment_waiting' && gHy.triage.status === 'treatment_waiting' && gHy.triage.treatment_waiting_at === waitedAt
       && gHy.treatment.cleaning.adult_prophy === true && !gHy.treatment.completed_at && gHy.treatment.extractions.length === 1,
-      'hygienist: "Mark cleaning complete" for a patient waiting for a treatment chair saves the cleaning and keeps their place in the queue (and their time in it)');
+      'hygienist: the complete button for a patient waiting for a treatment chair saves the cleaning and keeps their place in the queue (and their time in it)');
     log(aHy.stage === 'not_treated' && same(aHy.keys, []) && !/After a surgical extraction/.test(plainA(pdfA.buildHtml(gHy, 'summary')))
       && !/After-care sheet for this visit/.test(plainA(pdfA.buildHtml(gHy, 'progress'))),
       'after-care: so the extraction Dental Triage charted is not printed as care done');
@@ -6593,8 +6607,8 @@ async function main() {
       && db.getPatient(pHl.id).status === 'completed' && !!db.getPatient(pHl.id).treatment.locked,
       'hygienist: for a patient not waiting for a chair, complete and sign-off complete (and lock) the visit as before');
     log(/save\(mode\)/.test(readSrcA('../src/renderer/js/views/hygienist.js'))
-      && /\{ complete: 'cleaning_complete', lock: 'cleaning_lock' \}\[mode\] \|\| 'cleaning'/.test(readSrcA('../src/renderer/js/views/hygienist.js')),
-      'hygienist: every save from the cleaning station names the station (cleaning, cleaning_complete, cleaning_lock)');
+      && /\{ complete: 'cleaning_complete', lock: 'cleaning_lock', waiting: 'cleaning_waiting' \}\[mode\] \|\| 'cleaning'/.test(readSrcA('../src/renderer/js/views/hygienist.js')),
+      'hygienist: every save from the cleaning station names the station (cleaning, cleaning_complete, cleaning_lock, cleaning_waiting)');
 
     // The one-tap tick in the queue never opens the record, so its dismiss
     // confirmation carries the after-care: listed, printable, never required.
@@ -6629,6 +6643,522 @@ async function main() {
     coQ.remove();
     window.api.pdfPrint = origPrint;
     if (evPrev) db.setActiveEvent(currentUser, evPrev);
+  }
+
+  /* ===== v0.0.15 fix pass — the screens and the printed record ===============
+     What the release review found on the screens and outputs. A patient being
+     examined at Dental Triage wore the chair list's "In treatment" pill. The
+     Visit Summary listed a plan as "Procedures Performed" for a patient who
+     never reached a chair (and the first fix, "Planned — not performed", was
+     false in its turn for a cleaning done while the patient waited, or care
+     given before an administrator sent them back: the record now says "not
+     confirmed as performed", and so do the Records screen display and a later
+     visit's Previous visits). The hygienist's station offered a sign-off it
+     always refuses for a patient waiting for a chair, never showed that a
+     cleaning was on the chart (it now asks for a look, never says "done"),
+     its "still waiting" button could complete the visit of a patient taken
+     into a chair since the chart was opened — and any of its saves wrote its
+     copy of the chart, opened earlier, over what another station had saved
+     since, or pulled a checked-out patient back in. Its printed name opened as
+     the name already on the chart, often a dentist's. The consent's emergency line was
+     reworded when only its number had to change. And the after-care channel
+     was open to a role that never calls it. */
+  {
+    currentUser = signInAdmin();
+    const pdfF = require('../src/main/pdf.js');
+    const acF = require('../src/main/aftercare.js');
+    const plainF = (html) => html.replace(/<style>[\s\S]*?<\/style>/, ' ').replace(/<[^>]+>/g, ' ')
+      .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+    const settle = async (n = 10) => { for (let i = 0; i < n; i++) await tick(); };
+    const storeF = (await import('../src/renderer/js/store.js')).store; storeF.setUser(currentUser);
+    const ctxF = { navigate: () => {}, toast: () => {}, store: storeF, setDetail: () => {} };
+    const evPrevF = (db.listEvents().find((e) => e.active) || {}).id;
+    const evF = db.createEvent(currentUser, { name: 'Fix-pass Clinic' });
+    db.setActiveEvent(currentUser, evF.id);
+    const newPtF = (first, route) => {
+      const pt = db.createPatient(currentUser, {
+        first_name: first, last_name: 'Revisado', language: 'en', demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
+        consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }],
+      });
+      db.saveVitals(currentUser, pt.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '72' });
+      db.routePatient(currentUser, pt.id, route);
+      return pt;
+    };
+    const chartF = { extractions: [{ tooth: '30', types: ['surgical'] }], anesthetic: [{ agent: 'lidocaine', carps: '2' }], provider_name: 'Dr. T' };
+    const listOf = (node, title) => Array.from(node.querySelectorAll('.card')).find((c) => {
+      const h = c.querySelector('.card-title'); return !!h && h.textContent.startsWith(title + ' (');
+    });
+    const rowOf = (node, name) => (node ? Array.from(node.querySelectorAll('tbody tr')).find((r) => r.textContent.includes(name)) : null);
+    const buttonsOf = (node) => Array.from(node.querySelectorAll('button')).map((b) => b.textContent);
+
+    // Dental Triage's queue: "Being examined" there, "In treatment" only in a chair.
+    const pExam = newPtF('Edna', 'dentist');
+    db.saveTreatment(currentUser, pExam.id, chartF, false);
+    const pChair = newPtF('Chad', 'dentist');
+    db.saveTreatment(currentUser, pChair.id, chartF, 'waiting');
+    db.saveTreatment(currentUser, pChair.id, chartF, false);
+    const pvF = (await import('../src/renderer/js/views/provider.js')).renderProvider(ctxF);
+    document.body.append(pvF);
+    await settle();
+    const pillIn = (title, name) => {
+      const r = rowOf(listOf(pvF, title), name);
+      const pill = r && r.children[4] && r.children[4].querySelector('.pill');
+      return pill ? pill.textContent : null;
+    };
+    log(db.getPatient(pExam.id).status === 'in_treatment' && !db.getPatient(pExam.id).triage.treatment_waiting_at
+      && pillIn('Dental Triage', 'Revisado, Edna') === 'Being examined',
+      'fix pass: in the Dental Triage list a patient being examined reads "Being examined", not the chair list\'s "In treatment" (the status is unchanged)');
+    log(db.getPatient(pChair.id).status === 'in_treatment' && pillIn('In treatment', 'Revisado, Chad') === 'In treatment'
+      && !/In treatment/.test(Array.from(listOf(pvF, 'Dental Triage').querySelectorAll('tbody .pill')).map((x) => x.textContent).join('|')),
+      'fix pass: "In treatment" is left to the patient in a treatment chair');
+    pvF.remove();
+
+    // The printed record of a visit not completed at a treatment chair. The
+    // row cannot say whether that chart is a plan or care done — careStage
+    // leans to "not treated" on purpose, to hold back after-care — so the
+    // record says only what is known: "not confirmed as performed". Never
+    // "Procedures Performed" (false for a patient who left before a chair),
+    // and never "not performed" (false for a cleaning the hygienist did while
+    // the patient waited, or for care given before an administrator sent the
+    // patient back and they were checked out).
+    const UNCONF = 'Charted — not confirmed as performed';
+    const UNCONF_NOTE = 'This visit was not completed at a treatment chair, so the chart below is not confirmed as care done — it may be planned care.';
+    const claimsNone = (txt) => !/Procedures Performed|Treatment Provided|not performed|Planned —/.test(txt);
+    const pLeft = newPtF('Lena', 'dentist');
+    db.saveTreatment(currentUser, pLeft.id, chartF, 'waiting');
+    const sumWaiting = plainF(pdfF.buildHtml(db.getPatient(pLeft.id), 'summary'));
+    db.dismissPatient(currentUser, pLeft.id);
+    const gLeft = db.getPatient(pLeft.id);
+    const sumLeft = plainF(pdfF.buildHtml(gLeft, 'summary'));
+    log(acF.careStage(gLeft) === 'not_treated'
+      && sumLeft.includes(`${UNCONF} ${UNCONF_NOTE} Fillings None Extractions #30 · Surgical`) && /Lidocaine/.test(sumLeft) && claimsNone(sumLeft)
+      && sumWaiting.includes(`${UNCONF} ${UNCONF_NOTE} Fillings None`) && claimsNone(sumWaiting),
+      'fix pass: the Visit Summary of a patient who left before a chair (or is still waiting for one) heads the chart "Charted — not confirmed as performed" and says why — never "Procedures Performed", never "not performed"');
+    const progLeft = plainF(pdfF.buildHtml(gLeft, 'progress'));
+    const fullLeft = plainF(pdfF.buildHtml(gLeft, 'full'));
+    log(progLeft.includes(`${UNCONF} ${UNCONF_NOTE} Fillings None Extractions #30`) && claimsNone(progLeft)
+      && fullLeft.includes(`${UNCONF} ${UNCONF_NOTE}`) && claimsNone(fullLeft),
+      'fix pass: the progress note and the full record say the same — the chart is not confirmed as performed');
+
+    // A cleaning the hygienist did for a patient waiting for a chair, who then
+    // left before one: careStage reads it as not treated (it holds back the
+    // after-care), but the cleaning was done, and the record must not say it
+    // was not — least of all over the hygienist's own sign-off.
+    db.createUser(currentUser, { username: 'hyg_fixpass_c', full_name: 'Hy Cleaner', role: 'hygienist', password: 'x' });
+    const hygC = db.login('hyg_fixpass_c', 'x');
+    const pCleo = newPtF('Cleo', 'both');
+    db.saveTreatment(currentUser, pCleo.id, chartF, 'waiting');
+    db.saveTreatment(hygC, pCleo.id, { ...chartF, cleaning: { adult_prophy: true }, provider_name: 'Hy Cleaner' }, 'cleaning_waiting');
+    const cleoWaiting = db.getPatient(pCleo.id).status;
+    db.dismissPatient(currentUser, pCleo.id);
+    const gCleo = db.getPatient(pCleo.id);
+    const sumCleo = plainF(pdfF.buildHtml(gCleo, 'summary'));
+    const progCleo = plainF(pdfF.buildHtml(gCleo, 'progress'));
+    log(cleoWaiting === 'treatment_waiting' && acF.careStage(gCleo) === 'not_treated' && gCleo.treatment.cleaning.adult_prophy === true
+      && sumCleo.includes(`${UNCONF} ${UNCONF_NOTE}`) && progCleo.includes(`${UNCONF} ${UNCONF_NOTE}`)
+      && /Cleaning Adult prophy/.test(progCleo) && /Provider Sign-Off Provider Hy Cleaner/.test(progCleo)
+      && claimsNone(sumCleo) && claimsNone(progCleo),
+      'fix pass: a hygienist\'s cleaning for a patient who waited for a chair and then left is "not confirmed as performed", never "not performed" over the hygienist\'s own sign-off');
+
+    // Flow C: taken into a chair and treated, sent back to Vitals by an
+    // administrator (which resets the triage row), then checked out.
+    const pFlo = newPtF('Flo', 'dentist');
+    db.saveTreatment(currentUser, pFlo.id, chartF, 'waiting');
+    db.saveTreatment(currentUser, pFlo.id, { ...chartF, clinical_notes: 'Extracted #30 under IANB' }, false);
+    const sumChair = plainF(pdfF.buildHtml(db.getPatient(pFlo.id), 'summary'));
+    db.adminMovePatient(currentUser, pFlo.id, 'emt');
+    db.adminMovePatient(currentUser, pFlo.id, 'dismiss');
+    const gFlo = db.getPatient(pFlo.id);
+    const progFlo = plainF(pdfF.buildHtml(gFlo, 'progress'));
+    const sumFlo = plainF(pdfF.buildHtml(gFlo, 'summary'));
+    log(/Procedures Performed Fillings None Extractions #30/.test(sumChair)
+      && gFlo.status === 'dismissed' && acF.careStage(gFlo) === 'not_treated'
+      && progFlo.includes(`${UNCONF} ${UNCONF_NOTE}`) && /Clinical notes Extracted #30 under IANB/.test(progFlo)
+      && claimsNone(progFlo) && claimsNone(sumFlo),
+      'fix pass: treated at a chair, sent back to Vitals and checked out, the progress note is "not confirmed as performed" — never "not performed" over clinical notes that say it was extracted');
+
+    const pDone = newPtF('Dora', 'dentist');
+    db.saveTreatment(currentUser, pDone.id, chartF, 'complete');
+    const gDone = db.getPatient(pDone.id);
+    const sumDone = plainF(pdfF.buildHtml(gDone, 'summary'));
+    const progDone = plainF(pdfF.buildHtml(gDone, 'progress'));
+    const sumExam = plainF(pdfF.buildHtml(db.getPatient(pExam.id), 'summary'));
+    log(/Procedures Performed Fillings None Extractions #30/.test(sumDone) && /Treatment Provided Fillings None Extractions #30/.test(progDone)
+      && /Procedures Performed/.test(sumExam) && !(sumDone + progDone + sumExam).includes('not confirmed as'),
+      'fix pass: care done (and care under way at the chair) still prints as "Procedures Performed" / "Treatment Provided"');
+
+    // The hygienist and a patient waiting for a treatment chair.
+    const hyMod = await import('../src/renderer/js/views/hygienist.js');
+    const pWait = newPtF('Hilde', 'both');
+    db.saveTreatment(currentUser, pWait.id, chartF, 'waiting');
+    const pWait2 = newPtF('Hugh', 'both');
+    db.saveTreatment(currentUser, pWait2.id, chartF, 'waiting');
+    // Dental Triage charts a cleaning as part of the plan and parks the
+    // patient; nobody at the cleaning station has seen them.
+    const pPlan = newPtF('Pia', 'both');
+    db.saveTreatment(currentUser, pPlan.id, { ...chartF, cleaning: { adult_prophy: true } }, 'waiting');
+    const pProg = newPtF('Hope', 'hygienist');
+    db.saveTreatment(currentUser, pProg.id, { cleaning: { adult_prophy: true }, provider_name: 'Hy G' }, 'cleaning');
+    const pFresh = newPtF('Hank', 'hygienist');
+    const hyW = hyMod.renderHygienist(ctxF, { id: pWait.id });
+    document.body.append(hyW);
+    await settle();
+    const btnsW = buttonsOf(hyW);
+    log(!btnsW.includes('Sign off & lock (optional)') && !btnsW.includes('Mark cleaning complete')
+      && btnsW.includes('Save cleaning — patient still waiting for a chair') && btnsW.includes('Save cleaning')
+      && /the treating dentist signs off and locks the record/.test(hyW.textContent),
+      'fix pass: for a patient waiting for a chair the hygienist is not offered a sign-off the record refuses (a note says why), and the complete button says what it does');
+    const chipW = Array.from(hyW.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent));
+    if (chipW) chipW.click();
+    const saveW = Array.from(hyW.querySelectorAll('button')).find((b) => b.textContent === 'Save cleaning — patient still waiting for a chair');
+    if (saveW) saveW.click();
+    await settle();
+    const gWait = db.getPatient(pWait.id);
+    // The Cleaning column of a queue row: the teal "Cleaning" (due) pill, the
+    // "check the chart" mark, and anything that would read as done.
+    const cleanCell = (name) => {
+      const r = rowOf(hyW, name);
+      if (!r) return null;
+      const cell = r.children[3];
+      const pills = Array.from(cell.querySelectorAll('.pill')).map((x) => x.textContent);
+      return {
+        due: pills.includes('Cleaning'),
+        check: pills.includes('Cleaning on chart — check before starting'),
+        done: /Cleaning recorded|Cleaning done|Cleaned/.test(cell.textContent) || !!cell.querySelector('.pill--success'),
+      };
+    };
+    const cHilde = cleanCell('Revisado, Hilde');
+    log(gWait.status === 'treatment_waiting' && gWait.treatment.cleaning.adult_prophy === true
+      && !!cHilde && cHilde.check && cHilde.due && !cHilde.done,
+      'fix pass: back in the hygienist\'s queue, the waiting patient whose cleaning is saved is marked "Cleaning on chart — check before starting", next to the Cleaning pill');
+    const cPia = cleanCell('Revisado, Pia');
+    log(!!cPia && cPia.check && cPia.due && !cPia.done && !db.getPatient(pPlan.id).treatment.completed_at,
+      'fix pass: a cleaning Dental Triage only charted reads the same — something to check, never done, and the Cleaning pill stays');
+    const noMark = ['Revisado, Hugh', 'Revisado, Hope', 'Revisado, Hank'].map(cleanCell);
+    log(noMark.every((c) => !!c && c.due && !c.check && !c.done),
+      'fix pass: a waiting patient with no cleaning on the chart, and patients not waiting for a chair, carry no such mark');
+    hyW.remove();
+    const hyH = hyMod.renderHygienist(ctxF, { id: pFresh.id });
+    document.body.append(hyH);
+    await settle();
+    const btnsH = buttonsOf(hyH);
+    log(btnsH.includes('Mark cleaning complete') && btnsH.includes('Sign off & lock (optional)')
+      && !btnsH.includes('Save cleaning — patient still waiting for a chair') && !/the treating dentist signs off and locks the record/.test(hyH.textContent),
+      'fix pass: for a patient not waiting for a chair the hygienist\'s complete and sign-off are offered as before');
+    hyH.remove();
+
+    // A chart does not refresh while it is open, and the cleaning station's
+    // save carries the whole chart as it was opened — the dentist's
+    // extractions, anesthetic, notes and signature with it. So each save says
+    // what it opened, and one made after another station changed the chart or
+    // moved the patient is refused with nothing written, whichever button.
+    // (The "still waiting" button used to save anyway for a patient taken into
+    // a chair since, and its copy wrote over the dentist's work in the chair;
+    // the other button pulled a checked-out patient back into treatment.)
+    const toastNodes = () => Array.from(document.querySelectorAll('#toast-host .toast'));
+    const WAIT_BTN = 'Save cleaning — patient still waiting for a chair';
+    const staleClick = async (pid, meanwhile, label = WAIT_BTN) => {
+      const v = hyMod.renderHygienist(ctxF, { id: pid });
+      document.body.append(v);
+      await settle();
+      meanwhile();
+      const chip = Array.from(v.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent));
+      if (chip) chip.click();
+      const btn = Array.from(v.querySelectorAll('button')).find((b) => b.textContent === label);
+      // The toasts this click raised (earlier ones expire on a timer, so a
+      // count taken before would not line up).
+      const before = new Set(toastNodes());
+      if (btn) btn.click();
+      await settle();
+      const said = toastNodes().filter((x) => !before.has(x)).map((x) => x.textContent);
+      v.remove();
+      return { clicked: !!btn, said };
+    };
+    // What the dentist saves in the chair between the hygienist opening the
+    // chart and clicking: a second extraction, more anesthetic, notes, and a
+    // signature — none of it in the hygienist's copy.
+    const chairSave = {
+      extractions: [{ tooth: '30', types: ['surgical'] }, { tooth: '31', types: ['simple'] }],
+      anesthetic: [{ agent: 'lidocaine', carps: '4' }], clinical_notes: 'Extracted #30 and #31 under IANB',
+      provider_name: 'Dr. Molar', provider_signature: 'data:image/png;base64,DENTISTSIG',
+    };
+    const chairKept = (g) => g.status === 'in_treatment' && !g.treatment.completed_at
+      && g.treatment.extractions.map((e) => e.tooth).join(',') === '30,31' && g.treatment.anesthetic[0].carps === '4'
+      && g.treatment.clinical_notes === 'Extracted #30 and #31 under IANB'
+      && g.treatment.provider_name === 'Dr. Molar' && g.treatment.provider_signature === 'data:image/png;base64,DENTISTSIG'
+      && !g.treatment.cleaning.adult_prophy;
+    for (const [first, label] of [['Stan', WAIT_BTN], ['Stella', 'Save cleaning']]) {
+      const pS = newPtF(first, 'both');
+      db.saveTreatment(currentUser, pS.id, chartF, 'waiting');
+      const s = await staleClick(pS.id, () => db.saveTreatment(currentUser, pS.id, chairSave, false), label);
+      const g = db.getPatient(pS.id);
+      log(s.clicked && chairKept(g) && g.triage.status === 'in_treatment'
+        && s.said.some((m) => /no longer waiting for a treatment chair \(In treatment\).*Nothing was saved/.test(m)),
+        `fix pass: taken into a chair after the hygienist opened the chart, "${label}" writes nothing and says why — the extraction, anesthetic, notes and signature the dentist saved in the chair all survive, and the visit is not completed`);
+    }
+    // Dental Triage changes the plan while the patient waits: the status is
+    // the same, the chart is not.
+    const pReplan = newPtF('Paz', 'both');
+    db.saveTreatment(currentUser, pReplan.id, chartF, 'waiting');
+    const replan = { ...chartF, extractions: [{ tooth: '30', types: ['surgical'] }, { tooth: '3', types: ['simple'] }], clinical_notes: 'Add #3' };
+    const sReplan = await staleClick(pReplan.id, () => db.saveTreatment(currentUser, pReplan.id, replan, 'waiting'));
+    const gReplan = db.getPatient(pReplan.id);
+    log(sReplan.clicked && gReplan.status === 'treatment_waiting' && gReplan.treatment.extractions.map((e) => e.tooth).join(',') === '30,3'
+      && gReplan.treatment.clinical_notes === 'Add #3' && !gReplan.treatment.cleaning.adult_prophy
+      && sReplan.said.some((m) => /changed on another station after it was opened here\. Nothing was saved/.test(m)),
+      'fix pass: Dental Triage changing a waiting patient\'s plan after the hygienist opened the chart is caught too — still waiting, but the save is refused and the new plan kept');
+    // The desk checks the patient out — either button.
+    for (const [first, label] of [['Gus', WAIT_BTN], ['Gil', 'Save cleaning']]) {
+      const pG = newPtF(first, 'both');
+      db.saveTreatment(currentUser, pG.id, chartF, 'waiting');
+      let out = null;
+      const s = await staleClick(pG.id, () => { out = db.dismissPatient(currentUser, pG.id); }, label);
+      const g = db.getPatient(pG.id);
+      log(s.clicked && g.status === 'dismissed' && !!g.dismissed_at && g.dismissed_at === out.dismissed_at
+        && g.triage.status === out.triage.status && !g.treatment.completed_at && !g.treatment.cleaning.adult_prophy
+        && s.said.some((m) => /no longer waiting for a treatment chair \(Checked out\).*Nothing was saved/.test(m)),
+        `fix pass: checked out after the hygienist opened the chart, "${label}" saves nothing and says why — the patient is not pulled back into the clinic`);
+    }
+    // The station's own saves are never mistaken for another station's: after
+    // a save the chart is read again, and the next one goes through.
+    const pTwice = newPtF('Tess', 'hygienist');
+    const vTwice = hyMod.renderHygienist(ctxF, { id: pTwice.id });
+    document.body.append(vTwice);
+    await settle();
+    const chipIn = (label) => Array.from(vTwice.querySelectorAll('.chip-btn')).find((b) => b.textContent === label);
+    const btnIn2 = (label) => Array.from(vTwice.querySelectorAll('button')).find((b) => b.textContent === label);
+    chipIn('Adult prophy').click();
+    btnIn2('Save cleaning').click();
+    await settle();
+    const tessMid = db.getPatient(pTwice.id);
+    chipIn('Oral hygiene instruction').click();
+    btnIn2('Mark cleaning complete').click();
+    await settle();
+    const gTwice = db.getPatient(pTwice.id);
+    vTwice.remove();
+    log(tessMid.status === 'in_treatment' && tessMid.treatment.cleaning.adult_prophy === true
+      && gTwice.status === 'completed' && gTwice.treatment.cleaning.adult_prophy === true && gTwice.treatment.cleaning.ohi === true,
+      'fix pass: the cleaning station\'s own save is not taken for another station\'s — saved, re-read, and completed from the same screen');
+
+    // The data layer, for a caller that does not say what it opened.
+    const pNotYet = newPtF('Nell', 'both');
+    let nyErr = '';
+    try { db.saveTreatment(hygC, pNotYet.id, { cleaning: { adult_prophy: true }, provider_name: 'Hy Cleaner' }, 'cleaning_waiting'); } catch (e) { nyErr = e.message; }
+    let doneErr = '';
+    const doneAt = db.getPatient(pDone.id).treatment.completed_at;
+    try { db.saveTreatment(hygC, pDone.id, { ...chartF, cleaning: { adult_prophy: true } }, 'cleaning_waiting'); } catch (e) { doneErr = e.message; }
+    const gDone2 = db.getPatient(pDone.id);
+    const pInChair = newPtF('Chas', 'both');
+    db.saveTreatment(currentUser, pInChair.id, chartF, 'waiting');
+    db.saveTreatment(currentUser, pInChair.id, chairSave, false);
+    let chairErr = '';
+    try { db.saveTreatment(hygC, pInChair.id, { ...chartF, cleaning: { adult_prophy: true } }, 'cleaning_waiting'); } catch (e) { chairErr = e.message; }
+    log(/no longer waiting for a treatment chair \(Waiting for provider\)/.test(nyErr) && !db.getPatient(pNotYet.id).treatment
+      && db.getPatient(pNotYet.id).status === 'triaged'
+      && /no longer waiting for a treatment chair \(Completed\)/.test(doneErr) && gDone2.status === 'completed' && gDone2.treatment.completed_at === doneAt
+      && !gDone2.treatment.cleaning.adult_prophy
+      && /no longer waiting for a treatment chair \(In treatment\)/.test(chairErr) && chairKept(db.getPatient(pInChair.id)),
+      'fix pass: the data layer refuses the "still waiting" save for a patient not waiting — in a chair included — and writes nothing');
+    // No save from the cleaning station brings back a checked-out patient; a
+    // correction to their record an administrator unlocked still saves.
+    const pOut = newPtF('Otto', 'hygienist');
+    db.saveTreatment(hygC, pOut.id, { cleaning: { adult_prophy: true }, provider_name: 'Hy Cleaner' }, 'cleaning_complete');
+    db.dismissPatient(currentUser, pOut.id);
+    const outErrs = ['cleaning', 'cleaning_complete', 'cleaning_lock'].map((m) => {
+      try { db.saveTreatment(hygC, pOut.id, { cleaning: { gross_debridement: true }, provider_name: 'Hy Cleaner', provider_signature: 'data:,x' }, m); return ''; } catch (e) { return e.message; }
+    });
+    const gOut = db.getPatient(pOut.id);
+    // (Each step on its own, so a regression reads as a failed check, not a crash.)
+    const tryDo = (fn) => { try { fn(); } catch (e) { /* the check below says what went wrong */ } };
+    tryDo(() => db.lockRecord(currentUser, pOut.id));
+    tryDo(() => db.unlockRecord(currentUser, pOut.id, 'Add the quadrant'));
+    tryDo(() => db.saveTreatment(hygC, pOut.id, { cleaning: { adult_prophy: true, quad_detail: 'UR' }, provider_name: 'Hy Cleaner' }, 'cleaning'));
+    const gOutAm = db.getPatient(pOut.id);
+    log(outErrs.every((m) => /has been checked out.*Nothing was saved/.test(m))
+      && gOut.status === 'dismissed' && !gOut.treatment.cleaning.gross_debridement && !gOut.treatment.locked
+      && gOutAm.status === 'dismissed' && gOutAm.treatment.cleaning.quad_detail === 'UR' && gOutAm.lock.amending,
+      'fix pass: no save from the cleaning station brings back a patient who has been checked out; a correction to their unlocked record still saves, and they stay checked out');
+
+    // The printed name on the cleaning station is the person signed in there,
+    // not the name already on the chart — for a patient Dental Triage parked,
+    // that is the triage dentist's, and the cleaning was saved and printed as
+    // theirs. Driven through the screens, as the people involved.
+    db.createUser(currentUser, { username: 'dt_fixpass', full_name: 'Dr. Triage', role: 'doctor', password: 'x' });
+    db.createUser(currentUser, { username: 'dm_fixpass', full_name: 'Dr. Molar', role: 'doctor', password: 'x' });
+    db.createUser(currentUser, { username: 'hh_fixpass', full_name: 'Hanna Hygienist', role: 'hygienist', password: 'x' });
+    const docT = db.login('dt_fixpass', 'x');
+    const docM = db.login('dm_fixpass', 'x');
+    const hygH = db.login('hh_fixpass', 'x');
+    const adminF = currentUser;
+    const nameField = (v) => Array.from(v.querySelectorAll('input')).find((i) => i.placeholder === 'Printed name');
+    const pWanda = newPtF('Wanda', 'both');
+    const pWilma = newPtF('Wilma', 'both');
+    for (const pt of [pWanda, pWilma]) {
+      db.saveTreatment(docT, pt.id, { extractions: [{ tooth: '30', types: ['surgical'] }], provider_name: 'Dr. Triage', provider_signature: 'data:image/png;base64,TRIAGESIG' }, 'waiting');
+    }
+    currentUser = hygH; storeF.setUser(hygH);
+    const vWanda = hyMod.renderHygienist(ctxF, { id: pWanda.id });
+    document.body.append(vWanda);
+    await settle();
+    const wandaName = nameField(vWanda).value;
+    Array.from(vWanda.querySelectorAll('.chip-btn')).find((b) => b.textContent === 'Adult prophy').click();
+    Array.from(vWanda.querySelectorAll('button')).find((b) => b.textContent === WAIT_BTN).click();
+    await settle();
+    vWanda.remove();
+    const gWanda = db.getPatient(pWanda.id);
+    const progWanda = plainF(pdfF.buildHtml(gWanda, 'progress'));
+    log(wandaName === 'Hanna Hygienist' && gWanda.status === 'treatment_waiting'
+      && gWanda.treatment.provider_name === 'Hanna Hygienist' && !gWanda.treatment.provider_signature
+      && /Cleaning Adult prophy/.test(progWanda) && /Provider Sign-Off Provider Hanna Hygienist/.test(progWanda),
+      'fix pass: the hygienist\'s printed name opens as the hygienist signed in — not the triage dentist\'s on the chart — and her cleaning is saved and printed under her name, without the dentist\'s signature');
+    // Cleared, the name is asked for — it does not fall back to the chart's.
+    const vWilma = hyMod.renderHygienist(ctxF, { id: pWilma.id });
+    document.body.append(vWilma);
+    await settle();
+    const wilmaField = nameField(vWilma);
+    wilmaField.value = '';
+    wilmaField.dispatchEvent(new window.Event('input', { bubbles: true }));
+    Array.from(vWilma.querySelectorAll('.chip-btn')).find((b) => b.textContent === 'Adult prophy').click();
+    const beforeWilma = new Set(toastNodes());
+    Array.from(vWilma.querySelectorAll('button')).find((b) => b.textContent === WAIT_BTN).click();
+    await settle();
+    const wilmaSaid = toastNodes().filter((x) => !beforeWilma.has(x)).map((x) => x.textContent);
+    vWilma.remove();
+    const gWilma = db.getPatient(pWilma.id);
+    log(wilmaSaid.some((m) => /Enter the hygienist.s printed name/.test(m)) && !gWilma.treatment.cleaning.adult_prophy
+      && gWilma.treatment.provider_name === 'Dr. Triage',
+      'fix pass: with the printed name cleared, the "still waiting" save asks for it rather than saving under the name already on the chart');
+    // Correcting a finished record keeps the name it was signed under.
+    const vOtto = hyMod.renderHygienist(ctxF, { id: pOut.id });
+    document.body.append(vOtto);
+    await settle();
+    const ottoName = nameField(vOtto).value;
+    vOtto.remove();
+    log(ottoName === 'Hy Cleaner', 'fix pass: amending a finished record, the printed name stays the one it was signed under');
+    // The treating dentist then takes Wanda into a chair: their printed name
+    // opens as their own — not the hygienist's, now the last on the chart —
+    // and her signature does not go with it.
+    currentUser = docM; storeF.setUser(docM);
+    const provF = (await import('../src/renderer/js/views/provider.js')).renderProvider(ctxF, { id: pWanda.id });
+    document.body.append(provF);
+    await settle(14);
+    const molarName = nameField(provF).value;
+    const completeF = Array.from(provF.querySelectorAll('button')).find((b) => /Mark visit complete/.test(b.textContent));
+    if (completeF) completeF.click();
+    await settle(14);
+    provF.remove();
+    const gWandaDone = db.getPatient(pWanda.id);
+    log(molarName === 'Dr. Molar' && !!completeF && gWandaDone.status === 'completed'
+      && gWandaDone.treatment.provider_name === 'Dr. Molar' && !gWandaDone.treatment.provider_signature
+      && gWandaDone.treatment.cleaning.adult_prophy === true,
+      'fix pass: the treating dentist\'s printed name opens as their own, not the hygienist\'s left on the chart, and the visit completes under it with the cleaning kept');
+    currentUser = adminF; storeF.setUser(adminF);
+
+    // The consent a patient signs at the kiosk, and the version stored with it:
+    // the languages that sign consent.emergency signed a changed text (the
+    // number), so their consent rows carry a new version; English signs the
+    // full oral-surgery wording, which did not change.
+    const i18nF = await import('../src/renderer/js/i18n.js');
+    const { renderKiosk: kioskF } = await import('../src/renderer/js/views/kiosk.js');
+    const signSurgery = async (card, last) => {
+      const k = kioskF({ navigate: () => {} }); document.body.append(k);
+      await settle(4);
+      try {
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => card.test(c.textContent)).click();
+        await settle(4);
+        const T = i18nF.t;
+        const fieldOf = (label) => Array.from(k.querySelectorAll('.kiosk-body label.field'))
+          .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
+        const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+        const next = async () => { clickText(T('common.next'), k); await settle(3); };
+        put(T('intake.firstName'), 'Consent'); put(T('intake.lastName'), last); put(T('intake.dob'), '1980-01-01');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        const citySel = fieldOf(T('intake.city')).querySelector('select');
+        put(T('intake.city'), citySel ? citySel.options[1].value : 'Sandy');
+        put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        k.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+        put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        k.querySelector('.chip-select[data-key="acetaminophen"]').click();
+        await next();
+        Array.from(k.querySelectorAll('.kiosk-body select')).forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[0].click(); // Extraction — in pain
+        await next();
+        const agreeG = k.querySelector('.big-check'); agreeG.checked = true; agreeG.dispatchEvent(new window.Event('change', { bubbles: true }));
+        k.querySelector('.deemed-field .chip-btn').click();
+        put(T('intake.signerName'), `Consent ${last}`);
+        await next();
+        const onSurgery = k.querySelector('.kiosk-step-label').textContent.includes(T('intake.s_surgery'));
+        const text = k.querySelector('.kiosk-body').textContent;
+        const agreeS = k.querySelector('.big-check'); agreeS.checked = true; agreeS.dispatchEvent(new window.Event('change', { bubbles: true }));
+        await next();
+        $all('.kiosk-nav button', k).pop().click();
+        await settle(4);
+        const pt = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === last);
+        const os = pt ? (db.getPatient(pt.id).consents || []).find((c) => c.type === 'oral_surgery') : null;
+        return { onSurgery, text, version: os ? os.version : null };
+      } catch (e) {
+        return { error: e.message };
+      } finally {
+        k.remove();
+        i18nF.setLang('en');
+      }
+    };
+    const esK = await signSurgery(/Español/, 'Firmaes');
+    log(esK.onSurgery === true && esK.text.includes('Para emergencias fuera de horario llame al (951) 317-4968.') && esK.version === 'oral_surgery-es-v2',
+      `fix pass: a Spanish patient signs the original emergency sentence with MMW's number, stored as oral_surgery-es-v2${esK.error ? ' — ' + esK.error : ''}`);
+    const enK = await signSurgery(/English/, 'Signsen');
+    log(enK.onSurgery === true && enK.text.includes('(951) 317-4968') && enK.version === 'oral_surgery-en-v1',
+      `fix pass: English signs the unchanged full oral-surgery wording, and keeps oral_surgery-en-v1${enK.error ? ' — ' + enK.error : ''}`);
+
+    // The Records screen display patients photograph: MMW's number, and the
+    // treatment in the same words as the Visit Summary.
+    const { renderRecords: recordsF } = await import('../src/renderer/js/views/records.js');
+    const screenOf = async (pid) => {
+      const recF = recordsF(ctxF, { id: pid });
+      document.body.append(recF);
+      await settle();
+      const sdBtn = Array.from(recF.querySelectorAll('button')).find((b) => b.textContent === 'Screen display for photo');
+      if (sdBtn) sdBtn.click();
+      await settle();
+      const sd = document.querySelector('.screen-display');
+      const out = sd ? {
+        text: sd.textContent,
+        treatment: (Array.from(sd.querySelectorAll('.sd-row')).find((r) => r.firstChild.textContent === 'Treatment') || { lastChild: {} }).lastChild.textContent,
+      } : null;
+      if (sd) Array.from(sd.closest('.modal-card').querySelectorAll('button')).pop().click();
+      await settle(3);
+      recF.remove();
+      return out;
+    };
+    const sdDone = await screenOf(pDone.id);
+    log(!!sdDone && sdDone.text.includes('(951) 317-4968') && !/541[-. ]?556/.test(sdDone.text),
+      'fix pass: the Records screen display shows MMW\'s number (951) 317-4968');
+    const sdLeft = await screenOf(pLeft.id);
+    log(!!sdLeft && sdLeft.treatment === 'Charted, not confirmed as done: 1 extraction(s)' && sdDone.treatment === '1 extraction(s)',
+      'fix pass: for a patient who left before a chair, the screen display the patient photographs lists the chart as not confirmed — as their Visit Summary does — and a completed visit\'s treatment as before');
+    // The Previous visits table of a later visit says the same.
+    const laterOf = (first) => db.createPatient(currentUser, {
+      first_name: first, last_name: 'Revisado', language: 'en', demographics: {}, medical_history: {}, dental_history: {},
+      consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }],
+    });
+    const histLeft = db.patientHistory(laterOf('Lena').id).find((v) => v.id === pLeft.id);
+    const histDone = db.patientHistory(laterOf('Dora').id).find((v) => v.id === pDone.id);
+    const histFlo = db.patientHistory(laterOf('Flo').id).find((v) => v.id === pFlo.id);
+    log(!!histLeft && histLeft.summary === 'Charted, not confirmed as done: 1 extraction(s)'
+      && !!histFlo && histFlo.summary === 'Charted, not confirmed as done: 1 extraction(s)'
+      && !!histDone && histDone.summary === '1 extraction(s)',
+      'fix pass: a later visit\'s Previous visits lists a visit not completed at a chair as charted, not confirmed as done — never as treatment given — and a completed one as before');
+
+    // After-care sections are for the desks that print them — never the hygienist.
+    db.createUser(currentUser, { username: 'hyg_fixpass', full_name: 'Hy Fixpass', role: 'hygienist', password: 'x' });
+    currentUser = db.login('hyg_fixpass', 'x');
+    const acHyg = await window.api.aftercareGet({ patientId: pDone.id, lang: 'en' });
+    currentUser = signInAdmin();
+    const acAdm = await window.api.aftercareGet({ patientId: pDone.id, lang: 'en' });
+    log(!acHyg.ok && /permission/.test(acHyg.error) && acAdm.ok && PERMS.aftercareGet.join() === 'admin,doctor,checkout',
+      'fix pass: the hygienist cannot read the after-care sections (no screen of theirs asks, and they cannot print them)');
+    if (evPrevF) db.setActiveEvent(currentUser, evPrevF);
   }
 
   /* ===== C1 + C4 — age, race, and how the waiver was signed ==================

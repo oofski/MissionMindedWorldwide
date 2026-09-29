@@ -269,12 +269,16 @@ export function renderCheckout(ctx, params = {}) {
   }
 
   // Why the list is what it is. A patient examined at Dental Triage and parked
-  // for a chair has a chart of PLANNED work, which the sheet leaves out; a
-  // patient still at a chair has what is charted so far.
+  // for a chair has a chart the sheet leaves out; a patient still at a chair
+  // has what is charted so far. For one checked out without the visit being
+  // completed at a chair, the note says only what the record knows: the chart
+  // is not confirmed as done (aftercare.careStage leans to "not treated" — a
+  // cleaning the hygienist did while they waited, or care given before an
+  // administrator sent them back, reads the same), never that nothing was done.
   function stageNote(p, ac) {
     if (ac.stage === 'not_treated') {
       if (p.status === 'treatment_waiting') return 'Examined at Dental Triage and still waiting for a treatment chair — the treatment is not done yet, so only the general advice will print.';
-      if (p.status === 'dismissed') return 'Checked out before reaching a treatment chair — nothing charted was done, so the sheet carries only the general advice.';
+      if (p.status === 'dismissed') return 'Checked out without the visit being completed at a treatment chair — nothing charted is confirmed as done, so the sheet carries only the general advice.';
       return 'Not yet at a treatment chair, so only the general advice will print.';
     }
     if (!ac.keys.length) return 'No procedure is recorded for this visit, so the sheet carries only the general advice.';

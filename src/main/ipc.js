@@ -116,8 +116,9 @@ const PERMS = {
   'pdf:preview': ['admin', 'doctor', 'checkout'],
   'pdf:print': ['admin', 'doctor', 'checkout'],
   // The after-care sections for one patient, listed on the check-out screen
-  // before printing. The hygienist sends patients home too.
-  'aftercare:get': ['admin', 'doctor', 'checkout', 'hygienist'],
+  // before printing — the same roles that can print them (pdf:*). No
+  // hygienist screen asks for them, and the hygienist cannot print them.
+  'aftercare:get': ['admin', 'doctor', 'checkout'],
   'record:exportUsb': ['admin', 'doctor'],
   'usb:list': ['admin', 'doctor', 'triage', 'emt', 'checkout'],
   'usb:load': ['admin', 'doctor', 'triage', 'checkout'],
@@ -418,10 +419,12 @@ function register(getMainWindow) {
   handle('inventory:delete', ({ id }) => db.deleteInventoryItem(currentUser, id));
   handle('inventory:chairUsage', ({ eventId } = {}) => db.inventoryChairUsage(eventId));
   // finalize may be false, 'waiting' (v0.0.15: move to Treatment Waiting),
-  // 'cleaning' / 'cleaning_complete' / 'cleaning_lock' (v0.0.15: the
-  // hygienist's save, complete and sign-off), 'complete' (mark done, no lock),
+  // 'cleaning' / 'cleaning_complete' / 'cleaning_lock' / 'cleaning_waiting'
+  // (v0.0.15: the hygienist's save, complete, sign-off, and save for a patient
+  // waiting for a chair), 'complete' (mark done, no lock),
   // or 'lock'/true — pass it through so each mode reaches the data layer. Same
-  // roles, so no new channel was needed.
+  // roles, so no new channel was needed. data.opened (the chart the station
+  // opened) travels inside data, untouched (see db.saveTreatment).
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
   handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));

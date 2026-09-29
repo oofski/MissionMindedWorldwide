@@ -56,14 +56,22 @@ export function renderProvider(ctx, params = {}) {
     const waitingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'treatment_waiting'));
     const treatingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'in_treatment' && p.treatment_waiting_at));
     const atHygienist = sortedByName(ready.filter((p) => p.route === 'hygienist'));
-    const row = (p) => el('tr', {}, [
+    // The pill says where the patient is at this station. In the Dental Triage
+    // list, in_treatment means being examined there; "In treatment" is what
+    // the chair list says, and the same words in both lists read as the
+    // patient being in two places. Only the label differs — the status is
+    // the same in_treatment either way.
+    const stagePill = (p, list) => (list === triageQueue && p.status === 'in_treatment'
+      ? el('span', { class: 'pill pill--warning' }, [el('span', { class: 'pill-dot' }), 'Being examined'])
+      : statusPill(p.status));
+    const row = (p, list) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
         p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:8px' }, ['Blood thinner']) : null,
         (p.flags && p.flags.length) ? flagDot(p.flags.length) : null]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
       el('td', {}, [p.complaint || '—']),
       el('td', {}, [p.assigned_to || '—']),
-      el('td', {}, [statusPill(p.status),
+      el('td', {}, [stagePill(p, list),
         // How long they have been waiting for a chair — the number the floor
         // lead balances fifteen chairs against.
         p.status === 'treatment_waiting' && p.treatment_waiting_at
@@ -73,7 +81,7 @@ export function renderProvider(ctx, params = {}) {
     const table = (list, emptyMsg) => el('div', { class: 'data-table-wrap' }, [
       el('table', { class: 'data-table' }, [
         el('thead', {}, [el('tr', {}, ['Patient', 'Age', 'Complaint', 'Chair', 'Status', ''].map((h) => el('th', {}, [h])))]),
-        el('tbody', {}, list.length ? list.map(row) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
+        el('tbody', {}, list.length ? list.map((p) => row(p, list)) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
       ]),
     ]);
     const listCard = (ic, title, list, emptyMsg) => el('div', { class: 'card' }, [
@@ -759,8 +767,16 @@ export function renderProvider(ctx, params = {}) {
 
     /* ---------- Sign-off ---------- */
     // Pre-filled from whoever is signed in, so requiring it costs a glance
-    // rather than a re-type.
-    const providerName = el('input', { class: 'input', placeholder: 'Printed name', value: tx.provider_name || (store.user && store.user.full_name) || '' });
+    // rather than a re-type. Not from the name already on the chart: that is
+    // whoever saved it last — Dental Triage's dentist for a patient taken from
+    // Treatment Waiting into a chair, or the hygienist who cleaned them while
+    // they waited — and the treating dentist completed the visit under it.
+    // Correcting a finished record (amending) keeps the name it was signed
+    // under.
+    const storedProvider = tx.provider_name || '';
+    const signedIn = (store.user && store.user.full_name) || '';
+    const providerName = el('input', { class: 'input', placeholder: 'Printed name',
+      value: (locked || amending) ? (storedProvider || signedIn) : (signedIn || storedProvider) });
     if (locked) providerName.disabled = true;
     const sigPad = SignaturePad();
 
@@ -944,7 +960,10 @@ export function renderProvider(ctx, params = {}) {
         other_procedures: otherProc.get(),
         clinical_notes: dentalNotes.get(),
         provider_name: providerName.value.trim(),
-        provider_signature: sigPad.getDataUrl() || tx.provider_signature || null,
+        // A signature on file stays only with the name it was given under, so
+        // one person's signature is never kept under another's name.
+        provider_signature: sigPad.getDataUrl()
+          || (providerName.value.trim() === storedProvider ? tx.provider_signature : null) || null,
       };
     }
     function collectTriage() {
