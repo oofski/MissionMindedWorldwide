@@ -10,12 +10,6 @@
  */
 
 const { BrowserWindow } = require('electron');
-// Dental Triage lists and the printing rules the spreadsheet shares: surfaces,
-// anaesthetic agent and site, restorative, referral, status. The agent names
-// mirror the clinic list (retired agents included) and are pinned to it by the
-// harness — the map that used to live here knew two of the five, so a
-// mepivacaine block printed as "mepivacaine".
-const DL = require('./dentalLabels');
 
 function esc(s) {
   if (s == null) return '';
@@ -146,6 +140,12 @@ const CLEAN_LABELS = {
   gross_debridement: 'Gross debridement', quad_deep_scaling: 'Quadrant deep scaling',
   sealant: 'Sealant', ohi: 'Oral hygiene instruction',
 };
+// Dental Triage lists and the printing rules the spreadsheet shares: surfaces,
+// anaesthetic agent and site, restorative, referral, status. The agent names
+// mirror the clinic list (retired agents included) and are pinned to it by the
+// harness — the map that used to live here knew two of the five, so a
+// mepivacaine block printed as "mepivacaine".
+const DL = require('./dentalLabels');
 // The retired triage-station checklist, still on older records.
 const CHECKLIST_LABELS = { referral: 'Referral (triage checklist)' };
 

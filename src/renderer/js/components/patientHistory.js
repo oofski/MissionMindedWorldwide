@@ -1,7 +1,7 @@
 import { el } from '../dom.js';
+import { statusLabel } from '../../i18n/dentalLists.js';
 import { icon } from '../icons.js';
 import { conditions, allergies, visitTypeLabel, priorDentistLabel } from '../i18n.js';
-import { statusLabel } from '../../i18n/dentalLists.js';
 
 // A history yes/no as the clinician should read it. 'na' is the pregnancy
 // question's third answer — it must not surface as the raw code, because
