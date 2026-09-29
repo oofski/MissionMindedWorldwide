@@ -2795,12 +2795,12 @@ function mergeSummaries(list) {
   for (const s of list) {
     if (!s) continue;
     if (s.checked_out === undefined) legacy++;
-    NUM.forEach((k) => { out[k] += Number(s[k]) || 0; });
     // Totals kept before v0.0.15 have no xrays_taken; for them "x-rays taken"
     // was the image count, so that is what they contribute — the same fallback
     // summarize() applies to a single visit. A kept report has no referrals
     // figure at all, and contributes zero to that one.
     out.xrays_taken += s.xrays_taken !== undefined ? (Number(s.xrays_taken) || 0) : (Number(s.xrays) || 0);
+    NUM.forEach((k) => { out[k] += Number(s[k]) || 0; });
     MAPS.forEach((k) => {
       Object.entries(s[k] || {}).forEach(([kk, v]) => { out[k][kk] = (out[k][kk] || 0) + (Number(v) || 0); });
     });

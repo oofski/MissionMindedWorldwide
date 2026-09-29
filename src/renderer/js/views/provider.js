@@ -247,22 +247,19 @@ export function renderProvider(ctx, params = {}) {
       // M F L O B, in the order a note writes them. surfaceList also reads the
       // legacy shapes (a "1,2" string used to crash this row). A value that is
       // not one of the five — the old 1–4 surface COUNTS above all — has no
-      // pill, so it is shown as its own chip and kept on save unless removed.
+      // pill and cannot be turned into letters, so it is shown read-only as
+      // what it was and saved back with the row, beside any letters ticked now.
       const surf = new Set(surfaceList(f.surfaces));
       const legacySurf = [...surf].filter((v) => !SURFACES.some((s) => s.key === v));
       const surfWrap = el('div', { class: 'surface-pills' }, [
         ...SURFACES.map(({ key, en }) =>
           el('button', { type: 'button', title: en, class: 'surf-chip' + (surf.has(key) ? ' surf-chip--on' : ''), onClick: (e) => { if (locked) return; if (surf.has(key)) surf.delete(key); else surf.add(key); e.currentTarget.classList.toggle('surf-chip--on'); } }, [key])),
-        ...legacySurf.map((v) => {
-          const chip = el('button', {
-            type: 'button', class: 'surf-chip surf-chip--legacy',
-            title: LEGACY_SURFACE_COUNTS.includes(v)
-              ? `Recorded before v0.0.15 as the number of surfaces (${v})${locked ? '' : ' — tap to remove'}`
-              : `Recorded earlier as "${v}"${locked ? '' : ' — tap to remove'}`,
-            onClick: () => { if (locked) return; surf.delete(v); chip.remove(); },
-          }, [LEGACY_SURFACE_COUNTS.includes(v) ? `${v}-surf` : v]);
-          return chip;
-        }),
+        ...legacySurf.map((v) => el('span', {
+          class: 'surf-chip surf-chip--legacy',
+          title: LEGACY_SURFACE_COUNTS.includes(v)
+            ? `Recorded before v0.0.15 as the number of surfaces (${v}) — kept as recorded`
+            : `Recorded earlier as "${v}" — kept as recorded`,
+        }, [LEGACY_SURFACE_COUNTS.includes(v) ? `${v}-surf` : v])),
       ]);
       let ant = !!f.ant, post = !!f.post;
       const antBtn = toggleChip('Ant', ant, (on) => { ant = on; }, locked);
@@ -968,9 +965,8 @@ export function renderProvider(ctx, params = {}) {
         if (!ok) return;
       }
       try {
-        // Order matters: the triage save must come first, because the
-        // treatment save is what sets the patient's status (and a triage save
-        // marked 'ready' would otherwise put a waiting patient back to triaged).
+        // Order matters: the treatment save is what sets the patient's status
+        // (in treatment, waiting for a chair, completed), so it runs last.
         await api.saveTriage(id, collectTriage());
         await api.saveTreatment(id, payload, mode);
         toast(mode === 'lock' ? 'Record signed off and locked'

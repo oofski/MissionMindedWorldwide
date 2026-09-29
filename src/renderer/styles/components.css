@@ -527,7 +527,8 @@
 .surf-chip--on{ background:var(--accent); color:#fff; border-color:var(--accent); }
 /* A surfaces value with no pill of its own — before v0.0.15 the pills were the
    NUMBER of surfaces (1–4). Shown as recorded, visibly not one of M F L O B. */
-.surf-chip--legacy{ width:auto; padding:0 7px; border-style:dashed; font-family:inherit; font-size:var(--fs-2xs); }
+.surf-chip--legacy{ display:inline-flex; align-items:center; justify-content:center; width:auto; padding:0 7px;
+  border-style:dashed; font-family:inherit; font-size:var(--fs-2xs); cursor:default; }
 .antpost{ display:inline-flex; gap:4px; }
 .filling-row{ display:grid; grid-template-columns:108px auto auto auto; gap:10px; align-items:center; padding:8px; border:var(--border-line); border-radius:var(--radius-sm); background:var(--surface); }
 .filling-row .field{ margin:0; }

@@ -2646,6 +2646,8 @@ async function main() {
       'dental triage: a filling offers the pills M F L O B');
     log(pillsL.length === 2 && pillsL[0].includes('2-surf') && pillsL[1].includes('1-surf') && pillsL[1].includes('2-surf'),
       'dental triage: an older record’s surface COUNT shows as its own chip — and a count stored as a string no longer breaks the screen');
+    log(provL.querySelectorAll('.surf-chip--legacy').length === 3 && Array.from(provL.querySelectorAll('.surf-chip--legacy')).every((c) => c.tagName === 'SPAN'),
+      'dental triage: a surface count cannot be edited — it is shown as recorded and kept');
     const anesL = Array.from(provL.querySelectorAll('.anes-admin-row'));
     const [agentL0, siteL0] = anesL.length ? anesL[0].querySelectorAll('select') : [];
     log(!!siteL0 && siteL0.value === '#14 lingual' && /\(recorded\) #14 lingual/.test(selectedText(siteL0)),
