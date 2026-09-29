@@ -128,7 +128,7 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
   } else {
     const listed = matchCity(d.city, cityList);
     city = selectField(t('intake.city'), [
-      dash, ...cityList.map((c) => ({ value: c, label: c })), { value: 'other', label: t('common.other') },
+      dash, ...cityList.map((c) => ({ value: c, label: c })), { value: 'other', label: t('intake.otherCity') },
     ], { value: listed || (text(d.city) ? 'other' : ''), required: true });
     cityOther = textField(t('intake.cityOther'), { value: listed ? '' : text(d.city), required: true });
     cityOtherWrap = el('div', { class: 'span-2' }, [cityOther.node]);
@@ -386,7 +386,8 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
     const name = el('input', { class: 'input', placeholder: t('intake.medName'), value: med.name || '', list: listId, autocomplete: 'off' });
     const row = el('div', { class: 'med-row med-row--name' }, [name,
       el('button', { class: 'btn btn--ghost btn--sm btn--icon', type: 'button', onClick: () => row.remove() }, [icon('x', { size: 15 })])]);
-    row._get = () => ({ ...med, key: 'other', name: name.value.trim(), dose: med.dose || '', reason: med.reason || '' });
+    // A key this build does not know (a newer list's) is kept, not turned into 'other'.
+    row._get = () => ({ ...med, key: med.key && !checkKeys.has(med.key) ? med.key : 'other', name: name.value.trim(), dose: med.dose || '', reason: med.reason || '' });
     medRows.append(row);
     return name;
   }
