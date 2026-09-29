@@ -936,6 +936,9 @@ async function main() {
     const staleOther = await post({ ...base, first_name: 'Stale', last_name: 'Page', city: 'other', city_other: 'Gresham' });
     check('"Other" posted to an event whose list was since cleared stores the typed town',
       staleOther.status === 200 && (demoOf('Page') || {}).city === 'Gresham');
+    const typedOther = await post({ ...base, first_name: 'Typed', last_name: 'Word', city: 'other' });
+    check('with no list, whatever is typed in the City box is kept, as at the kiosk',
+      typedOther.status === 200 && (demoOf('Word') || {}).city === 'other');
     const blankOther = await cityPost({ first_name: 'Blank', last_name: 'Other', city: 'other', city_other: '' });
     check('"Other" with nothing typed is refused as a missing city', blankOther.status === 400 && /city/i.test(blankOther.data.error));
   }

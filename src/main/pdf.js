@@ -281,7 +281,7 @@ function fullPacketBody(p) {
   }
   medCells.push(field('Smokes / tobacco', ans(md.smoke)));
   if (md.version === 2) medCells.push(field('Pregnancy', ans(md.pregnancy)));
-  md.legacyRows.forEach((r) => medCells.push(field(r.key === 'hospitalized' ? 'Recent hospitalization' : r.label, ans(r.value))));
+  md.legacyRows.forEach((r) => medCells.push(field((r.key === 'hospitalized' ? 'Recent hospitalization' : r.label) + (md.version === 2 ? ' (earlier form)' : ''), ans(r.value))));
   // The eight Step 3 questions, then the ones asked before v0.0.15 — only if
   // this record has them.
   const dentCells = [

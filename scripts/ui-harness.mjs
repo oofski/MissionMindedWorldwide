@@ -2550,9 +2550,8 @@ async function main() {
       && same(ml.DENTAL_LEGACY_LABELS, Object.fromEntries(st.DENTAL_LEGACY.map((q) => [q.key, q.label]))),
     'v0.0.15: the main process agrees on the red flags, the 25 asked, and the Step 3 labels');
     const dbSrcV = srcV('../src/main/db.js');
-    const visitKeys = (dbSrcV.match(/const VISIT_SPECIFIC_DENTAL_KEYS = \[([^\]]*)\]/) || [])[1] || '';
-    log(same(Array.from(visitKeys.matchAll(/'([a-z_]+)'/g)).map((m) => m[1]), st.DENTAL_QUESTIONS.map((q) => q.key)),
-      'v0.0.15: a returning patient\'s new visit clears exactly the Step 3 questions (pinned to the list)');
+    log(/const VISIT_SPECIFIC_DENTAL_KEYS = Object\.keys\(require\('\.\/medicalLabels'\)\.DENTAL_Q_LABELS\)/.test(dbSrcV),
+      'v0.0.15: a returning patient\'s new visit clears the Step 3 questions from the pinned list, not a copy of its own');
     log(/\n  event: \[[^\]]*'cities'[^\]]*\]/.test(dbSrcV), 'v0.0.15: the City list is part of what syncs for an event');
 
     // ---- one legacy record and one v0.0.15 record, used by every check below ----
@@ -2608,6 +2607,9 @@ async function main() {
     log(mhx.clinicalFlags({ pregnancy: 'yes' }).includes('Pregnant') && mhx.clinicalFlags({ conditions: ['pregnant'] }).includes('Pregnant')
       && !mhx.clinicalFlags({ conditions: ['blood_thinners'] }).length,
     'v0.0.15: an older record\'s pregnancy still flags; blood thinners keep their own banner');
+    const reAnswered = mhx.normalizeMedical({ ...V2_MH, pregnancy: 'yes', condition_answers: { ...V2_MH.condition_answers, pregnant: 'no' } });
+    log(!mhx.clinicalFlags(reAnswered).includes('Pregnant') && !ml.clinicalFlags(reAnswered).includes('Pregnant'),
+      'v0.0.15: a pregnancy row answered No wins over an older record\'s "Pregnant, nursing…" Yes');
     log(mhx.clinicalFlags(LEGACY_MH).includes('Heart murmur') && mhx.clinicalFlags(LEGACY_MH).includes('Allergy: Articaine'),
       'v0.0.15: an older record\'s retired red flags still raise the flag');
 
@@ -2659,6 +2661,11 @@ async function main() {
       'new: checklist and typed medications are listed (no empty dose column)');
     log(/Pain with cold water/.test(ncT) && /Clenches \/ grinds at night/.test(ncT) && /Boring/.test(ncT) && /A neighbour/.test(ncT),
       'new: the Step 3 answers and the town show on the chart');
+    const carried = db.createPatient(currentUser, { first_name: 'Carried', last_name: 'Over', demographics: {},
+      medical_history: { ...V2_MH, hospitalized: 'yes' }, dental_history: {} });
+    log(/Hospitalized \(2 yrs\) \(earlier form\)/.test(cardsText(carried).textContent)
+      && /Recent hospitalization \(earlier form\)/.test(buildHtml(db.getPatient(carried.id), 'full')),
+    'a retired answer carried into a new-form record is marked as the earlier form\'s');
     const ucT = cardsText(unsP).textContent;
     log(/Unsure — ask the patient/.test(ucT) && !/None reported|None \(reviewed\)/.test(ucT.split('Conditions')[0]),
       'an allergy answer of Unsure never reads as "None"');
@@ -2769,6 +2776,10 @@ async function main() {
 
     // ---- City: the event's own list ----
     const evC = db.createEvent(currentUser, { name: 'City List', cities: [' Sandy ', 'sandy', 'Boring', '', 'Other', 'Estacada  Heights'] });
+    const { eventCities: evCitiesR } = await import('../src/renderer/js/components/intakeSections.js');
+    log(evCitiesR({ cities: ['x'.repeat(90), ...Array.from({ length: 120 }, (_, i) => 'Town ' + i)] })[0].length === 80
+      && evCitiesR({ cities: Array.from({ length: 120 }, (_, i) => 'Town ' + i) }).length === 100,
+    'city: the kiosk cleans a list exactly as the data layer and the online form do (80 characters, 100 towns)');
     log(evC.cities === JSON.stringify(['Sandy', 'Boring', 'Estacada Heights']),
       'city: the list is stored trimmed, de-duplicated ignoring case, without blanks or "Other"');
     log(db.updateEvent(currentUser, evC.id, { name: 'City List' }).cities === evC.cities, 'city: an edit that does not mention the list keeps it');

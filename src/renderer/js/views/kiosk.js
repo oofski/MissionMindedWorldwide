@@ -3,7 +3,7 @@ import { icon } from '../icons.js';
 import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpeaking, priorDentistLabel, routeForVisitType, answerLabel } from '../i18n.js';
 import { textField } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
-import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities } from '../components/intakeSections.js';
+import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, matchCity } from '../components/intakeSections.js';
 import { medicalDisplay } from '../medicalHistory.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
@@ -138,7 +138,10 @@ export function renderKiosk(ctx) {
         const out = sec.collect();
         if (!out) return false;
         ['first_name', 'last_name', 'dob', 'gender', 'phone', 'email'].forEach((k) => { data[k] = out[k]; });
-        data.demographics = out.demographics;
+        // A slow start can build this step before the event's list arrives
+        // (a text box); a town typed there is still stored in the listed
+        // spelling, so it lands in the same report row as everyone else's.
+        data.demographics = { ...out.demographics, city: matchCity(out.demographics.city, eventCityList) || out.demographics.city };
         return true;
       },
     };

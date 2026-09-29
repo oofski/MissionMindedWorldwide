@@ -1213,10 +1213,10 @@ function createPatient(actor, data) {
 
 // Answers that describe the patient ON THE DAY, not their history. A returning
 // patient's new visit must ask them again rather than inherit last visit's —
-// last spring's toothache, or a pregnancy, is not today's. Mirrors
-// DENTAL_QUESTIONS in src/renderer/i18n/strings.js (the harness pins them).
-const VISIT_SPECIFIC_DENTAL_KEYS = ['pain_cold', 'pain_hot', 'pain_eating', 'toothache_night', 'pain_touch',
-  'grinding_night', 'jaw_pain_waking', 'sores'];
+// last spring's toothache, or a pregnancy, is not today's. Step 3's questions
+// come from the main process's one copy of that list (medicalLabels.js, pinned
+// to strings.js by the harness), so a question added there is cleared here too.
+const VISIT_SPECIFIC_DENTAL_KEYS = Object.keys(require('./medicalLabels').DENTAL_Q_LABELS);
 
 // Returning patient: start a NEW visit (new patient row) in the active event,
 // pre-filled from an existing record so the front desk doesn't re-type. Carries
@@ -1230,9 +1230,10 @@ function startVisitFromExisting(actor, sourceId) {
   delete dental.reason; delete dental.visit_type; delete dental.may_need_extraction;
   VISIT_SPECIFIC_DENTAL_KEYS.forEach((k) => { delete dental[k]; });
   // Pregnancy and "major surgery in the past six months" are time-bound, so
-  // they are asked again. history_version goes too: without it the carried
-  // history reads as not yet confirmed for this visit, and the Vitals review
-  // asks for it. Everything else in the history carries over.
+  // they are asked again: with them unanswered, the history form refuses to
+  // save until they are (firstMissingMedical), and the screens show them as not
+  // yet asked. history_version goes too — it promises a history answered in
+  // full, which this one no longer is. Everything else carries over.
   const medical = Object.assign({}, src.medical_history || {});
   delete medical.pregnancy; delete medical.major_surgery; delete medical.surgery_sites;
   delete medical.history_version;

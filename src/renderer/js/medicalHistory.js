@@ -271,8 +271,12 @@ export function clinicalFlags(mh) {
     if (has.has(c.key)) flags.push(c.en);
     else if (answers[c.key] === 'unsure') flags.push('Unsure: ' + c.en);
   }
-  if (has.has('pregnant') || answers.pregnant === 'yes' || m.pregnancy === 'yes') flags.push('Pregnant');
-  else if (answers.pregnant === 'unsure') flags.push('Possibly pregnant');
+  // An answer on the pregnancy row is the patient's word for THIS form and
+  // wins; only a record without one falls back to the retired question.
+  if (answers.pregnant) {
+    if (answers.pregnant === 'yes') flags.push('Pregnant');
+    else if (answers.pregnant === 'unsure') flags.push('Possibly pregnant');
+  } else if (has.has('pregnant') || m.pregnancy === 'yes') flags.push('Pregnant');
   const allergyKeys = catalogOrder(uniq(asArray(m.allergies).filter((k) => typeof k === 'string' && k && !SENTINELS.has(k))), ALLERGIES);
   allergyKeys.forEach((k) => flags.push('Allergy: ' + allergyLabel(k, 'en')));
   if (text(m.allergies_other)) flags.push('Allergy: ' + text(m.allergies_other));

@@ -69,7 +69,9 @@ export function medicalHistoryParts(m) {
   }
   rows.push(kv('Smokes / tobacco', historyAnswer(md.smoke)));
   if (md.version === 2) rows.push(kv('Pregnancy', historyAnswer(md.pregnancy)));
-  md.legacyRows.forEach((r) => rows.push(kv(r.label, historyAnswer(r.value))));
+  // A retired answer carried into a record answered on the new form is marked
+  // as the earlier form's, so it cannot be read against today's answer.
+  md.legacyRows.forEach((r) => rows.push(kv(md.version === 2 ? r.label + ' (earlier form)' : r.label, historyAnswer(r.value))));
 
   // SAFETY: a typed "Other" allergy (e.g. "Sulfa") is in the list with the
   // ticked ones — a written allergy must never be invisible on screen.

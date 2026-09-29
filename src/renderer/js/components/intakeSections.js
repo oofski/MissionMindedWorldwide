@@ -20,7 +20,7 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
 import {
-  t, getLang, conditions, allergies, medChecklist, surgerySites, dentalQuestions, answerLabel,
+  t, getLang, conditions, allergies, conditionLabel, allergyLabel, medChecklist, surgerySites, dentalQuestions, answerLabel,
   visitTypes, priorDentistOptions, referrals, raceOptions, US_STATES, MEDICATIONS,
 } from '../i18n.js';
 import { textField, selectField, chipGrid, limitDigits } from '../forms.js';
@@ -56,12 +56,15 @@ export function eventCities(ev) {
   }
   const seen = new Set();
   const out = [];
+  // Cleaned exactly as db.js sanitizeCities and the Worker clean it, so the
+  // kiosk and the online form can never offer two spellings of one list.
   for (const c of list) {
-    const name = String(c == null ? '' : c).replace(/\s+/g, ' ').trim();
+    const name = String(c == null ? '' : c).replace(/\s+/g, ' ').trim().slice(0, 80);
     const fold = name.toLowerCase();
     if (!name || fold === 'other' || seen.has(fold)) continue;
     seen.add(fold);
     out.push(name);
+    if (out.length >= 100) break;
   }
   return out;
 }
@@ -336,7 +339,7 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   ].filter((k, i, a) => a.indexOf(k) === i && !INTAKE_CONDITIONS.includes(k));
   const condRows = [...INTAKE_CONDITIONS, ...extraCondKeys].map((key) => {
     const c = condByKey.get(key);
-    const label = c ? c.label : key.replace(/[_-]+/g, ' ');
+    const label = conditionLabel(key);
     const retired = !INTAKE_CONDITIONS.includes(key);
     const sel = el('select', { class: 'input select' });
     const values = retired ? ['yes', 'no'] : conditionAnswers(key);
@@ -429,10 +432,7 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   const extraAllergies = legacyAllergies.filter((k, i, a) => a.indexOf(k) === i && !INTAKE_ALLERGIES.includes(k));
   const allergyItems = [
     ...ALL.filter((a) => a.intake).map((a) => ({ key: a.key, label: a.label, flag: true })),
-    ...extraAllergies.map((k) => {
-      const a = ALL.find((x) => x.key === k);
-      return { key: k, label: (a ? a.label : k.replace(/[_-]+/g, ' ')) + ' ' + L({ en: '(earlier form)', es: '(formulario anterior)' }), flag: true };
-    }),
+    ...extraAllergies.map((k) => ({ key: k, label: allergyLabel(k) + ' ' + L({ en: '(earlier form)', es: '(formulario anterior)' }), flag: true })),
     { key: 'other', label: t('common.other'), flag: true },
   ];
   const startAllergies = [...legacyAllergies];

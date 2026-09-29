@@ -565,9 +565,12 @@ function buildPreregPatient(b, cities) {
   // in its listed spelling, "Other" as the typed name (canonicalised if it is
   // really a listed town), or — with no list — whatever was typed.
   const cityList = Array.isArray(cities) ? cities : [];
-  // "other" is always the dropdown's Other, never a town — even if the admin
-  // cleared the list while the page was open, the typed name is what counts.
-  const cityTyped = (b.city === 'other' ? s(b.city_other, 80) : s(b.city, 80)).replace(/\s+/g, ' ');
+  // "other" is the dropdown's Other when the event has a list, or when a name
+  // was typed beside it (the admin may have cleared the list while the page
+  // was open) — then the typed name is the town, never the word "other". In a
+  // plain text box it is simply what the patient typed, as at the kiosk.
+  const otherPicked = b.city === 'other' && (cityList.length > 0 || !!s(b.city_other, 80));
+  const cityTyped = (otherPicked ? s(b.city_other, 80) : s(b.city, 80)).replace(/\s+/g, ' ');
   const city = matchCity(cityTyped, cityList) || cityTyped;
 
   return {

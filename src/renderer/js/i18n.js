@@ -1,4 +1,4 @@
-import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE, US_STATES, MEDICATIONS, ANESTHETICS, MED_CHECKLIST, SURGERY_SITES, DENTAL_QUESTIONS, DENTAL_LEGACY } from '../i18n/strings.js';
+import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE, US_STATES, MEDICATIONS, ANESTHETICS, MED_CHECKLIST, SURGERY_SITES, DENTAL_QUESTIONS } from '../i18n/strings.js';
 
 let lang = 'en';
 
@@ -150,4 +150,4 @@ export function isSpeaking() {
 }
 
 // Re-exported so views import route derivation from the same place as labels.
-export { routeForVisitType, US_STATES, MEDICATIONS, ANESTHETICS, DENTAL_LEGACY };
+export { routeForVisitType, US_STATES, MEDICATIONS, ANESTHETICS };

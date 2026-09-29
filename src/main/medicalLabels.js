@@ -200,8 +200,9 @@ function isHistoryV2(mh) {
   return m.history_version === HISTORY_VERSION || Object.keys(asObject(m.condition_answers)).length > 0;
 }
 
-// Mirrors medicalHistory.js firstMissingMedical — for a server-side check of a
-// history arriving from an editor.
+// Mirrors medicalHistory.js firstMissingMedical, for a main-process check of a
+// history arriving from an editor. (createPatient does not enforce it: a record
+// may legitimately be created with an empty history — a desk walk-in, a test.)
 function firstMissingMedical(mh) {
   const m = mh || {};
   const yn = (v) => v === 'yes' || v === 'no';
@@ -294,8 +295,12 @@ function clinicalFlags(mh) {
     if (has.has(key)) flags.push(CONDITION_LABELS[key]);
     else if (answers[key] === 'unsure') flags.push('Unsure: ' + CONDITION_LABELS[key]);
   }
-  if (has.has('pregnant') || answers.pregnant === 'yes' || m.pregnancy === 'yes') flags.push('Pregnant');
-  else if (answers.pregnant === 'unsure') flags.push('Possibly pregnant');
+  // An answer on the pregnancy row is the patient's word for THIS form and
+  // wins; only a record without one falls back to the retired question.
+  if (answers.pregnant) {
+    if (answers.pregnant === 'yes') flags.push('Pregnant');
+    else if (answers.pregnant === 'unsure') flags.push('Possibly pregnant');
+  } else if (has.has('pregnant') || m.pregnancy === 'yes') flags.push('Pregnant');
   const allergyKeys = catalogOrder(uniq(asArray(m.allergies).filter((k) => typeof k === 'string' && k && !SENTINELS.has(k))), ALLERGY_ORDER);
   allergyKeys.forEach((k) => flags.push('Allergy: ' + allergyLabel(k)));
   if (text(m.allergies_other)) flags.push('Allergy: ' + text(m.allergies_other));
