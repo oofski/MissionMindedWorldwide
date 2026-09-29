@@ -82,9 +82,12 @@ export const api = {
   dashboard: () => call('statsDashboard'),
   audit: (limit) => call('auditList', limit),
 
-  pdfPreview: (patientId, format) => call('pdfPreview', { patientId, format }),
-  pdfGenerate: (patientId, format) => call('pdfGenerate', { patientId, format }),
-  pdfPrint: (patientId, format) => call('pdfPrint', { patientId, format }),
+  // lang is optional: the language of the after-care page, when it should not
+  // be the patient's own (e.g. "Print in English").
+  pdfPreview: (patientId, format, lang) => call('pdfPreview', { patientId, format, lang }),
+  pdfGenerate: (patientId, format, lang) => call('pdfGenerate', { patientId, format, lang }),
+  pdfPrint: (patientId, format, lang) => call('pdfPrint', { patientId, format, lang }),
+  aftercareGet: (patientId, lang) => call('aftercareGet', { patientId, lang }),
   exportRecordUsb: (patientId) => call('recordExportUsb', { patientId }),
 
   backup: () => call('backupRun'),

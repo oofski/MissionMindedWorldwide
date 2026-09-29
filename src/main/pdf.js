@@ -4,13 +4,21 @@
  * PDF generation for patient records.
  *
  * Builds an HTML representation of the record and renders it to PDF with
- * Electron's offscreen print engine (works fully offline). Two formats:
+ * Electron's offscreen print engine (works fully offline). Four formats:
  *   - 'progress'  : the clinical Progress Note (matches the CHW form)
  *   - 'full'      : complete packet (demographics, histories, consents, note)
+ *   - 'summary'   : the Patient Summary — the visit as the patient takes it home
+ *   - 'aftercare' : the after-care instructions alone, one page, in the
+ *                   patient's language (src/main/aftercare.js)
+ * 'summary' and 'full' end with the after-care page too, once the patient has
+ * been at a treatment chair and there is care to describe (see
+ * aftercare.careStage and appendToRecord): a Dental Triage chart is a plan, not
+ * care done. An unknown format prints the Progress Note, as it always has.
  */
 
 const { BrowserWindow } = require('electron');
 const medicalLabels = require('./medicalLabels');
+const aftercare = require('./aftercare');
 
 function esc(s) {
   if (s == null) return '';
@@ -89,6 +97,11 @@ function styles() {
       .xray { border:1px solid #d9e2ec; border-radius:6px; padding:6px; background:#fbfdff; width: 168px; }
       .xray img { width: 100%; height: 110px; object-fit: cover; display:block; border-radius:4px; background:#000; }
       .xray .cap { font-size: 10px; color:#627d98; margin-top:4px; }
+      .aftercare h2 { font-size: 13px; margin: 14px 0 4px; }
+      .aftercare ul { margin: 0 0 6px 18px; padding: 0; }
+      .aftercare li { font-size: 13px; line-height: 1.45; margin: 3px 0; }
+      .aftercare .ac-sec { page-break-inside: avoid; }
+      .aftercare .ac-note { font-size: 12px; }
     </style>`;
 }
 
@@ -289,7 +302,7 @@ const OREGON_CONSENT =
   'liable for any injury, death or other loss arising out of the provision of these services, unless the injury, ' +
   'death or other loss results from gross negligence.';
 
-function progressNoteBody(p) {
+function progressNoteBody(p, lang) {
   const t = p.treatment || {};
   const tr = p.triage || {};
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
@@ -348,10 +361,61 @@ function progressNoteBody(p) {
       <div>
         ${t.provider_signature ? `<div class="sig"><img src="${imgSrc(t.provider_signature)}"/></div>` : '<span class="muted">No signature</span>'}
       </div>
+    </div>
+    ${aftercareSheetLine(p, lang)}`;
+}
+
+// One line in the clinical note naming the after-care sheet that goes with this
+// visit: its sections, the template version and the language. The sheet is
+// derived from the procedures recorded, so the note says which text applied —
+// a reprint months later is traceable to the same words. It names the sheet
+// that APPLIES, not one that was handed over: printing is optional and nothing
+// records it, so a clinical record must not claim it was "given". Printed only
+// once the visit is treated — a note printed mid-treatment, or for a patient
+// who left before the chair, has no sheet to name yet.
+function aftercareSheetLine(p, lang) {
+  const ac = aftercare.aftercareSections(p, lang);
+  if (ac.stage !== 'treated') return '';
+  const titles = ac.sections.map((x) => x.title_en).join('; ');
+  const langName = aftercare.LANGUAGE_NAMES[ac.lang] || ac.lang;
+  return `<div class="box"><span class="label">After-care sheet for this visit: </span>${esc(titles)} <span class="muted">(${esc(ac.version)}, ${esc(langName)})</span></div>`;
+}
+
+// The after-care page: the patient's own sheet, in their language, with nothing
+// on it but their name, date of birth, the clinic, and the instructions — it is
+// handed over, taken home, and may be shown to another dentist. Its footer is
+// its own ("Patient copy", the template version and the print date) rather than
+// the record's "Confidential Patient Record", so a copy can be traced to the
+// exact wording it carried.
+function aftercarePage(p, lang) {
+  const ac = aftercare.aftercareSections(p, lang);
+  const T = aftercare.PAGE_TEXT[ac.lang] || aftercare.PAGE_TEXT.en;
+  const locale = ac.lang === 'es' ? 'es-US' : 'en-US';
+  const printed = new Date().toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
+  const note = ac.fellBack
+    ? `<div class="box ac-note">These instructions are in English because they are not yet available in ${esc(aftercare.LANGUAGE_NAMES[ac.requested] || 'your language')}. Please ask someone to help you read them, or call ${esc(ac.contact.org)} at ${esc(ac.contact.phone)}.</div>`
+    : '';
+  const sections = ac.sections.map((x) => `
+      <div class="ac-sec">
+        <h2>${esc(x.title)}</h2>
+        <ul>${x.items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
+      </div>`).join('');
+  return `
+    <div class="aftercare" lang="${esc(ac.lang)}">
+      ${header(T.title, p.event ? p.event.name : '')}
+      <table class="grid">
+        <tr>${field(T.patient, `${p.first_name || ''} ${p.last_name || ''}`.trim())}${field(T.dob, p.dob)}</tr>
+      </table>
+      ${note}
+      ${sections}
+      <div class="footer">
+        <span>${esc(T.copy)} · ${esc(ac.contact.org)} · ${esc(ac.contact.phone)}</span>
+        <span>${esc(ac.version)} · ${esc(T.printed)} ${esc(printed)}</span>
+      </div>
     </div>`;
 }
 
-function fullPacketBody(p) {
+function fullPacketBody(p, lang) {
   const d = p.demographics || {};
   const m = p.medical_history || {};
   const dh = p.dental_history || {};
@@ -466,7 +530,7 @@ function fullPacketBody(p) {
 
     <div class="pagebreak"></div>
     ${header('Progress Note', `${p.event ? p.event.name : ''}`)}
-    ${progressNoteBody(p)}`;
+    ${progressNoteBody(p, lang)}`;
 }
 
 // F17: clean patient summary — procedures, anesthetic, notes, and x-ray images.
@@ -629,27 +693,41 @@ function summaryBody(p) {
     ${xrays ? `<div class="xrays">${xrays}</div>` : '<span class="muted">No x-rays on file</span>'}`;
 }
 
-function buildHtml(p, format) {
+// opts.lang: the language of the after-care page — the patient's own unless
+// the desk asked for another ("Print in English"). The clinical record itself
+// is English whatever it is.
+function buildHtml(p, format, opts = {}) {
+  const lang = (opts && opts.lang) || p.language || 'en';
+  // The after-care sheet on its own: one page, nothing else.
+  if (format === 'aftercare') {
+    return `<!doctype html><html lang="${esc(aftercare.aftercareSections(p, lang).lang)}"><head><meta charset="utf-8">${styles()}</head>
+    <body><div class="page">${aftercarePage(p, lang)}</div></body></html>`;
+  }
   const title = format === 'full'
     ? 'Patient Record — Full Packet'
     : format === 'summary'
       ? 'Patient Summary'
       : 'Progress Note';
   const body = format === 'full'
-    ? fullPacketBody(p)
+    ? fullPacketBody(p, lang)
     : format === 'summary'
       ? summaryBody(p)
-      : progressNoteBody(p);
+      : progressNoteBody(p, lang);
+  // The summary and the full record carry the after-care page at the end, after
+  // the record's own footer, so the patient's copy of the visit always comes
+  // with its instructions. Not before there is care to describe.
+  const withAftercare = (format === 'full' || format === 'summary') && aftercare.aftercareSections(p, lang).appendToRecord;
   return `<!doctype html><html><head><meta charset="utf-8">${styles()}</head>
     <body><div class="page">
       ${header(title, p.event ? p.event.name : '')}
       ${body}
       ${footer(p)}
+      ${withAftercare ? `<div class="pagebreak"></div>${aftercarePage(p, lang)}` : ''}
     </div></body></html>`;
 }
 
-async function renderPdf(patient, format) {
-  const html = buildHtml(patient, format || 'progress');
+async function renderPdf(patient, format, opts = {}) {
+  const html = buildHtml(patient, format || 'progress', opts);
   const win = new BrowserWindow({
     show: false,
     webPreferences: { offscreen: true, sandbox: true, contextIsolation: true },

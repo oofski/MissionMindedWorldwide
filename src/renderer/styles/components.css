@@ -864,7 +864,8 @@ body.survey-open{ overflow:hidden; }
 @media (min-width:900px){ .survey-overlay{ padding:24px; } .survey-card{ border-radius:var(--radius-lg); overflow:hidden; } }
 
 .survey-head{ display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 22px; background:var(--surface-card); border-bottom:var(--border-line); flex:none; }
-.survey-head h2{ margin:6px 0 0; font-size:22px; letter-spacing:-.01em; }
+.survey-head h2{ margin:2px 0 0; font-size:20px; line-height:1.25; letter-spacing:-.01em; }
+.survey-kicker{ display:block; margin-top:8px; font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:.09em; color:var(--text-muted); font-weight:var(--fw-bold); }
 .survey-logo{ height:24px; width:auto; display:block; }
 .survey-head-actions{ display:flex; align-items:center; gap:8px; flex:none; }
 
@@ -873,6 +874,8 @@ body.survey-open{ overflow:hidden; }
 .survey-lede p{ margin:0; font-size:var(--fs-base); line-height:1.55; }
 .survey-privacy{ display:flex; align-items:center; gap:8px; margin-top:10px !important; color:var(--text-muted); font-size:var(--fs-sm); }
 .survey-privacy .icon{ flex:none; }
+.survey-prefilled{ display:flex; align-items:flex-start; gap:8px; margin-top:10px !important; padding:8px 10px; border-radius:var(--radius-sm); background:var(--teal-soft); color:var(--teal-deep); font-size:var(--fs-sm); }
+.survey-prefilled .icon{ flex:none; margin-top:2px; }
 
 .survey-section{ margin-bottom:30px; }
 .survey-section-title{ margin:0 0 14px; font-size:var(--fs-sm); text-transform:uppercase; letter-spacing:.09em; color:var(--teal-deep); font-weight:var(--fw-bold); }
@@ -882,17 +885,11 @@ body.survey-open{ overflow:hidden; }
 .survey-q-opt{ flex:none; font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); }
 .survey-q-hint{ margin:6px 0 0; font-size:var(--fs-sm); color:var(--text-muted); }
 
-.survey-options{ display:grid; grid-template-columns:1fr; gap:8px; margin-top:12px; }
-@media (min-width:640px){ .survey-options--dense{ grid-template-columns:1fr 1fr; } }
-.survey-opt{ display:flex; align-items:center; gap:11px; width:100%; min-height:46px; padding:10px 14px; text-align:left;
-  background:var(--surface-canvas); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer;
-  font-size:var(--fs-base); color:var(--text); font-family:inherit; transition:background .12s ease, border-color .12s ease; }
-.survey-opt:hover{ border-color:var(--teal); }
-.survey-opt:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
-.survey-opt-box{ flex:none; width:20px; height:20px; border-radius:var(--radius-full); border:2px solid var(--border-strong); position:relative; }
-.survey-opt.is-on{ background:var(--teal-soft); border-color:var(--teal-deep); font-weight:var(--fw-medium); }
-.survey-opt.is-on .survey-opt-box{ border-color:var(--teal-deep); background:var(--teal-deep); }
-.survey-opt.is-on .survey-opt-box::after{ content:''; position:absolute; inset:4px; border-radius:var(--radius-full); background:#fff; }
+/* One answer: a dropdown. Several: chips. Both sized for a finger, since the
+   patient answers on a tablet handed across the desk. */
+.survey-q > .select{ margin-top:12px; height:48px; font-size:var(--fs-base); }
+.survey-q .chip-grid{ margin-top:12px; }
+.survey-q .chip-select{ min-height:46px; font-size:var(--fs-base); }
 
 .survey-foot{ flex:none; display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap;
   padding:14px 22px; background:var(--surface-card); border-top:var(--border-line); }
@@ -905,7 +902,7 @@ body.survey-open{ overflow:hidden; }
 
 @media (prefers-reduced-motion:reduce){
   .survey-body{ scroll-behavior:auto; }
-  .survey-opt, .survey-progress-bar span{ transition:none; }
+  .survey-progress-bar span{ transition:none; }
 }
 
 /* Survey results on the Reports tab. */

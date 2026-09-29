@@ -18,7 +18,7 @@ const CHANNELS = [
   'xray:add', 'xray:setTooth', 'xray:folderList', 'xray:folderConfig', 'xray:folderChoose', 'xray:folderLock', 'xray:folderDelete', 'xray:deleteFile', 'xray:get', 'xray:list', 'xray:delete',
   'usb:list', 'usb:writeCheckin', 'usb:load', 'usb:uploadCheckout', 'usb:clear',
   'stats:dashboard', 'audit:list',
-  'pdf:preview', 'pdf:generate', 'pdf:print',
+  'pdf:preview', 'pdf:generate', 'pdf:print', 'aftercare:get',
   'record:exportUsb',
   'backup:run', 'export:event', 'export:zip', 'export:clinic', 'import:clinic',
   'event:finish', 'event:purge', 'reports:archived', 'reports:rebuild', 'reports:rollup',

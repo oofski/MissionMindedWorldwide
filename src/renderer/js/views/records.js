@@ -237,6 +237,9 @@ export function renderRecords(ctx, params = {}) {
         el('div', { class: 'collapse-body action-stack' }, [
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'progress')) }, [icon('clipboard', { size: 16 }), 'Progress note PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'summary')) }, [icon('user', { size: 16 }), 'Patient summary PDF']),
+          // The after-care sheet on its own, in the patient's language — for a
+          // patient who lost theirs, or a record amended after they left.
+          el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfGenerate(id, 'aftercare')) }, [icon('clipboard', { size: 16 }), 'After-care instructions PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => preview(id) }, [icon('eye', { size: 16 }), 'Preview PDF']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => run(() => api.pdfPrint(id, 'full')) }, [icon('print', { size: 16 }), 'Print']),
           el('button', { class: 'btn btn--ghost btn--block', onClick: () => screenDisplay(p) }, [icon('phone', { size: 16 }), 'Screen display for photo']),
@@ -260,7 +263,12 @@ export function renderRecords(ctx, params = {}) {
       el('div', { class: 'sd-row' }, [el('span', {}, ['DOB']), el('b', {}, [p.dob || '—'])]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['Event']), el('b', {}, [p.event ? p.event.name : '—'])]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['Treatment']), el('b', {}, [treatmentSummary(p)])]),
-      el('div', { class: 'sd-row' }, [el('span', {}, ['Emergency']), el('b', {}, ['541-556-5902'])]),
+      // MMW's number — the one the after-care sheet prints (src/main/aftercare.js
+      // CONTACT) and the harness pins. Until v0.0.15 this showed an Oregon
+      // number left over from the clinic the app was first built for. It is a
+      // message line, not an emergency service, so it is labelled for what it
+      // is; the after-care sheet sends a true emergency to the ER.
+      el('div', { class: 'sd-row' }, [el('span', {}, ['Problems after your visit']), el('b', {}, ['(951) 317-4968'])]),
       el('div', { class: 'sd-hint' }, ['Take a photo of this screen with your phone']),
     ]);
     modal({ title: '', body: big, confirmText: t('common.close') });

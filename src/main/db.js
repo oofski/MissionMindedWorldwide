@@ -217,10 +217,12 @@ function migrate() {
   // name rendered in a script hand must never be mistaken for one the patient
   // drew — the printed consent and the chart both state which it was.
   addColumn('consents', 'signature_method', 'TEXT');
-  // The exit survey is answered in two sittings — the demographic half at
-  // registration, the experience half at check-out. One 'declined' flag cannot
-  // express "told us about their household, declined to rate the care", so each
-  // stage records its own outcome: 'completed' | 'declined' | absent (not asked).
+  // Each stage records its own outcome: 'completed' | 'declined' | absent (not
+  // asked). From v0.0.10 to v0.0.14 the survey was split over two sittings, the
+  // household half at registration; since v0.0.15 all of it is asked at
+  // check-out, and registration_status is written only by rows from those
+  // builds (or an online form not yet re-deployed). Both columns stay: those
+  // rows still sync, and one 'declined' flag could not describe them.
   addColumn('exit_surveys', 'registration_status', 'TEXT');
   addColumn('exit_surveys', 'exit_status', 'TEXT');
   addColumn('consents', 'tooth_numbers', 'TEXT');
@@ -2535,25 +2537,34 @@ function saveExitSurvey(actor, patientId, data) {
   // Keep only keys the survey actually defines, and only values those questions
   // offer. A renamed question or a hand-edited payload would otherwise put
   // answers in the blob that no report can ever explain.
-  // MERGE, never replace. The two halves are saved by different screens hours
-  // apart; a check-out that replaced the blob would silently erase everything
-  // the patient told registration about their household and income.
-  const prior = db.prepare('SELECT answers FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  // A save replaces the answers to ITS OWN stage's questions and keeps the
+  // rest. Since v0.0.15 check-out owns all 34, so a check-out Finish stores
+  // exactly what was on the form — which was pre-filled with anything given at
+  // registration by an older build, so nothing is lost that the patient did not
+  // take off — and a check-out Decline clears every answer, as the patient was
+  // told it would. 'registration' owns none and only ever adds to the blob. It
+  // is written only by db.createPatient's in-process legacy path (how a
+  // split-era record is rebuilt): the survey:save channel always saves 'exit',
+  // and a split-era row from an old kiosk or the old online form arrives
+  // through applyRemoteRows, which replaces the whole row last-writer-wins and
+  // never comes through here. Nor does it add anything to a row the patient
+  // declined at check-out — a decline withdraws every answer, and anything
+  // added afterwards would be counted in the grant totals.
+  const prior = db.prepare('SELECT answers, exit_status FROM exit_surveys WHERE patient_id = ?').get(patientId);
   const kept = prior ? safeJson(prior.answers, {}) : {};
-  const fresh = declined ? {} : sanitizeSurveyAnswers(d.answers);
-  // A decline clears only ITS OWN stage's answers, so declining at check-out
-  // cannot take the registration half down with it.
+  const exitDeclined = !!(prior && prior.exit_status === 'declined');
+  const fresh = declined || (stage === 'registration' && exitDeclined) ? {} : sanitizeSurveyAnswers(d.answers);
   const stageKeys = new Set(STAGE_QUESTIONS[stage]);
   const answers = { ...kept };
   for (const k of stageKeys) delete answers[k];
   for (const [k, v] of Object.entries(fresh)) answers[k] = v;
-  const version = String(d.version || 'mmw-exit-v1');
+  const version = String(d.version || 'mmw-exit-v2');
   const language = d.language ? String(d.language) : null;
   const existing = db.prepare('SELECT id FROM exit_surveys WHERE patient_id = ?').get(patientId);
   const status = declined ? 'declined' : 'completed';
   const col = stage === 'registration' ? 'registration_status' : 'exit_status';
-  // `declined` stays the EXIT answer: it is what check-out gates on, so it must
-  // not start reporting true because somebody skipped the household questions.
+  // `declined` stays the EXIT answer: it is what check-out gates on, so a
+  // registration row from an older build that was skipped must not set it.
   if (existing) {
     db.prepare(
       `UPDATE exit_surveys SET version=?, language=?, answers=?, ${col}=?,
@@ -2629,15 +2640,13 @@ const SURVEY_SCHEMA = {
 // Select-all-that-apply questions, which store an array rather than a string.
 const SURVEY_MULTI = new Set(['assistance', 'access_barriers', 'future_needs']);
 // Which stage each question belongs to. Mirrors the `stage` on each section in
-// src/renderer/i18n/exitSurvey.js; the harness pins the two together.
+// src/renderer/i18n/exitSurvey.js; the harness pins the two together. Since
+// v0.0.15 every question is asked at check-out. 'registration' is a legacy
+// stage that asks nothing: it is still accepted, and only merges (see
+// saveExitSurvey), for rows filed by v0.0.10–v0.0.14.
 const STAGE_QUESTIONS = {
-  registration: ['first_time', 'heard_about', 'household_size', 'children_under_18', 'disability',
-    'living_situation', 'education', 'household_in_school', 'employment', 'work_type', 'income',
-    'assistance', 'health_insurance', 'health_insurance_type', 'dental_insurance', 'vision_insurance',
-    'last_checkup', 'last_eye_exam', 'delayed_care_cost', 'access_barriers', 'unmet_need', 'food_insecurity'],
-  exit: ['rate_care', 'rate_staff', 'rate_wait', 'comfortable_questions', 'explained_care', 'recommend',
-    'health_concern_daily', 'will_improve_health', 'reduced_financial_burden', 'available_elsewhere',
-    'future_needs', 'future_interest'],
+  registration: [],
+  exit: Object.keys(SURVEY_SCHEMA),
 };
 
 function sanitizeSurveyAnswers(raw) {
@@ -2742,6 +2751,35 @@ function xraysTakenValue(v) {
 /*  Treatment                                                          */
 /* ------------------------------------------------------------------ */
 
+// The hygienist's station says what it is doing, as its progress save does
+// ('cleaning'): 'cleaning_complete' for "Mark cleaning complete" and
+// 'cleaning_lock' for its sign-off. For a patient Dental Triage has parked for
+// a treatment chair, a finished cleaning is not a finished visit — the dental
+// treatment is still to come. Completing the visit there used to take the
+// patient out of the queue for their chair and send them to check-out, where
+// the chart of the extraction they never had printed as after-care for care
+// done. So the cleaning is saved and the patient keeps their place (and their
+// time in the queue); the treating dentist completes the visit. One parked and
+// then transferred to the hygienist goes back to Dental Triage's queue with it,
+// as parking them does (markTreatmentWaiting). Signing off and locking would
+// shut the dentist out of the record, so it waits for them too. For every
+// other patient the two are the plain 'complete' and 'lock'.
+function hygienistFinalize(actor, patientId, finalize) {
+  if (finalize !== 'cleaning_complete' && finalize !== 'cleaning_lock') return finalize;
+  const cur = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+  if (!(cur && cur.status === 'treatment_waiting')) return finalize === 'cleaning_lock' ? 'lock' : 'complete';
+  if (finalize === 'cleaning_lock') {
+    throw new Error('This patient is waiting for a treatment chair at Dental Triage, so the record cannot be signed off and locked from the cleaning station yet — their dental treatment is not done. Save the cleaning; the treating dentist completes the visit.');
+  }
+  const tr = db.prepare('SELECT route FROM triage WHERE patient_id = ?').get(patientId);
+  if (tr && tr.route === 'hygienist') {
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, now(), patientId);
+    audit(actor, 'route', 'patient', patientId, 'dentist');
+  }
+  return 'cleaning';
+}
+
 function saveTreatment(actor, patientId, data, finalize) {
   const existing = db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(patientId);
   if (existing && existing.locked) throw new Error('This record is locked and signed off.');
@@ -2753,8 +2791,11 @@ function saveTreatment(actor, patientId, data, finalize) {
   //                 Waiting — examined at Dental Triage, waiting for a chair
   //   'cleaning' -> v0.0.15: the hygienist's progress save — a patient waiting
   //                 for a treatment chair keeps their place (see below)
+  //   'cleaning_complete' / 'cleaning_lock' -> v0.0.15: the hygienist's
+  //                 complete and sign-off (see hygienistFinalize)
   //   'complete' -> mark the visit done (status completed) but NOT locked/editable
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
+  finalize = hygienistFinalize(actor, patientId, finalize);
   const lock = finalize === true || finalize === 'lock';
   const complete = lock || finalize === 'complete';
   const waiting = !complete && finalize === 'waiting';
@@ -3431,9 +3472,11 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
   // tally of them carries nothing that belongs to a person — which is the whole
   // point: these figures are what a grant return is written from, and they have
   // to survive the clinic purging its patient records.
-  // Counted per stage now: the survey is filled in two sittings, so one pair of
-  // totals cannot say "told us about their household, declined to rate the
-  // care" — which is the commonest outcome and a real figure for a funder.
+  // Counted per stage. Since v0.0.15 only check-out asks, so for a new clinic
+  // `registration` is all not_asked; the stage block is kept because rows from
+  // the split-survey builds (v0.0.10–v0.0.14) carry a registration outcome, and
+  // reports kept by those builds must still merge with these. The Reports tab
+  // and the export show the registration line only when it has a real count.
   const survey = {
     responses: 0, declined: 0, not_asked: 0, answers: {},
     registration: { completed: 0, declined: 0, not_asked: 0 },
@@ -3450,8 +3493,13 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     // The headline trio stays the CHECK-OUT figures, so a report kept by an
     // older build still means the same thing when the two are merged.
     if (!sv) { survey.not_asked++; continue; }
-    if (sv.declined) { survey.declined++; continue; }
-    survey.responses++;
+    if (sv.declined) survey.declined++; else survey.responses++;
+    // Answers are tallied whenever the row holds any. A check-out decline
+    // stores none since v0.0.15, so this changes nothing for a new row; but a
+    // patient who answered the household questions at registration on an older
+    // build and then declined at check-out gave those answers, and until now
+    // they were silently left out of every total. Percentages are of the people
+    // who answered each question, so they stay honest either way.
     const ans = typeof sv.answers === 'string' ? safeJson(sv.answers, {}) : (sv.answers || {});
     for (const [q, v] of Object.entries(ans)) {
       const bucket = (survey.answers[q] = survey.answers[q] || {});
@@ -3539,7 +3587,14 @@ function mergeSummaries(list) {
     if (s.survey) {
       SURVEY_NUM.forEach((k) => { out.survey[k] += Number(s.survey[k]) || 0; });
       for (const stage of ['registration', 'exit']) {
-        const src = (s.survey[stage] || {});
+        // A report kept by v0.0.8–v0.0.9 has no stage blocks: its survey was
+        // asked at check-out, so its headline trio (always the check-out
+        // figures) IS its check-out outcome. Adding nothing here left every
+        // merged report — the Reports tab and the export both read one —
+        // saying "0" at check-out above that report's own answers. Nothing was
+        // asked at registration then, so that block gets nothing.
+        const src = s.survey[stage] || (stage === 'exit'
+          ? { completed: s.survey.responses, declined: s.survey.declined, not_asked: s.survey.not_asked } : {});
         out.survey[stage] = out.survey[stage] || { completed: 0, declined: 0, not_asked: 0 };
         ['completed', 'declined', 'not_asked'].forEach((k) => { out.survey[stage][k] += Number(src[k]) || 0; });
       }

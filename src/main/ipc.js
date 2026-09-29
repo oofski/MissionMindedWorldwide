@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('./db');
 const pdf = require('./pdf');
+const aftercare = require('./aftercare');
 const updater = require('./updater');
 const autoupdate = require('./autoupdate');
 const cloud = require('./cloud');
@@ -75,8 +76,11 @@ const PERMS = {
   'triage:save': ['admin', 'doctor', 'triage'],
   // The exit survey is taken at the desk as the patient leaves, so the
   // check-out role is the one that needs it. Admins and the clinical roles
-  // can too, since a patient sometimes answers it at the chair.
-  'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
+  // can too, since a patient sometimes answers it at the chair. The front-desk
+  // 'registration' role had it only for the household half registration used
+  // to ask; since v0.0.15 registration asks no survey question (the kiosk's
+  // legacy path saves inside db.createPatient, not over this channel).
+  'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
   'patients:route': ['admin', 'doctor', 'triage', 'emt'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],
@@ -111,6 +115,9 @@ const PERMS = {
   'pdf:generate': ['admin', 'doctor', 'checkout'],
   'pdf:preview': ['admin', 'doctor', 'checkout'],
   'pdf:print': ['admin', 'doctor', 'checkout'],
+  // The after-care sections for one patient, listed on the check-out screen
+  // before printing. The hygienist sends patients home too.
+  'aftercare:get': ['admin', 'doctor', 'checkout', 'hygienist'],
   'record:exportUsb': ['admin', 'doctor'],
   'usb:list': ['admin', 'doctor', 'triage', 'emt', 'checkout'],
   'usb:load': ['admin', 'doctor', 'triage', 'checkout'],
@@ -396,7 +403,12 @@ function register(getMainWindow) {
 
   /* ---- Triage & treatment ---- */
   handle('triage:save', ({ patientId, data }) => db.saveTriage(currentUser, patientId, data));
-  handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data));
+  // Always the check-out stage. 'registration' is a legacy stage that only
+  // merges answers in; nothing in this build asks it (db.createPatient's
+  // in-process path is the only writer), and split-era rows from an old kiosk
+  // or the old online form arrive by sync, not here. Accepting it over IPC let
+  // any survey role add answers to a row the patient DECLINED at check-out.
+  handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, { ...(data || {}), stage: 'exit' }));
 
   /* ---- Supplies ---- */
   handle('inventory:list', ({ eventId } = {}) => db.listInventory({ eventId }));
@@ -406,9 +418,10 @@ function register(getMainWindow) {
   handle('inventory:delete', ({ id }) => db.deleteInventoryItem(currentUser, id));
   handle('inventory:chairUsage', ({ eventId } = {}) => db.inventoryChairUsage(eventId));
   // finalize may be false, 'waiting' (v0.0.15: move to Treatment Waiting),
-  // 'cleaning' (v0.0.15: the hygienist's progress save), 'complete' (mark
-  // done, no lock), or 'lock'/true — pass it through so each mode reaches the
-  // data layer. Same roles, so no new channel was needed.
+  // 'cleaning' / 'cleaning_complete' / 'cleaning_lock' (v0.0.15: the
+  // hygienist's save, complete and sign-off), 'complete' (mark done, no lock),
+  // or 'lock'/true — pass it through so each mode reaches the data layer. Same
+  // roles, so no new channel was needed.
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
   handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));
@@ -535,20 +548,28 @@ function register(getMainWindow) {
   /* ---- PDF: preview, save, print ---- */
   // Attach x-ray images so the summary/full PDF can embed them.
   const patientForPdf = (id) => { const p = db.getPatient(id); if (p) p._xrays = db.listXrays(id); return p; };
+  // The saved file's name says what is in it. Everything that was not the full
+  // record used to be named "ProgressNote", so the visit summary a patient was
+  // emailed arrived as ..._ProgressNote.pdf.
+  const PDF_FILE_NAMES = { full: 'FullRecord', summary: 'VisitSummary', aftercare: 'AfterCare', progress: 'ProgressNote' };
+  // The after-care page's language, when the desk asks for one other than the
+  // patient's ("Print in English"). A code, nothing else, or it is ignored.
+  const pdfLang = (lang) => (typeof lang === 'string' && /^[a-z]{2,3}$/.test(lang) ? lang : undefined);
+  const pdfDetail = (format, lang) => (pdfLang(lang) ? `${format} (${lang})` : format);
 
-  handle('pdf:preview', async ({ patientId, format }) => {
+  handle('pdf:preview', async ({ patientId, format, lang }) => {
     const patient = patientForPdf(patientId);
     if (!patient) throw new Error('Patient not found.');
-    const buf = await pdf.renderPdf(patient, format);
-    db.audit(currentUser, 'export_preview', 'patient', patientId, format);
+    const buf = await pdf.renderPdf(patient, format, { lang: pdfLang(lang) });
+    db.audit(currentUser, 'export_preview', 'patient', patientId, pdfDetail(format, lang));
     return 'data:application/pdf;base64,' + buf.toString('base64');
   });
 
-  handle('pdf:generate', async ({ patientId, format }) => {
+  handle('pdf:generate', async ({ patientId, format, lang }) => {
     const patient = patientForPdf(patientId);
     if (!patient) throw new Error('Patient not found.');
-    const buf = await pdf.renderPdf(patient, format);
-    const suggested = `${patient.last_name}_${patient.first_name}_${format === 'full' ? 'FullRecord' : 'ProgressNote'}.pdf`
+    const buf = await pdf.renderPdf(patient, format, { lang: pdfLang(lang) });
+    const suggested = `${patient.last_name}_${patient.first_name}_${PDF_FILE_NAMES[format] || 'ProgressNote'}${format === 'aftercare' && pdfLang(lang) ? '_' + lang : ''}.pdf`
       .replace(/[^a-z0-9_.-]/gi, '');
     const res = await dialog.showSaveDialog(getMainWindow(), {
       title: 'Save patient record',
@@ -561,10 +582,12 @@ function register(getMainWindow) {
     return { saved: true, path: res.filePath };
   });
 
-  handle('pdf:print', async ({ patientId, format }) => {
+  // The audit row ('print', with the format as its detail) is the record that
+  // after-care instructions were printed for a patient; no column is needed.
+  handle('pdf:print', async ({ patientId, format, lang }) => {
     const patient = patientForPdf(patientId);
     if (!patient) throw new Error('Patient not found.');
-    const html = pdf.buildHtml(patient, format || 'progress');
+    const html = pdf.buildHtml(patient, format || 'progress', { lang: pdfLang(lang) });
     const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
     await new Promise((resolve, reject) => {
@@ -574,8 +597,16 @@ function register(getMainWindow) {
         else resolve();
       });
     });
-    db.audit(currentUser, 'print', 'patient', patientId, format);
+    db.audit(currentUser, 'print', 'patient', patientId, pdfDetail(format, lang));
     return { printed: true };
+  });
+
+  // Which after-care sections apply to this patient, for the check-out screen
+  // to list before anything is printed. The same function builds the page.
+  handle('aftercare:get', ({ patientId, lang } = {}) => {
+    const patient = db.getPatient(patientId);
+    if (!patient) throw new Error('Patient not found.');
+    return aftercare.aftercareSections(patient, pdfLang(lang));
   });
 
   /* ---- Backup & export ---- */
