@@ -334,10 +334,15 @@ export function renderEmt(ctx, params = {}) {
     // with patient — no changes", or Edit with the check-in form itself. Open,
     // because going through it is part of this station's job. It saves in
     // place, so vitals typed above and not yet saved are kept.
+    // A dental edit that changes the visit type re-routes a patient the EMT
+    // has not signed off yet (updatePatientSection), so the Next step card is
+    // repainted from the saved record: left as it was, its "Sign off & send
+    // to …" still named the old station, and the next tap sent the patient
+    // there, overwriting the route the edit had just derived.
     const historyPanel = patientInfoPanel(p, {
       open: true,
       review: true,
-      onSaved: (np) => { p = np; paintThinnerBanner(); paintThinnerLine(); },
+      onSaved: (np) => { p = np; paintThinnerBanner(); paintThinnerLine(); paintNextStep(); },
     });
     historyPanel.style.marginTop = 'var(--space-4)';
 
@@ -359,67 +364,76 @@ export function renderEmt(ctx, params = {}) {
       style: 'margin-top:var(--space-2); color:var(--warning)',
     }, ['Record a blood pressure or pulse above first — a patient can’t go to Dental Triage or the hygienist without vitals.']);
 
-    let nextStepBody;
-    if (tr.emt_signed_off && tr.route && ROUTES[tr.route]) {
-      const other = OTHER[tr.route];
-      nextStepBody = el('div', {}, [
-        el('div', { style: 'display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap' }, [
-          icon('checkCircle', { size: 16 }),
-          el('strong', {}, [`Signed off · sent to ${ROUTES[tr.route].label}`]),
-        ]),
-        el('p', { class: 'subtle small', style: 'margin-top:var(--space-2)' }, [
-          `by ${p.routed_by_name || '—'}${tr.routed_at ? ' · ' + fmtWhen(tr.routed_at) : ''}`,
-        ]),
-        other ? el('button', {
-          class: 'btn btn--ghost btn--sm',
-          style: 'margin-top:var(--space-3)',
-          onClick: () => doRoute(id, other, pendingVitals()),
-        }, [icon(ROUTES[other].ic, { size: 15 }), `Transfer to ${ROUTES[other].label} instead`]) : null,
-      ]);
-    } else if (tr.route && ROUTES[tr.route]) {
-      const other = OTHER[tr.route];
-      nextStepBody = el('div', {}, [
-        el('div', { style: 'display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap' }, [
-          el('span', { class: 'subtle small' }, ['Routed automatically to:']),
-          routePill(tr.route),
-        ]),
-        el('button', {
-          class: 'btn btn--primary btn--block',
-          style: 'margin-top:var(--space-3)',
-          onClick: () => doRoute(id, tr.route, pendingVitals()),
-        }, [icon(ROUTES[tr.route].ic, { size: 16 }), `Sign off & send to ${ROUTES[tr.route].label}`]),
-        vitalsGateNote,
-        other ? el('button', {
-          class: 'btn btn--ghost btn--sm btn--block',
-          style: 'margin-top:var(--space-2)',
-          onClick: () => doRoute(id, other, pendingVitals()),
-        }, [`Send to the ${ROUTES[other].label} instead`]) : null,
-      ]);
-    } else {
-      nextStepBody = el('div', {}, [
-        // Nothing to derive a station from: a returning patient starting a
-        // fresh visit has no visit type yet. Better to ask than to guess and
-        // silently put a cleaning in the Dental Triage queue.
-        el('p', { class: 'subtle small' }, ['Nothing recorded to route from — choose a station:']),
-        vitalsGateNote,
-        el('div', { style: 'display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-2)' }, [
-          inlineRouteBtn('dentist'),
-          inlineRouteBtn('hygienist'),
-        ]),
-      ]);
-    }
+    // Built from the record as it now stands (`p`), so a re-route by an edit on
+    // this screen shows at once.
+    function nextStepBodyFor() {
+      const tr = p.triage || {};
+      let nextStepBody;
+      if (tr.emt_signed_off && tr.route && ROUTES[tr.route]) {
+        const other = OTHER[tr.route];
+        nextStepBody = el('div', {}, [
+          el('div', { style: 'display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap' }, [
+            icon('checkCircle', { size: 16 }),
+            el('strong', {}, [`Signed off · sent to ${ROUTES[tr.route].label}`]),
+          ]),
+          el('p', { class: 'subtle small', style: 'margin-top:var(--space-2)' }, [
+            `by ${p.routed_by_name || '—'}${tr.routed_at ? ' · ' + fmtWhen(tr.routed_at) : ''}`,
+          ]),
+          other ? el('button', {
+            class: 'btn btn--ghost btn--sm',
+            style: 'margin-top:var(--space-3)',
+            onClick: () => doRoute(id, other, pendingVitals()),
+          }, [icon(ROUTES[other].ic, { size: 15 }), `Transfer to ${ROUTES[other].label} instead`]) : null,
+        ]);
+      } else if (tr.route && ROUTES[tr.route]) {
+        const other = OTHER[tr.route];
+        nextStepBody = el('div', {}, [
+          el('div', { style: 'display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap' }, [
+            el('span', { class: 'subtle small' }, ['Routed automatically to:']),
+            routePill(tr.route),
+          ]),
+          el('button', {
+            class: 'btn btn--primary btn--block',
+            style: 'margin-top:var(--space-3)',
+            onClick: () => doRoute(id, tr.route, pendingVitals()),
+          }, [icon(ROUTES[tr.route].ic, { size: 16 }), `Sign off & send to ${ROUTES[tr.route].label}`]),
+          vitalsGateNote,
+          other ? el('button', {
+            class: 'btn btn--ghost btn--sm btn--block',
+            style: 'margin-top:var(--space-2)',
+            onClick: () => doRoute(id, other, pendingVitals()),
+          }, [`Send to the ${ROUTES[other].label} instead`]) : null,
+        ]);
+      } else {
+        nextStepBody = el('div', {}, [
+          // Nothing to derive a station from: a returning patient starting a
+          // fresh visit has no visit type yet. Better to ask than to guess and
+          // silently put a cleaning in the Dental Triage queue.
+          el('p', { class: 'subtle small' }, ['Nothing recorded to route from — choose a station:']),
+          vitalsGateNote,
+          el('div', { style: 'display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-2)' }, [
+            inlineRouteBtn('dentist'),
+            inlineRouteBtn('hygienist'),
+          ]),
+        ]);
+      }
 
-    // A locked record is not re-routed from here (the data layer refuses it);
-    // where the patient has been sent is still shown.
-    if (readOnly) {
-      nextStepBody = el('p', { class: 'subtle small' }, [
-        tr.route && ROUTES[tr.route] ? `Sent to ${ROUTES[tr.route].label}${p.routed_by_name ? ' by ' + p.routed_by_name : ''}. ` : '',
-        'The record is signed off and locked, so the patient is not re-routed from this station.',
-      ]);
+      // A locked record is not re-routed from here (the data layer refuses it);
+      // where the patient has been sent is still shown.
+      if (readOnly) {
+        nextStepBody = el('p', { class: 'subtle small' }, [
+          tr.route && ROUTES[tr.route] ? `Sent to ${ROUTES[tr.route].label}${p.routed_by_name ? ' by ' + p.routed_by_name : ''}. ` : '',
+          'The record is signed off and locked, so the patient is not re-routed from this station.',
+        ]);
+      }
+      return nextStepBody;
     }
+    const nextStepSlot = el('div', {});
+    function paintNextStep() { nextStepSlot.replaceChildren(nextStepBodyFor()); }
+    paintNextStep();
     const nextStep = el('div', { class: 'card', style: 'margin-top:var(--space-4)' }, [
       el('div', { class: 'card-title' }, [icon('checkCircle', { size: 15 }), 'Next step']),
-      nextStepBody,
+      nextStepSlot,
     ]);
     if (readOnly) [sys, dia, hr, glu, resp, ...recheckRows.querySelectorAll('input')].forEach((inp) => { inp.disabled = true; });
 

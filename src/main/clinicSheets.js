@@ -55,8 +55,9 @@ const DL = require('./dentalLabels');
 // The record lock in four columns: its state ("Locked", or "Unlocked" with the
 // administrator's reason while it is being amended), who locked it and when —
 // which, for a record locked before v0.0.15, is its completion, the sign-off
-// that locked it — and every unlock of it, which is what an amendment after
-// sign-off leaves behind.
+// that locked it (the bundle names who completed it even when this laptop
+// only stored their user id: exportClinicBundle) — and every unlock of it,
+// which is what an amendment after sign-off leaves behind.
 function lockColumns(t) {
   const hist = j(t.lock_history, []);
   const unlocks = (Array.isArray(hist) ? hist : []).filter((h) => h && h.action === 'unlock');

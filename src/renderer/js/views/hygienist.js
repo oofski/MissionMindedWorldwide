@@ -166,6 +166,9 @@ export function renderHygienist(ctx, params = {}) {
         return;
       }
       if (mode === 'lock') {
+        // A re-sign after an amendment is a new signature, never the one on
+        // file from before the correction (see the Dental Triage screen).
+        if (amending && !sigPad.getDataUrl()) { toast('Sign again to re-sign the corrected record — the signature on file was given before the amendment.', 'error'); return; }
         if (!payload.provider_signature) { toast('Signature is required to lock the record.', 'error'); return; }
         const ok = await modal({ title: 'Lock this record?', body: 'Locking finalizes the record so it can no longer be edited. Optional — the patient moves to check-out without it. Continue?', confirmText: 'Sign off & lock', cancelText: 'Cancel' });
         if (!ok) return;

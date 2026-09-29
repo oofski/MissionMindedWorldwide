@@ -178,9 +178,10 @@ export function incompleteBanner(p, { isAdmin, onDelete, onNewCheckin } = {}) {
 /* ------------------------------------------------------------------ */
 
 // Which staff role may correct which part of the intake. Mirrors db.js
-// SECTION_ROLES, which the data layer enforces on every save; the harness pins
-// the two together. Everyone who meets the patient can fix their phone number;
-// the health history is the clinical roles'.
+// SECTION_ROLES, which db.updatePatientSection enforces on every save (and
+// ipc.js before it); the harness pins the two together. Everyone who meets
+// the patient can fix their phone number; the health history is the clinical
+// roles'.
 export const SECTION_ROLES = {
   demographics: ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
   medical_history: ['admin', 'emt', 'triage', 'doctor', 'hygienist'],
@@ -434,10 +435,10 @@ async function markReviewed(p, done) {
 // nothings are the same answer, so opening and saving a record does not
 // report a field as changed because the form writes '' where it held nothing.
 const isNothing = (v) => v == null || v === '' || (Array.isArray(v) && !v.length);
-// The CHANGES between what was stored and what the form returned, in the shape
-// the data layer merges: a changed key with its new value, a removed key as
-// null, everything unchanged left out — so a key this screen never showed can
-// never be overwritten by it.
+// The CHANGES between two readings of a section — the form as it opened and
+// the form as it is saved — in the shape the data layer merges: a changed key
+// with its new value, a removed key as null, everything unchanged left out —
+// so a key this screen never showed can never be overwritten by it.
 export function sectionPatch(before = {}, after = {}) {
   const out = {};
   const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
@@ -494,17 +495,23 @@ export function openSectionEditor(p, section, { onSaved } = {}) {
     }
     close();
   };
+  // The changes are measured from the form as it opened (initial()), not from
+  // the stored blob: the form reads an older record in today's terms — a
+  // state as its code, a town in the list's spelling, "prefer not to say"
+  // alone — and diffing against the raw record sent those readings as edits
+  // nobody made, audited as a patient edit, riding along with a phone fix.
+  const start = sec.initial();
   saveBtn.addEventListener('click', async () => {
     const out = sec.collect();
     if (!out) return; // the form has said which answer it needs
     let patch;
     if (section === 'demographics') {
-      patch = sectionPatch(personOf(before), personOf(out));
+      patch = sectionPatch(personOf(start), personOf(out));
       if (lockIdentity) IDENTITY_KEYS.forEach((k) => { delete patch[k]; });
-      const dm = sectionPatch(before.demographics || {}, out.demographics || {});
+      const dm = sectionPatch(start.demographics || {}, out.demographics || {});
       if (Object.keys(dm).length) patch.demographics = dm;
     } else {
-      patch = sectionPatch(before, out);
+      patch = sectionPatch(start, out);
     }
     // Saving an unchanged medical history is still a review of it with the
     // patient; any other unchanged section simply closes.

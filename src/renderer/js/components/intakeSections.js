@@ -6,13 +6,18 @@
 // cannot be worded one way at check-in and another at the chair, or be required
 // in one place and optional in the other.
 //
-// Every builder returns { node, collect(), isDirty() }:
+// Every builder returns { node, collect(), isDirty(), initial() }:
 //   collect()  validates exactly as check-in does — a refusal is a toast that
 //              NAMES the question it wants — and returns a NEW object, the
 //              caller's record with the answers merged over it, so a key this
 //              form does not ask (an older record's answer, a newer build's
 //              field) survives the save. Returns false when refused.
 //   isDirty()  whether anything on screen differs from what it was built with.
+//   initial()  what collect() would have returned before anyone touched the
+//              form: the record as this form reads it (a state spelled out as
+//              its code, a town in the list's spelling). A staff edit sends
+//              the difference between this and collect(), so only what the
+//              person changed is saved — the same test isDirty() makes.
 //
 // `staff: true` is for a screen run by clinic staff rather than the patient;
 // the questions and the rules are the same either way.
@@ -211,9 +216,15 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
   // record with no answer must not gain one nobody gave.
   const storedServices = Array.isArray(d.services) ? d.services : [];
   const chosenServices = new Set(storedServices.length || staff ? storedServices : ['dental']);
-  // A service a newer build offers, or an older record holds, that this form
-  // has no chip for is kept as stored rather than dropped on save.
-  const otherServices = () => storedServices.filter((k) => !SERVICES.some((s) => s.key === k));
+  // The services as stored, in their stored order, less any chip turned off,
+  // then any chip turned on. A service a newer build offers, or an older
+  // record holds, that this form has no chip for is kept rather than dropped;
+  // and nothing is re-ordered, so an untouched record is not a changed one.
+  const isChip = (k) => SERVICES.some((s) => s.key === k);
+  const servicesNow = () => [
+    ...storedServices.filter((k) => !isChip(k) || chosenServices.has(k)),
+    ...SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k) && !storedServices.includes(k)),
+  ];
   const serviceBtns = SERVICES.map((svc) => {
     const btn = el('button', {
       type: 'button',
@@ -296,7 +307,7 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
       ...d,
       address: address.get(), city: getCity(), state: stateF.get(), mailing_address: mailing.get(), marital_status: marital.get(),
       emergency_name: emName.get(), emergency_phone: emPhone.get(),
-      services: [...SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k)), ...otherServices()],
+      services: servicesNow(),
       // "Prefer not to answer" is about the list, so it replaces it rather
       // than joining it — a record must not say both "white" and "declined".
       race: race.get().includes('prefer_not') ? ['prefer_not'] : race.get(),
@@ -309,6 +320,7 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       const out = peek();
       const dm = out.demographics;
@@ -561,6 +573,7 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       const out = peek();
       let missing = firstMissingMedical(out);
@@ -632,6 +645,7 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       // Every dental question is required. Each refusal names the question it
       // is about — a bare "please complete this step" on a screen of

@@ -31,7 +31,6 @@ export const api = {
   deleteEvent: (id, force) => call('eventsDelete', { id, force }),
 
   createPatient: (p) => call('patientsCreate', p),
-  updatePatient: (p) => call('patientsUpdate', p),
   // v0.0.15: one section of the intake answers, as CHANGES (null removes a key).
   updatePatientSection: (id, section, values, opts) => call('patientsUpdateSection', { id, section, values, ...(opts || {}) }),
   deletePatient: (id) => call('patientsDelete', id),

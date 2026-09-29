@@ -1018,6 +1018,10 @@ export function renderProvider(ctx, params = {}) {
         return;
       }
       if (mode === 'lock') {
+        // Re-signing an amended record is a new signature for what the record
+        // now says: the one on file signed the record before the correction,
+        // and falling back to it let "Re-sign & lock" lock with nobody signing.
+        if (amending && !sigPad.getDataUrl()) { toast('Sign again to re-sign the corrected record — the signature on file was given before the amendment.', 'error'); return; }
         if (!payload.provider_signature) { toast('Provider signature is required to lock the record.', 'error'); return; }
         const ok = await modal({ title: 'Lock this record?', body: 'Locking finalizes this record so it can no longer be edited. This is optional — the patient moves to check-out without it. Continue?', confirmText: 'Sign off & lock', cancelText: 'Cancel' });
         if (!ok) return;

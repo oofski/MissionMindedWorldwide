@@ -60,7 +60,8 @@ const PERMS = {
   'usersList': ['admin'], 'usersCreate': ['admin'], 'usersUpdate': ['admin'], 'usersDelete': ['admin'],
   'usersClearEventStaff': ['admin'],
   'eventsCreate': ['admin'], 'eventsUpdate': ['admin'], 'eventsSetActive': ['admin'], 'eventsSetState': ['admin'], 'eventsDelete': ['admin'],
-  'patientsUpdate': ['admin', 'triage', 'doctor'], 'patientsGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'patientsGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  'patientsFindByCode': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'patientsList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], 'patientsRecords': ['admin', 'doctor'],
   'patientsSearchAll': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'], 'patientsHistory': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'patientsIncomplete': ['admin'], 'patientsCleanupIncomplete': ['admin'], 'patientsDelete': ['admin'],
@@ -122,7 +123,6 @@ window.api = {
   eventsSetState: okWrap(({ id, active }) => db.setEventActive(currentUser, id, active), 'eventsSetState'),
   eventsDelete: okWrap(({ id, force }) => db.deleteEvent(currentUser, id, { force }), 'eventsDelete'),
   patientsCreate: okWrap((p) => db.createPatient(currentUser, p)), // ungated (kiosk + any role)
-  patientsUpdate: okWrap(({ id, ...d }) => db.updatePatient(currentUser, id, d), 'patientsUpdate'),
   // Mirrors the ipc.js handler: the channel is open to every staff role, and
   // which SECTION a role may change is checked against db.SECTION_ROLES.
   patientsUpdateSection: okWrap(({ id, section, values, reviewedOnly } = {}) => {
@@ -136,14 +136,14 @@ window.api = {
   patientsList: okWrap((o) => db.listPatients(o || {}), 'patientsList'),
   patientsRecords: okWrap((o) => db.listPatients(o || {}), 'patientsRecords'),
   patientsSearchAll: okWrap((t) => db.searchAllPatients(t), 'patientsSearchAll'),
-  // Ungated in ipc.js, like the real channel: any signed-in station may resolve a
-  // scanned band, and an unknown code errors rather than returning a null the
-  // caller has to guess at.
+  // Gated like the real channel (v0.0.15): any signed-in station may resolve a
+  // scanned band — nobody signed out may — and an unknown code errors rather
+  // than returning a null the caller has to guess at.
   patientsFindByCode: okWrap((code) => {
     const found = db.findPatientByCode(code);
     if (!found) throw new Error('No patient found for that wristband.');
     return found;
-  }),
+  }, 'patientsFindByCode'),
   patientsHistory: okWrap((id) => db.patientHistory(id), 'patientsHistory'),
   patientsIncomplete: okWrap(() => db.listIncompletePatients(), 'patientsIncomplete'),
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
@@ -4391,6 +4391,36 @@ async function main() {
     log(emtRoles && emtRoles.split(',').map((x) => x.trim().replace(/'/g, '')).every((r) => db.SECTION_ROLES.medical_history.includes(r)),
       'perms: every role that can open Vitals may edit the medical history there (no Edit offered that the save refuses)');
 
+    // The whole-record save it replaced. patients:update rewrote both histories
+    // and the name with no lock check, no validation and no merge, and once
+    // Records stopped calling it, it served only as a way around the section
+    // save: a doctor or triage could rewrite a locked record through it. With
+    // no handler and no preload entry, the renderer cannot reach it at all.
+    const dbSrcC = readSrcC('../src/main/db.js');
+    const updCalls = [...dbSrcC.matchAll(/\bupdatePatient\(/g)].length;
+    log(!('patientsUpdate' in ipcPerms) && !handled.includes('patients:update') && !channels.has('patients:update') && !/db\.updatePatient\(/.test(ipcSrc)
+      && !/call\('patientsUpdate'/.test(apiSrc) && typeof window.api.patientsUpdate === 'undefined' && !('patientsUpdate' in PERMS)
+      && updCalls === 2 && /\n\s+updatePatient\(actor, pid, \{/.test(dbSrcC),
+      'perms: the whole-record patients:update channel is gone (ipc, preload, api, mock) — only the USB import, in the main process, still replaces a record');
+    // A scanned band returns the whole record, so it is gated like opening one.
+    const fbP = mkC('Faye', 'Band');
+    const signedIn = currentUser;
+    currentUser = null;
+    const fbOut = await window.api.patientsFindByCode(fbP.patient_code);
+    currentUser = signedIn;
+    await as('registration');
+    const fbReg = await window.api.patientsFindByCode(' ' + fbP.patient_code + '\r');
+    log(!fbOut.ok && /sign in/i.test(fbOut.error) && fbReg.ok && fbReg.data.id === fbP.id
+      && JSON.stringify(ipcPerms.patientsFindByCode) === JSON.stringify(ipcPerms.patientsGet),
+      'perms: a wristband scan resolves for signed-in staff only — a signed-out session is refused the record it returns');
+    // The section table is enforced in the data layer, for every caller — not
+    // only by the IPC handler in front of it.
+    let dbRole = ''; let dbNoActor = '';
+    try { db.updatePatientSection({ id: 1, role: 'checkout', full_name: 'X' }, fbP.id, 'medical_history', { tobacco: 'yes' }); } catch (e) { dbRole = e.message; }
+    try { db.updatePatientSection(null, fbP.id, 'demographics', { phone: '5035550100' }); } catch (e) { dbNoActor = e.message; }
+    log(/permission/i.test(dbRole) && /permission/i.test(dbNoActor) && db.getPatient(fbP.id).medical_history.tobacco === 'no',
+      'perms: db.updatePatientSection itself refuses a role the section is not open to, and a call with nobody signed in');
+
     /* ---- one normalizer, two copies ---- */
     const FIX = [
       {},
@@ -4620,6 +4650,26 @@ async function main() {
     lk = db.getPatient(lkP.id);
     log(prC.ok && lk.treatment.locked && lk.lock.locked_by_name === 'C doctor' && lk.lock.history.map((h) => h.action).join(',') === 'lock,unlock,relock',
       'amend: re-signing locks it again, as a re-lock by the dentist who re-signed');
+    log(lk.treatment.completed_at === completedAt && lk.completed_by_name === 'Administrator' && lk.treatment.completed_by_name === 'Administrator'
+      && Date.parse(lk.lock.locked_at) > Date.parse(completedAt),
+      'amend: re-signing keeps who completed the visit and when — the re-lock is its own stamp, not a new completion');
+    // The report counts a visit's procedures on the day it was completed, so
+    // an amendment re-signed days later must not move them to that day.
+    const dayP = mkC('Dee', 'Clinicday', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), dayP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }], provider_name: 'Dr Day', provider_signature: 'data:,s' }, 'lock');
+    { const r = rawDb(); try { r.prepare("UPDATE treatments SET completed_at='2026-10-18T15:00:00.000Z', locked_at='2026-10-18T15:00:00.000Z' WHERE patient_id=?").run(dayP.id); } finally { r.close(); } }
+    db.dismissPatient(signInAdmin(), dayP.id);
+    const clinicDay = () => (db.buildEventSummary(evC.id).days || []).find((x) => x.date === '2026-10-18') || {};
+    const dayBefore = { ...clinicDay() };
+    db.unlockRecord(signInAdmin(), dayP.id, 'Fix the note');
+    await as('doctor');
+    await window.api.treatmentSave({ patientId: dayP.id, data: { ...db.getPatient(dayP.id).treatment, clinical_notes: 'fixed' }, finalize: 'lock' });
+    const dayAfterP = db.getPatient(dayP.id);
+    const dayAfter = clinicDay();
+    log(dayAfterP.treatment.locked && dayAfterP.treatment.clinical_notes === 'fixed' && dayAfterP.status === 'dismissed'
+      && dayAfterP.treatment.completed_at === '2026-10-18T15:00:00.000Z' && dayAfterP.completed_by_name === 'Administrator'
+      && dayBefore.fillings === 1 && dayBefore.completed === 1 && dayAfter.fillings === 1 && dayAfter.completed === 1,
+      'amend: a record re-signed after the clinic keeps its completion on the clinic day — the report\'s per-day table does not move it');
     // A checked-out patient's record, amended.
     const outL = mkC('Otto', 'Leftalready', { route: 'dentist' });
     db.saveTreatment(signInAdmin(), outL.id, { provider_name: 'Dr O', provider_signature: 'data:,s' }, 'lock');
@@ -4663,6 +4713,44 @@ async function main() {
     const mv2 = db.getPatient(mvP.id);
     log(!mv2.treatment.locked && mv2.status === 'checked_in' && mv2.lock.history.slice(-1)[0].reason === 'Admin move: back to check-in',
       'lock: "back to check-in" is recorded as the unlock it has always silently been');
+    // Re-open, then finish the visit the ordinary way (completed, not locked):
+    // a visit finished again, not an amendment left standing for good.
+    const roP = mkC('Rory', 'Reopened', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), roP.id, { provider_name: 'Dr R', provider_signature: 'data:,s' }, 'lock');
+    db.adminMovePatient(signInAdmin(), roP.id, 'reopen');
+    await as('doctor');
+    await window.api.treatmentSave({ patientId: roP.id, data: { provider_name: 'Dr R' }, finalize: 'complete' });
+    const ro1 = db.getPatient(roP.id);
+    const roListed = db.listPatients({}).find((x) => x.id === roP.id);
+    await window.api.treatmentSave({ patientId: roP.id, data: { provider_name: 'Dr R' }, finalize: false });
+    const ro2 = db.getPatient(roP.id);
+    log(ro1.status === 'completed' && !ro1.lock.locked && !ro1.lock.amending && roListed.amending === false && ro1.completed_by_name === 'C doctor'
+      && ro2.status === 'in_treatment' && !ro2.treatment.completed_at && db.patientAudit(roP.id)[0].action === 'treatment',
+      'lock: a re-opened visit completed again is not "amending" — and a later progress save takes it back into treatment, as a completed visit always did');
+    const bvP = mkC('Bev', 'Backtovitals', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), bvP.id, { provider_name: 'Dr B', provider_signature: 'data:,s' }, 'lock');
+    db.adminMovePatient(signInAdmin(), bvP.id, 'emt');
+    db.routePatient(signInAdmin(), bvP.id, 'dentist');
+    db.saveTreatment(signInAdmin(), bvP.id, { provider_name: 'Dr B' }, 'complete');
+    const bv = db.getPatient(bvP.id);
+    log(bv.status === 'completed' && !bv.lock.amending && bv.lock.unlock_reason === 'Admin move: back to vitals'
+      && Date.parse(bv.treatment.completed_at) > Date.parse(bv.lock.unlocked_at),
+      'lock: the same after "Back to vitals" — the unlock stays in the trail, the visit reads as finished, not as amended');
+    // Two laptops whose clocks disagree: the unlock still follows the
+    // completion it amends, and a completion the unlock it closes.
+    const ahead = new Date(Date.now() + 3600e3).toISOString();
+    const skA = mkC('Skye', 'Aheadclock', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), skA.id, { provider_name: 'Dr S', provider_signature: 'data:,s' }, 'lock');
+    { const r = rawDb(); try { r.prepare('UPDATE treatments SET completed_at=?, locked_at=? WHERE patient_id=?').run(ahead, ahead, skA.id); } finally { r.close(); } }
+    db.unlockRecord(signInAdmin(), skA.id, 'Clock ahead');
+    const skB = mkC('Sid', 'Aheadclock', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), skB.id, { provider_name: 'Dr S', provider_signature: 'data:,s' }, 'lock');
+    db.adminMovePatient(signInAdmin(), skB.id, 'reopen');
+    { const r = rawDb(); try { r.prepare('UPDATE treatments SET unlocked_at=? WHERE patient_id=?').run(ahead, skB.id); } finally { r.close(); } }
+    db.saveTreatment(signInAdmin(), skB.id, { provider_name: 'Dr S' }, 'complete');
+    const skAp = db.getPatient(skA.id); const skBp = db.getPatient(skB.id);
+    log(skAp.lock.amending && Date.parse(skAp.lock.unlocked_at) > Date.parse(ahead) && !skBp.lock.amending && Date.parse(skBp.treatment.completed_at) > Date.parse(ahead),
+      'lock: an unlock always sorts after the sign-off it amends, and a completion after the unlock it closes — whatever another laptop\'s clock said');
 
     /* ---- a record locked before v0.0.15 ---- */
     const oldL = mkC('Olga', 'Oldlock', { route: 'dentist' });
@@ -4693,6 +4781,63 @@ async function main() {
     log(nuNew.treatment.locked && nuNew.lock.locked_by_name === 'Administrator' && JSON.stringify(nuNew.lock.history) === JSON.stringify(src.lock.history)
       && nuOld.treatment.locked && nuOld.lock.locked_by_name === 'Dr File' && nuOld.lock.history.length === 1 && nuOld.lock.history[0].by === 'Dr File',
       'lock: a locked USB file keeps who locked it; an older file without the trail is locked by its own sign-off, not by the importer');
+
+    // A record an administrator unlocked here to amend is newer than the file
+    // written at sign-off, too: replaying it reverted the amendment, locked the
+    // record again and replaced the trail, losing the unlock.
+    const amU = mkC('Ursula', 'Usbamend', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), amU.id, { provider_name: 'Dr U', provider_signature: 'data:,s', clinical_notes: 'original' }, 'lock');
+    const amFile = db.getPatient(amU.id);
+    db.unlockRecord(signInAdmin(), amU.id, 'Wrong tooth');
+    await as('doctor');
+    await window.api.treatmentSave({ patientId: amU.id, data: { provider_name: 'Dr U', clinical_notes: 'AMENDED' }, finalize: false });
+    await as('checkout');
+    const amImp = db.importPatientFromPortable(currentUser, amFile);
+    const amAfter = db.getPatient(amU.id);
+    log(!!amImp.import_skipped && amAfter.treatment.clinical_notes === 'AMENDED' && !amAfter.treatment.locked && amAfter.lock.amending
+      && amAfter.lock.history.map((h) => h.action).join(',') === 'lock,unlock'
+      && db.patientAudit(amU.id).some((a) => a.action === 'usb_import' && /^skipped: .*unlocked after this file/.test(a.detail)),
+      'lock: the file written at sign-off cannot undo an amendment in progress here — skipped, with the amendment and its unlock kept');
+    // A file written during the amendment knows of the unlock, and is taken.
+    const amFile2 = db.getPatient(amU.id);
+    const amImp2 = db.importPatientFromPortable(currentUser, { ...amFile2, treatment: { ...amFile2.treatment, clinical_notes: 'From the stick' } });
+    const amAfter2 = db.getPatient(amU.id);
+    log(!amImp2.import_skipped && amAfter2.treatment.clinical_notes === 'From the stick' && amAfter2.lock.amending
+      && amAfter2.treatment.completed_at === amAfter.treatment.completed_at && amAfter2.status === 'completed',
+      'lock: a file written during the amendment is still imported, and keeps the visit\'s completion');
+    // A file locked before a re-open here would lock the re-opened record again.
+    const stP = mkC('Stan', 'Stalefile', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), stP.id, { provider_name: 'Dr S', provider_signature: 'data:,s' }, 'lock');
+    const stFile = db.getPatient(stP.id);
+    db.adminMovePatient(signInAdmin(), stP.id, 'reopen');
+    const stImp = db.importPatientFromPortable(currentUser, stFile);
+    const stAfter = db.getPatient(stP.id);
+    log(!!stImp.import_skipped && !stAfter.treatment.locked && stAfter.status === 'in_treatment',
+      'lock: a file locked before a re-open here does not lock the re-opened record again');
+    // A newer locked file (locked again elsewhere after the unlock here) is
+    // taken — and its trail is merged with this laptop's, not swapped for it.
+    const mgP = mkC('Mona', 'Mergetrail', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), mgP.id, { provider_name: 'Dr M', provider_signature: 'data:,s' }, 'lock');
+    db.adminMovePatient(signInAdmin(), mgP.id, 'reopen');
+    const mgHere = db.getPatient(mgP.id);
+    const later = new Date(Date.parse(mgHere.lock.unlocked_at) + 60e3).toISOString();
+    const mgFile = { ...mgHere, status: 'completed', treatment: { ...mgHere.treatment, locked: true, completed_at: later, locked_at: later,
+      locked_by_name: 'Dr Elsewhere', lock_history: [mgHere.lock.history[0], { action: 'relock', at: later, by: 'Dr Elsewhere' }] } };
+    const mgImp = db.importPatientFromPortable(currentUser, mgFile);
+    const mgAfter = db.getPatient(mgP.id);
+    log(!mgImp.import_skipped && mgAfter.treatment.locked && mgAfter.lock.locked_by_name === 'Dr Elsewhere'
+      && mgAfter.lock.history.map((h) => h.action + ':' + h.by).join(',') === 'lock:Administrator,unlock:Administrator,relock:Dr Elsewhere',
+      'lock: a newer locked file is taken, its trail merged with this laptop\'s — the unlock recorded here kept, the importer not added');
+    // The desk is told how many files were skipped, apart from the uploads.
+    log(/r && r\.import_skipped\) skipped\+\+; else uploaded\+\+/.test(ipcSrc) && /return \{ dir, uploaded, skipped \}/.test(ipcSrc),
+      'lock: the USB upload counts the files it skipped apart from the ones it uploaded');
+    const realUpload = window.api.usbUploadCheckout;
+    window.api.usbUploadCheckout = async () => ({ ok: true, data: { dir: 'E:/', uploaded: 2, skipped: 1 } });
+    const coUp = await viewC('checkout.js', 'renderCheckout');
+    btnIn(coUp, /Upload USB to database/).click(); await settle();
+    window.api.usbUploadCheckout = realUpload;
+    log(/^Uploaded 2 patient file\(s\) from USB · 1 skipped — the record here was signed off or unlocked after the file was written/.test(lastToastC()),
+      'lock: and check-out says so, rather than counting a skipped file as uploaded');
 
     /* ---- routing names its router ---- */
     const rtP = mkC('Rita', 'Route', { vitals: true });
@@ -4774,6 +4919,18 @@ async function main() {
     log(!!lkRow && lkRow[col('Record lock')] === 'Locked' && lkRow[col('Locked by')] === 'C doctor' && /Wrong tooth recorded/.test(lkRow[col('Amended after sign-off')])
       && oldRow[col('Record lock')] === 'Locked' && oldRow[col('Locked by')] === 'Dr Old Name' && busyRow[col('Record lock')] === '',
       'outputs: the spreadsheet says Locked, by whom (an older lock by its completion) and every amendment after sign-off');
+    // A record locked on THIS laptop before v0.0.15 stored only the user id of
+    // who completed it — no name, no lock stamp. The screens and the PDF
+    // resolve the id; the spreadsheet must name the same person.
+    const locP = mkC('Lola', 'Locallegacy', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), locP.id, { provider_name: 'Dr L', provider_signature: 'data:,s' }, 'lock');
+    { const r = rawDb(); try { r.prepare('UPDATE treatments SET locked_at=NULL, locked_by_name=NULL, lock_history=NULL, completed_by_name=NULL WHERE patient_id=?').run(locP.id); } finally { r.close(); } }
+    const locPt = db.getPatient(locP.id);
+    const locRow = sheetsC(db.exportClinicBundle(evC.id)).find((x) => x.name === 'Treatment').rows.find((r) => r[0] === 'Locallegacy');
+    log(!locPt.treatment.completed_by_name && !!locPt.treatment.completed_by && locPt.lock.locked_by_name === 'Administrator'
+      && /Signed off & locked .* by Administrator/.test(plainC(pdfC.buildHtml(locPt, 'progress')))
+      && locRow[col('Record lock')] === 'Locked' && locRow[col('Locked by')] === 'Administrator',
+      'outputs: a record locked here before v0.0.15 (only the user id stored) names who locked it in the spreadsheet, as the screen and the PDF do');
 
     /* ---- the legacy EMT confirmations stay visible ---- */
     const emtOld = mkC('Edna', 'Earlier', { route: 'dentist' });
@@ -4814,6 +4971,27 @@ async function main() {
     log(!document.body.contains(ed) && db.getPatient(vtl.id).medical_history.medications.some((x) => x.key === 'warfarin')
       && /BLOOD THINNER — Warfarin/.test(emtV.textContent) && sysIn.isConnected && sysIn.value === '150',
       'Vitals: adding Warfarin turns on the blood-thinner banner at once — and the blood pressure typed but not yet saved is still there');
+    // A dental edit at Vitals that changes the visit type re-routes a patient
+    // not yet signed off; the Next step card must follow, or its sign-off
+    // button sends them to the old station and overwrites the new route.
+    closeOverlays();
+    const rvP = mkC('Reva', 'Reroute', { dental: DENT({ visit_type: 'cleaning' }), vitals: true });
+    const emtR = await viewC('emt.js', 'renderEmt', { id: rvP.id });
+    const signBefore = (btnIn(emtR, /^Sign off & send to/) || {}).textContent || '';
+    cardOf(emtR.querySelector('details.patient-info'), 'dental_history').querySelector('.card-edit').click(); await settle();
+    const edR = $all('.section-editor').pop();
+    setInput(edR.querySelector('input.visit-range'), '1'); await settle();
+    btnIn(edR, /^Save$/).click(); await settle();
+    const rvStored = db.getPatient(rvP.id);
+    const signAfterBtn = btnIn(emtR, /^Sign off & send to/);
+    log(/Hygienist/.test(signBefore) && rvStored.dental_history.visit_type === 'extraction_pain' && rvStored.triage.route === 'dentist'
+      && !!signAfterBtn && /Dental Triage/.test(signAfterBtn.textContent) && !!btnIn(emtR, /^Send to the Hygienist instead$/)
+      && /Routed automatically to:\s*Dental Triage/.test(emtR.textContent),
+      'Vitals: a dental edit that changes the visit type updates the "Sign off & send to …" target on the screen');
+    signAfterBtn.click(); await settle();
+    const rvSent = db.getPatient(rvP.id);
+    log(rvSent.triage.route === 'dentist' && rvSent.triage.emt_signed_off,
+      'Vitals: and signing off then sends the patient where the edit routed them');
     const emtLegacy = await viewC('emt.js', 'renderEmt', { id: legacyP.id });
     const pl = emtLegacy.querySelector('details.patient-info');
     log(!btnIn(pl, /^Reviewed with patient/) && /Some questions have not been answered at this visit/.test(pl.textContent),
@@ -4860,6 +5038,37 @@ async function main() {
     log(!secA.isDirty() && JSON.stringify(outA.demographics.services) === '["dental","optometry_future"]'
       && !secB.isDirty() && outB === false && JSON.stringify(outK.demographics.services) === '["dental"]',
       'details: a service the form has no chip for is kept, a staff edit never invents "Dental", and a new kiosk patient still starts on it');
+    // An older record the form reads in today's terms (a state spelled out, a
+    // town in lower case, a race list with "prefer not to say" in it, services
+    // in their own order): untouched, it is not a change, and a phone fix
+    // sends the phone and nothing else.
+    const olderD = mkC('Olive', 'Olderdetails', { demographics: DEMO({ state: 'Oregon', city: 'sandy', race: ['white', 'prefer_not'], services: ['vision', 'dental'] }) });
+    const olderPt = db.getPatient(olderD.id);
+    const secO = IS.demographicsSection(olderPt, { staff: true, cities: IS.eventCities(olderPt.event) });
+    const outO = secO.collect();
+    const startO = secO.initial();
+    log(!secO.isDirty() && JSON.stringify(PH.sectionPatch(startO.demographics, outO.demographics)) === '{}'
+      && JSON.stringify(outO.demographics.services) === '["vision","dental"]' && startO.demographics.state === 'OR',
+      'details: an older record, untouched, is not a change — the form\'s own reading of it is the baseline, and services keep their stored order');
+    $all('.chip-btn', secO.node).find((b) => b.textContent === 'Medical').click();
+    $all('.chip-btn', secO.node).find((b) => b.textContent === 'Vision').click();
+    log(JSON.stringify(secO.collect().demographics.services) === '["dental","medical"]',
+      'details: a service turned off leaves the others in place, and one turned on is added after them');
+    await as('registration');
+    PH.openSectionEditor(olderPt, 'demographics', {});
+    btnIn($all('.section-editor').pop(), /^Save$/).click(); await settle();
+    const untouchedToast = lastToastC();
+    closeOverlays();
+    PH.openSectionEditor(db.getPatient(olderD.id), 'demographics', {});
+    const edO = $all('.section-editor').pop();
+    setInput($all('label.field', edO).find((l) => /^Phone/.test(l.textContent)).querySelector('input'), '5035550321');
+    btnIn(edO, /^Save$/).click(); await settle();
+    const olderAfter = db.getPatient(olderD.id);
+    const olderEdits = db.patientAudit(olderD.id).filter((a) => a.action === 'patient_edit');
+    log(/No changes to save/.test(untouchedToast) && olderAfter.phone === '5035550321' && olderEdits.length === 1 && olderEdits[0].detail === 'demographics: phone'
+      && JSON.stringify(olderAfter.demographics) === JSON.stringify(olderPt.demographics),
+      'details: saving an untouched older record writes nothing; a phone fix is audited, and saved, as the phone alone');
+    closeOverlays();
 
     /* ---- Arrivals ---- */
     closeOverlays();
@@ -4926,12 +5135,37 @@ async function main() {
     log(/Amending a signed-off record — unlocked by Administrator/.test(provAm.textContent) && /Second correction/.test(provAm.textContent)
       && !!btnIn(provAm, /Re-sign & lock/) && !!btnIn(provAm, /Save amendment/) && !btnIn(provAm, /Mark visit complete/),
       'Dental Triage: an unlocked record being amended says so, and offers the amendment and the re-lock, not "finish the visit"');
+    btnIn(provAm, /Re-sign & lock/).click(); await settle();
+    log(/^Sign again/.test(lastToastC()) && !db.getPatient(lkP.id).treatment.locked && !$all('.modal-overlay').some((o) => /Lock this record/.test(o.textContent)),
+      'Dental Triage: "Re-sign & lock" on an amended record wants a new signature — the one on file, given before the correction, does not lock it');
+    closeOverlays();
+    const rsP = mkC('Rene', 'Resign', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), rsP.id, { provider_name: 'Dr R', provider_signature: 'data:,before' }, 'lock');
+    db.unlockRecord(signInAdmin(), rsP.id, 'Add a note');
+    const provRs = await viewC('provider.js', 'renderProvider', { id: rsP.id });
+    drawSig(provRs);
+    btnIn(provRs, /Re-sign & lock/).click(); await settle();
+    const confirmRs = $all('.modal-overlay').pop();
+    if (confirmRs) btnIn(confirmRs, /^Sign off & lock$/).click();
+    await settle(20);
+    const rs = db.getPatient(rsP.id);
+    log(rs.treatment.locked && rs.treatment.provider_signature === 'data:image/png;base64,SIG' && rs.lock.history.slice(-1)[0].action === 'relock',
+      'Dental Triage: signed again, it re-signs and locks — with the new signature');
+    closeOverlays();
     await as('hygienist');
     const hygP = mkC('Hana', 'Hygiene', { route: 'hygienist' });
     const hyg = await viewC('hygienist.js', 'renderHygienist', { id: hygP.id });
     const hygPanel = hyg.querySelector('details.collapse');
     log(!!hygPanel && hygPanel.classList.contains('patient-info') && hygPanel.hasAttribute('open') && !!cardOf(hygPanel, 'medical_history').querySelector('.card-edit'),
       'Hygienist: the patient panel is still the first, open panel, and the hygienist may correct the history from it');
+    const hyAm = mkC('Hugo', 'Hygamend', { route: 'hygienist' });
+    db.saveTreatment(signInAdmin(), hyAm.id, { provider_name: 'Hy Gienist', provider_signature: 'data:,before', cleaning: { prophy: true } }, 'lock');
+    db.unlockRecord(signInAdmin(), hyAm.id, 'Add a note');
+    const hygAm = await viewC('hygienist.js', 'renderHygienist', { id: hyAm.id });
+    btnIn(hygAm, /Re-sign & lock/).click(); await settle();
+    log(/^Sign again/.test(lastToastC()) && !db.getPatient(hyAm.id).treatment.locked,
+      'Hygienist: the same — a re-sign after an amendment needs a new signature');
+    closeOverlays();
     await as('checkout');
     const coLk = await viewC('checkout.js', 'renderCheckout', { id: outL.id });
     const coPanel = coLk.querySelector('details.patient-info');

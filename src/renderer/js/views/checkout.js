@@ -21,7 +21,15 @@ export function renderCheckout(ctx, params = {}) {
   async function usbBar() {
     return el('div', { class: 'inline-row' }, [
       el('button', { class: 'btn btn--ghost btn--sm', onClick: async () => {
-        try { const r = await api.usbUploadCheckout(); if (r.uploaded != null) toast(`Uploaded ${r.uploaded} patient file(s) from USB`, 'success'); queue(); } catch (e) { toast(e.message, 'error'); }
+        try {
+          const r = await api.usbUploadCheckout();
+          // A file older than the record here (signed off or unlocked since)
+          // is left out, and said so — not counted among the uploads.
+          if (r.uploaded != null) {
+            toast(`Uploaded ${r.uploaded} patient file(s) from USB${r.skipped ? ` · ${r.skipped} skipped — the record here was signed off or unlocked after the file was written` : ''}`, r.skipped ? 'info' : 'success');
+          }
+          queue();
+        } catch (e) { toast(e.message, 'error'); }
       } }, [icon('usb', { size: 15 }), 'Upload USB to database']),
       el('button', { class: 'btn btn--ghost btn--sm', onClick: async () => {
         const ok = await modal({ title: 'Clear USB drive?', body: 'This deletes the Mission Minded patient folder(s) on the chosen drive so it can be reused.', confirmText: 'Clear drive', cancelText: 'Cancel', danger: true });

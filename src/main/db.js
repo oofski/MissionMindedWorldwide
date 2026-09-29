@@ -1353,7 +1353,8 @@ function updatePatient(actor, id, data) {
      the keys sent change; a key sent as null is removed. Everything else — an
      older record's answers, a newer build's fields, the online form's
      preregistered stamp — is kept. (updatePatient, which replaces a whole
-     blob, stays for the USB import and nothing else.)
+     blob, has no IPC channel any more: only the USB import, in the main
+     process, calls it.)
    - Checked by the same rules as check-in: a history is not saved half
      answered, and a required answer is not saved blank.
    - Lock-aware: once a record is signed off and locked, only an administrator
@@ -1363,8 +1364,9 @@ function updatePatient(actor, id, data) {
    - Audited by the section and the NAMES of what changed — never the values,
      which are health information and would sit in a log nobody purges.
 
-   Which role may edit which section is here, beside the rule it serves;
-   ipc.js enforces it for every call and the stations offer Edit from it. */
+   Which role may edit which section is here, beside the rule it serves, and
+   is enforced here for every caller (ipc.js checks it too, before the call);
+   the stations offer Edit from the renderer's copy, pinned to this one. */
 const SECTION_ROLES = {
   demographics: ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
   medical_history: ['admin', 'emt', 'triage', 'doctor', 'hygienist'],
@@ -1440,6 +1442,7 @@ function ensureTriageRow(patientId) {
  */
 function updatePatientSection(actor, id, section, values, { reviewedOnly = false } = {}) {
   if (!SECTION_ROLES[section]) throw new Error('Unknown section.');
+  if (!actor || !SECTION_ROLES[section].includes(actor.role)) throw new Error('Your role does not have permission for this action.');
   const row = db.prepare('SELECT * FROM patients WHERE id = ?').get(id);
   if (!row) throw new Error('Patient not found.');
   const isAdmin = !!(actor && actor.role === 'admin');
@@ -1738,11 +1741,36 @@ function lockHistoryOf(t) {
   return Array.isArray(h) ? h.filter((e) => e && typeof e === 'object') : [];
 }
 
+// Whether a record is being AMENDED: an administrator unlocked it after its
+// visit was finished, and the visit has not been finished again since. The
+// unlock has to come after the completion it amends. An admin move (Re-open,
+// Back to vitals, Back to check-in) also unlocks, but it restarts the visit,
+// and once that visit is completed again — the ordinary way, unlocked — the
+// unlock is history, not an amendment in progress. Reading only "unlocked and
+// finished" left every record that was ever re-opened amending for good. A
+// finished record with no completion stamp (an old import) that was unlocked
+// is read as amending, since nothing says it was finished again. The one test
+// the chart (lockInfo), the lists (listPatients) and the save use.
+function isAmending(t, status) {
+  if (!t || t.locked || !t.unlocked_at) return false;
+  if (status !== 'completed' && status !== 'dismissed') return false;
+  return !(Date.parse(t.completed_at || '') >= Date.parse(t.unlocked_at));
+}
+// A time for a lock event that must sort AFTER the earlier stamps on the same
+// record — an unlock after the sign-off it amends, a completion after the
+// unlock it closes — even when they land in the same millisecond, or come from
+// two laptops whose clocks disagree. Normally just now().
+function isoAfter(...priors) {
+  const at = now();
+  const p = Math.max(...priors.map((x) => Date.parse(x || '')).filter(Number.isFinite));
+  return Number.isFinite(p) && Date.parse(at) <= p ? new Date(p + 1).toISOString() : at;
+}
+
 // Everything a screen or a printout says about a record's lock, in one shape:
 //   locked, locked_at, locked_by_name   — who signed it off and locked it
 //   unlocked_at, unlocked_by_name, unlock_reason — the last admin unlock
 //   amending — unlocked by an administrator after the visit was finished, so
-//              the clinicians are correcting a signed-off record
+//              the clinicians are correcting a signed-off record (isAmending)
 //   history  — [{action:'lock'|'relock'|'unlock', at, by, reason?}]
 // A record locked before v0.0.15 has no lock stamp; the completion stamp is the
 // sign-off that locked it, so that is what it reads — derived here, never
@@ -1757,7 +1785,7 @@ function lockInfo(t, completedByName, status) {
     unlocked_at: t.unlocked_at || null,
     unlocked_by_name: t.unlocked_by_name || null,
     unlock_reason: t.unlock_reason || null,
-    amending: !locked && !!t.unlocked_at && (status === 'completed' || status === 'dismissed'),
+    amending: isAmending(t, status),
     history: lockHistoryOf(t),
   };
 }
@@ -2073,7 +2101,39 @@ function patientAudit(id) {
   ).all(id);
 }
 
+// Whether the record here was unlocked after everything the patient's file
+// knows of its sign-off — completion, lock, unlock — so the file was written
+// before that unlock and is the older copy.
+function unlockedSinceFile(here, portable) {
+  if (!here || !here.unlocked_at) return false;
+  const ft = portable.treatment || {};
+  const lk = portable.lock || {};
+  const u = Date.parse(here.unlocked_at);
+  const seen = [ft.unlocked_at, lk.unlocked_at, ft.locked_at, lk.locked_at, ft.completed_at]
+    .map((x) => Date.parse(x || '')).filter(Number.isFinite);
+  return Number.isFinite(u) && !seen.some((x) => x >= u);
+}
+// Two lock trails as one: every entry either trail holds, once, in time order.
+// The trail says who unlocked a signed-off record and why, so an import must
+// never drop an entry this laptop holds by replacing the trail with the file's.
+function mergeLockTrails(here, file) {
+  const out = [];
+  const seen = new Set();
+  for (const e of [...here, ...file]) {
+    if (!e || typeof e !== 'object') continue;
+    const key = [e.action, e.at, e.by || ''].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+  }
+  const at = (e) => { const x = Date.parse(e.at || ''); return Number.isFinite(x) ? x : Infinity; };
+  return out.map((e, i) => [e, i]).sort((a, b) => (at(a[0]) - at(b[0])) || (a[1] - b[1])).map(([e]) => e);
+}
+
 // USB import: upsert a portable patient record (match by id, else name+dob+event).
+// Returns the patient; `import_skipped` says why nothing was taken from the
+// file when the record here is newer than it (see below), so the USB upload
+// can say how many files it skipped rather than counting them as uploaded.
 function importPatientFromPortable(actor, portable) {
   if (!portable || !portable.first_name) throw new Error('Invalid patient file.');
   const evId = Number(getSetting('active_event_id'));
@@ -2083,16 +2143,27 @@ function importPatientFromPortable(actor, portable) {
       .get(portable.first_name, portable.last_name, portable.dob, portable.dob);
   }
   let pid;
+  let trailHere = [];
   if (existing) {
     pid = existing.id;
     // The record here has been signed off and locked since the patient's file
     // was written, so the file is the older copy. Replaying it used to rewrite
     // the history and the triage row and then fail at the treatment step,
     // leaving half an import behind with no message. Nothing is taken from it.
-    if (isRecordLocked(pid)) {
-      audit(actor, 'usb_import', 'patient', pid, 'skipped: the record here is signed off and locked');
-      return getPatient(pid);
+    // The same holds for a record an administrator unlocked here after the
+    // file was written — one being amended, or one the file would lock again
+    // with what it held at sign-off: replaying the file silently reverted the
+    // amendment and re-locked the record.
+    const here = db.prepare('SELECT locked, unlocked_at, completed_at, lock_history FROM treatments WHERE patient_id = ?').get(pid);
+    const fileTx = portable.treatment || {};
+    const skip = isRecordLocked(pid) ? 'the record here is signed off and locked'
+      : ((isAmending(here, existing.status) || fileTx.locked) && unlockedSinceFile(here, portable))
+        ? 'the record here was unlocked after this file was written' : null;
+    if (skip) {
+      audit(actor, 'usb_import', 'patient', pid, 'skipped: ' + skip);
+      return { ...getPatient(pid), import_skipped: skip };
     }
+    trailHere = lockHistoryOf(here);
     updatePatient(actor, pid, {
       language: portable.language, first_name: portable.first_name, last_name: portable.last_name,
       dob: portable.dob, gender: portable.gender, phone: portable.phone, email: portable.email,
@@ -2122,11 +2193,13 @@ function importPatientFromPortable(actor, portable) {
       const lockedAt = t.locked_at || lk.locked_at || t.completed_at || null;
       const lockedBy = t.locked_by_name || lk.locked_by_name || portable.completed_by_name || null;
       // The file's own trail; an older file without one gets the single lock it
-      // does evidence, rather than one naming whoever ran the import.
+      // does evidence, rather than one naming whoever ran the import. Merged
+      // with the trail this laptop held before the import (not the entry the
+      // import's own save just added), so an unlock recorded here survives.
       const hist = Array.isArray(t.lock_history) && t.lock_history.length
         ? t.lock_history : [{ action: 'lock', at: lockedAt, by: lockedBy }];
       db.prepare('UPDATE treatments SET locked_at = COALESCE(?, locked_at), locked_by_name = COALESCE(?, locked_by_name), lock_history = ? WHERE patient_id = ?')
-        .run(lockedAt, lockedBy, JSON.stringify(hist), pid);
+        .run(lockedAt, lockedBy, JSON.stringify(mergeLockTrails(trailHere, hist)), pid);
     }
   } else if (portable.status === 'treatment_waiting') {
     // Parked for a chair with nothing charted yet — an admin can move a patient
@@ -2183,7 +2256,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
-    const tx = db.prepare('SELECT locked, unlocked_at FROM treatments WHERE patient_id = ?').get(p.id);
+    const tx = db.prepare('SELECT locked, unlocked_at, completed_at FROM treatments WHERE patient_id = ?').get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -2228,7 +2301,7 @@ function listPatients({ eventId, search } = {}) {
       // opening every chart. `amending`: unlocked by an administrator after the
       // visit was finished — the same test the chart and the save use.
       locked: !!(tx && tx.locked),
-      amending: !!(tx && !tx.locked && tx.unlocked_at && (pt.status === 'completed' || pt.status === 'dismissed')),
+      amending: isAmending(tx, pt.status),
     };
   });
 }
@@ -2683,14 +2756,27 @@ function saveTreatment(actor, patientId, data, finalize) {
   // not pull a checked-out patient back into the clinic, drop a completed one
   // out of the check-out queue, or erase who completed the visit and when.
   // (An admin "Re-open" is the move that does restart treatment; it leaves the
-  // patient in treatment, so it is not amending and saves as it always has.)
+  // patient in treatment, so it is not amending and saves as it always has —
+  // and once that visit is completed again it is not amending afterwards.)
   const curStatus = (db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId) || {}).status;
-  const amending = !!(existing && !existing.locked && existing.unlocked_at && (curStatus === 'completed' || curStatus === 'dismissed'));
-  const keepCompletion = amending && !complete && !waiting;
+  const amending = isAmending(existing, curStatus);
+  // The completion an amendment keeps: who completed the visit and when, on a
+  // correction saved AND on the re-sign that locks it again. Re-signing used to
+  // stamp the completion as now, by the re-signer — which moved the visit's
+  // procedures out of the clinic day into the day of the amendment in the
+  // report, and put "Completed" after "Checked out". The re-lock is recorded
+  // where it belongs: locked_at / locked_by_name and a 'relock' in the trail.
+  // (A finished record with no completion stamp to keep is stamped now.)
+  const keepCompletion = amending && !waiting && !(complete && !existing.completed_at);
+  const freshCompletion = complete && !keepCompletion;
   // Who completed the visit is written by name with the id, as every other
   // *_by_name is: left alone, a name that arrived by sync from another laptop
   // kept naming that person after someone here completed (or re-opened) it.
-  const completedByName = complete ? ((actor && actor.full_name) || null) : (keepCompletion ? existing.completed_by_name : null);
+  // A fresh completion is stamped after any earlier unlock of the record, so
+  // the amending test above reads it as finished again, whatever the clocks.
+  const completedBy = freshCompletion ? (actor ? actor.id : null) : (keepCompletion ? existing.completed_by : null);
+  const completedAt = freshCompletion ? isoAfter(existing && existing.unlocked_at) : (keepCompletion ? existing.completed_at : null);
+  const completedByName = freshCompletion ? ((actor && actor.full_name) || null) : (keepCompletion ? existing.completed_by_name : null);
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
@@ -2711,8 +2797,8 @@ function saveTreatment(actor, patientId, data, finalize) {
       d.provider_name || null,
       d.provider_signature || null,
       lock ? 1 : 0,
-      complete ? (actor ? actor.id : null) : (keepCompletion ? existing.completed_by : null),
-      complete ? now() : (keepCompletion ? existing.completed_at : null),
+      completedBy,
+      completedAt,
       completedByName,
       patientId
     );
@@ -2728,7 +2814,7 @@ function saveTreatment(actor, patientId, data, finalize) {
       restorative, services, referralOut,
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
-      complete ? (actor ? actor.id : null) : null, complete ? now() : null, completedByName
+      completedBy, completedAt, completedByName
     );
   }
   if (lock) stampLock(actor, patientId, 'lock');
@@ -2794,9 +2880,11 @@ function stampLock(actor, patientId, action) {
 // was a lock to lift. Status is never touched here — where the patient goes is
 // the caller's business.
 function liftLock(actor, patientId, reason) {
-  const t = db.prepare('SELECT locked FROM treatments WHERE patient_id = ?').get(patientId);
+  const t = db.prepare('SELECT locked, completed_at, locked_at FROM treatments WHERE patient_id = ?').get(patientId);
   if (!t || !t.locked) return false;
-  const at = now();
+  // After the sign-off it unlocks (isAmending compares it with the completion;
+  // the USB import, with the lock a patient's file carries).
+  const at = isoAfter(t.completed_at, t.locked_at);
   const by = (actor && actor.full_name) || null;
   const why = String(reason || '').trim().slice(0, LOCK_REASON_MAX);
   db.prepare('UPDATE treatments SET locked = 0, unlocked_at = ?, unlocked_by_name = ?, unlock_reason = ? WHERE patient_id = ?')
@@ -3026,7 +3114,20 @@ function exportClinicBundle(eventId) {
   const evId = eventId || Number(getSetting('active_event_id'));
   const event = db.prepare('SELECT * FROM events WHERE id = ?').get(evId);
   if (!event) throw new Error('No clinic event to export.');
-  const patients = db.prepare('SELECT * FROM patients WHERE event_id = ?').all(evId);
+  // Who did each step, by name, the way sync sends it (NAME_SOURCE). A row
+  // written on this laptop holds only the local user id until something fills
+  // its *_by_name — who completed a visit was not written by name at all before
+  // v0.0.15 — and an id means nothing in the spreadsheet, or on the laptop a
+  // backup is restored to. So the spreadsheet's "Locked by" was blank for a
+  // record the screens and the PDF (which resolve the id) said who locked.
+  const named = (rows) => rows.map((r) => {
+    const out = { ...r };
+    for (const [col, idCol] of Object.entries(NAME_SOURCE)) {
+      if (Object.prototype.hasOwnProperty.call(out, col) && out[col] == null && out[idCol]) out[col] = nameOfId(out[idCol]);
+    }
+    return out;
+  });
+  const patients = named(db.prepare('SELECT * FROM patients WHERE event_id = ?').all(evId));
   const ids = patients.map((p) => p.id);
   const kids = (table) => (ids.length
     ? db.prepare(`SELECT * FROM ${table} WHERE patient_id IN (${ids.map(() => '?').join(',')})`).all(...ids)
@@ -3037,8 +3138,8 @@ function exportClinicBundle(eventId) {
     exported_at: now(),
     event,
     patients,
-    triage: kids('triage'),
-    treatments: kids('treatments'),
+    triage: named(kids('triage')),
+    treatments: named(kids('treatments')),
     consents: kids('consents'),
     xrays: kids('xrays'),
     exit_surveys: kids('exit_surveys'),
