@@ -150,9 +150,13 @@ export function renderHygienist(ctx, params = {}) {
 
     // v1.2.1: mode is false (save), 'complete' (mark the cleaning done and send
     // the patient onward — stays editable), or 'lock' (optional read-only finalize).
-    // A plain save goes to the data layer as 'cleaning': this station saying
-    // what it is doing, so a patient waiting for a treatment chair keeps their
-    // place whoever is signed in here (an administrator can work this screen).
+    // Every save goes to the data layer as this station's own mode ('cleaning',
+    // 'cleaning_complete', 'cleaning_lock'): the station saying what it is
+    // doing, so a patient waiting for a treatment chair keeps their place
+    // whoever is signed in here (an administrator can work this screen). For
+    // them a finished cleaning is not a finished visit — the dentist's
+    // treatment is still to come — so "complete" saves the cleaning and leaves
+    // them in the queue for their chair, and the sign-off waits for the dentist.
     async function save(mode) {
       const payload = buildPayload();
       // Same rule as the dentist: a cleaning record has to name the hygienist
@@ -168,8 +172,10 @@ export function renderHygienist(ctx, params = {}) {
         if (!ok) return;
       }
       try {
-        await api.saveTreatment(id, payload, mode || 'cleaning');
-        toast(mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out' : 'Cleaning saved', 'success');
+        const saved = await api.saveTreatment(id, payload, { complete: 'cleaning_complete', lock: 'cleaning_lock' }[mode] || 'cleaning');
+        const stillWaiting = mode === 'complete' && !!saved && saved.status === 'treatment_waiting';
+        toast(stillWaiting ? 'Cleaning saved — the patient is still waiting for a treatment chair at Dental Triage, where the visit is completed'
+          : mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out' : 'Cleaning saved', 'success');
         if (mode) queue(); else detail(id);
       } catch (e) { toast(e.message, 'error'); }
     }

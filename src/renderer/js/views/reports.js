@@ -115,10 +115,18 @@ function surveyCard(sv) {
       `${reg.completed} completed · ${reg.declined} declined`,
       el('span', { class: 'muted small' }, [' — may include blank forms: those builds marked every registration completed, even with nothing answered.']),
     ]) : null,
+    // "completed", not "answered": questions are skippable, and a split-era
+    // patient who answered the household half at registration and declined at
+    // check-out is counted as a decline here while those answers still count
+    // below — so a question can have more respondents than this figure, and
+    // the line says so whenever split-era records are in the figures.
     el('p', { class: 'awareness' }, [
       el('strong', {}, ['At check-out: ']),
-      `${ex.completed} answered · ${ex.declined} declined · ${ex.not_asked} not asked`,
+      `${ex.completed} completed · ${ex.declined} declined · ${ex.not_asked} not asked`,
       ' — percentages below are of those who answered each question.',
+      showRegistrationLine(reg)
+        ? el('span', { class: 'muted small' }, [' They can include household answers given at registration before v0.0.15 by patients who then declined at check-out, so a question can have more respondents than completed the survey here.'])
+        : null,
     ]),
     ...SECTIONS.map((sec) => el('details', { class: 'collapse', style: 'margin-top:10px' }, [
       el('summary', {}, [el('span', {}, [sec.en]), el('span', { class: 'subtle small' }, ['Show'])]),

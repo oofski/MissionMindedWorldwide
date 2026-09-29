@@ -517,23 +517,52 @@ function fill(line, values) {
 // extraction or filling row, and "Move Patient to Treatment Waiting" saves it.
 const NOT_YET_TREATED = ['checked_in', 'triaged', 'treatment_waiting'];
 
+// The same stages as the triage row records them. The row is Dental Triage's
+// track of the visit, and it is the only one that survives check-out: checking
+// a patient out — at the desk or by an administrator — changes the patient's
+// status and never this. A treatment save moves it to 'in_treatment' (and
+// completing to 'completed'); until then it reads 'waiting' (not yet signed off
+// by Vitals, or sent back to Vitals or the front desk by an administrator, which
+// resets it), 'ready' (waiting for Dental Triage, or sent back to it to be
+// examined again) or 'treatment_waiting' (parked for a chair). 'triaged' is a
+// patient status and never written here; it is listed so a row that somehow
+// carries it is not read as treated.
+const TRIAGE_NOT_YET_TREATED = ['waiting', 'ready', 'triaged', 'treatment_waiting'];
+
 /**
  * Where the visit stands, as far as after-care is concerned — the status is
  * part of the rule, because the treatment row alone cannot tell planned care
  * from care done:
  *   'treated'      the visit was marked complete (now or before an admin moved
  *                  the patient on), or the patient was checked out after being
- *                  taken into treatment: the row is what was done
- *   'in_progress'  at a chair now (in_treatment): the row is being written as
- *                  the work is done, and is what has been charted so far
- *   'not_treated'  not yet at a chair (NOT_YET_TREATED), or checked out while
- *                  still in Treatment Waiting — the patient left before the
- *                  chair, and nothing on the row was done
+ *                  taken into treatment (the triage row still says so): the row
+ *                  is what was done
+ *   'in_progress'  in treatment now (in_treatment): the row is being written
+ *                  as the work is done, and is what has been charted so far
+ *   'not_treated'  not yet at a chair (NOT_YET_TREATED), or checked out from
+ *                  anywhere before one (TRIAGE_NOT_YET_TREATED on the triage
+ *                  row) — the patient left with the row a plan, and nothing on
+ *                  it was done
  *   'none'         no treatment row at all
+ * Check-out is not proof of treatment: the desk can check out anyone past
+ * Vitals, and an administrator anyone at all.
+ *
  * A status this build does not know (a newer station's) is read as in
- * progress. One limit, on the safe side: a cleaning the hygienist saved for a
- * patient still waiting for a chair is not printed until they are treated —
- * the row cannot tell it from a cleaning Dental Triage only charted.
+ * progress, and one on the triage row of a checked-out patient as treated, so
+ * care that was done is never withheld for want of a word. A progress save at
+ * Dental Triage is in treatment too: a triage dentist can treat there, and the
+ * row cannot tell a chart from work done at the same station.
+ *
+ * Limits, all on the safe side (the general advice still prints, and the
+ * check-out desk is told why): a cleaning the hygienist saved for a patient
+ * still waiting for a chair is not printed until they are treated — the row
+ * cannot tell it from a cleaning Dental Triage only charted; and a patient
+ * taken into treatment, then sent back by an administrator and checked out
+ * from there without the visit being completed, reads as not treated, because
+ * the move resets the triage row and nothing else records that work began.
+ * (The hygienist's "Mark cleaning complete" for a patient waiting for a chair
+ * keeps them waiting — db.saveTreatment 'cleaning_complete' — so a completed
+ * visit is never a cleaning finished around a chart nobody treated.)
  */
 function careStage(p) {
   const patient = p || {};
@@ -543,10 +572,12 @@ function careStage(p) {
   // A visit once marked complete keeps its record of what was done, even when
   // an administrator has since moved the patient back for more.
   if (st === 'completed' || text(t.completed_at)) return 'treated';
-  // Check-out never touches the triage row, so a patient checked out while
-  // parked for a chair still reads 'treatment_waiting' there; taking them into
-  // treatment moves it on to 'in_treatment'.
-  if (st === 'dismissed') return patient.triage && patient.triage.status === 'treatment_waiting' ? 'not_treated' : 'treated';
+  if (st === 'dismissed') {
+    // Where the patient had got to when they left. No triage row at all is a
+    // record from before triage existed, whose row is what was done.
+    const tr = patient.triage && typeof patient.triage === 'object' ? patient.triage : null;
+    return tr && TRIAGE_NOT_YET_TREATED.includes(text(tr.status)) ? 'not_treated' : 'treated';
+  }
   if (NOT_YET_TREATED.includes(st)) return 'not_treated';
   // In treatment — and a status this build does not know, which is read the
   // same way: the row as it stands, so care that was done is never withheld.
@@ -563,9 +594,10 @@ function careStage(p) {
  * back to English (fellBack) — and the page says so.
  *
  * `stage` is careStage(p). Before treatment ('not_treated') the procedure
- * sections are left out whatever the row holds, so a patient who leaves while
- * waiting for a chair is never sent home with instructions for surgery that
- * did not happen; only the general advice prints.
+ * sections are left out whatever the row holds, so a patient who leaves before
+ * a chair — waiting for one, or sent back to be seen again — is never sent home
+ * with instructions for surgery that did not happen; only the general advice
+ * prints.
  *
  * appendToRecord is the rule for the visit summary and full record: once the
  * visit is treated, or mid-treatment when something is already recorded —
@@ -613,6 +645,6 @@ function aftercareSections(p, lang) {
 
 module.exports = {
   AFTERCARE_VERSION, CONTACT, LONG_ACTING_ANESTHETICS, LANGS, TEMPLATES, PAGE_TEXT, LANGUAGE_NAMES,
-  CLEANING_SECTIONS, NOT_YET_TREATED,
+  CLEANING_SECTIONS, NOT_YET_TREATED, TRIAGE_NOT_YET_TREATED,
   classify, aftercareKeys, aftercareSections, careStage,
 };

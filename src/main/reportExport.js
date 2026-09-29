@@ -189,8 +189,10 @@ function reportSections(summary, scopeLabel, labels) {
   // The exit survey, which is what a grant return is actually written from.
   // A report kept by v0.0.8–v0.0.9 has only the headline trio and the answers,
   // no per-stage blocks; its survey was the check-out survey, so the trio IS
-  // the check-out row — the Reports tab reads it the same way. Gating on the
-  // stage blocks dropped that report's survey, answers included, from the file.
+  // the check-out row. db.mergeSummaries folds it in that way, so a merged
+  // report (what the export is given) already carries it; a raw one is read
+  // the same way here. Gating on the stage blocks dropped that report's
+  // survey, answers included, from the file.
   const sv = s.survey;
   if (sv) {
     const reg = sv.registration || {};
@@ -203,9 +205,15 @@ function reportSections(summary, scopeLabel, labels) {
     // for the same reason, and its label says its first figure may count blank
     // forms: those builds marked every registration completed, answered or not.
     const regCount = (Number(reg.completed) || 0) + (Number(reg.declined) || 0);
+    // "Completed", not "Answered": questions are skippable, and the answers
+    // below include a split-era patient's household answers even when they
+    // declined at check-out — the note says so, so the two tables reconcile.
     sections.push({
       title: 'Survey responses',
-      columns: ['Asked', 'Answered', 'Declined', 'Not asked'],
+      columns: ['Asked', 'Completed', 'Declined', 'Not asked'],
+      note: regCount > 0
+        ? 'Survey answers can include household answers given at registration before v0.0.15 by patients who then declined at check-out, so a question can have more respondents than completed the survey at check-out.'
+        : null,
       rows: [
         ...(regCount > 0 ? [['At registration (before v0.0.15; may include blank forms)', reg.completed || 0, reg.declined || 0, '—']] : []),
         ['At check-out', ex.completed || 0, ex.declined || 0, ex.not_asked || 0],

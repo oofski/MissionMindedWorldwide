@@ -2302,6 +2302,35 @@ function xraysTakenValue(v) {
 /*  Treatment                                                          */
 /* ------------------------------------------------------------------ */
 
+// The hygienist's station says what it is doing, as its progress save does
+// ('cleaning'): 'cleaning_complete' for "Mark cleaning complete" and
+// 'cleaning_lock' for its sign-off. For a patient Dental Triage has parked for
+// a treatment chair, a finished cleaning is not a finished visit — the dental
+// treatment is still to come. Completing the visit there used to take the
+// patient out of the queue for their chair and send them to check-out, where
+// the chart of the extraction they never had printed as after-care for care
+// done. So the cleaning is saved and the patient keeps their place (and their
+// time in the queue); the treating dentist completes the visit. One parked and
+// then transferred to the hygienist goes back to Dental Triage's queue with it,
+// as parking them does (markTreatmentWaiting). Signing off and locking would
+// shut the dentist out of the record, so it waits for them too. For every
+// other patient the two are the plain 'complete' and 'lock'.
+function hygienistFinalize(actor, patientId, finalize) {
+  if (finalize !== 'cleaning_complete' && finalize !== 'cleaning_lock') return finalize;
+  const cur = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+  if (!(cur && cur.status === 'treatment_waiting')) return finalize === 'cleaning_lock' ? 'lock' : 'complete';
+  if (finalize === 'cleaning_lock') {
+    throw new Error('This patient is waiting for a treatment chair at Dental Triage, so the record cannot be signed off and locked from the cleaning station yet — their dental treatment is not done. Save the cleaning; the treating dentist completes the visit.');
+  }
+  const tr = db.prepare('SELECT route FROM triage WHERE patient_id = ?').get(patientId);
+  if (tr && tr.route === 'hygienist') {
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, now(), patientId);
+    audit(actor, 'route', 'patient', patientId, 'dentist');
+  }
+  return 'cleaning';
+}
+
 function saveTreatment(actor, patientId, data, finalize) {
   const existing = db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(patientId);
   if (existing && existing.locked) throw new Error('This record is locked and signed off.');
@@ -2313,8 +2342,11 @@ function saveTreatment(actor, patientId, data, finalize) {
   //                 Waiting — examined at Dental Triage, waiting for a chair
   //   'cleaning' -> v0.0.15: the hygienist's progress save — a patient waiting
   //                 for a treatment chair keeps their place (see below)
+  //   'cleaning_complete' / 'cleaning_lock' -> v0.0.15: the hygienist's
+  //                 complete and sign-off (see hygienistFinalize)
   //   'complete' -> mark the visit done (status completed) but NOT locked/editable
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
+  finalize = hygienistFinalize(actor, patientId, finalize);
   const lock = finalize === true || finalize === 'lock';
   const complete = lock || finalize === 'complete';
   const waiting = !complete && finalize === 'waiting';
@@ -2972,7 +3004,14 @@ function mergeSummaries(list) {
     if (s.survey) {
       SURVEY_NUM.forEach((k) => { out.survey[k] += Number(s.survey[k]) || 0; });
       for (const stage of ['registration', 'exit']) {
-        const src = (s.survey[stage] || {});
+        // A report kept by v0.0.8–v0.0.9 has no stage blocks: its survey was
+        // asked at check-out, so its headline trio (always the check-out
+        // figures) IS its check-out outcome. Adding nothing here left every
+        // merged report — the Reports tab and the export both read one —
+        // saying "0" at check-out above that report's own answers. Nothing was
+        // asked at registration then, so that block gets nothing.
+        const src = s.survey[stage] || (stage === 'exit'
+          ? { completed: s.survey.responses, declined: s.survey.declined, not_asked: s.survey.not_asked } : {});
         out.survey[stage] = out.survey[stage] || { completed: 0, declined: 0, not_asked: 0 };
         ['completed', 'declined', 'not_asked'].forEach((k) => { out.survey[stage][k] += Number(src[k]) || 0; });
       }

@@ -138,6 +138,13 @@ export function renderCheckout(ctx, params = {}) {
     // what is blocked is dismissing someone who was never asked.
     const surveyDone = st.key !== 'none';
     const canDismiss = p.status !== 'dismissed' && p.status !== 'checked_in' && surveyDone;
+    // One after-care lookup for the whole screen: the block lists it, and the
+    // summary button and the email say they carry it only when the summary
+    // does (a patient checked out before a chair, or with nothing recorded,
+    // gets a summary with no after-care page).
+    const acParts = aftercareParts(p);
+    const summaryLabel = document.createTextNode('Visit summary PDF');
+    acParts.result.then((ac) => { if (ac && ac.appendToRecord) summaryLabel.textContent = 'Visit summary + after-care PDF'; });
 
     clear(root);
     root.append(
@@ -184,16 +191,18 @@ export function renderCheckout(ctx, params = {}) {
                 // moved back to check-out in one piece.
                 surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, [`${SURVEY_QUESTIONS.length} questions for MMW\u2019s grant reporting. Anything the patient already answered at registration is filled in for them to check. The patient can decline inside.`]),
               ]),
-              aftercareBlock(p),
+              aftercareBlock(p, acParts),
               // Optional artefacts, grouped and de-emphasised so they read as
               // secondary to the single primary action below.
               el('div', { class: 'action-stack' }, [
                 el('span', { class: 'field-label' }, ['Before dismissing (optional)']),
-                // The summary ends with the after-care page, so saving or
-                // emailing it hands the patient their instructions too.
-                el('button', { class: 'btn btn--ghost btn--block', onClick: async () => { try { const r = await api.pdfGenerate(id, 'summary'); if (r && r.saved) toast('Saved: ' + r.path, 'success'); } catch (e) { toast(e.message, 'error'); } } }, [icon('save', { size: 16 }), 'Visit summary + after-care PDF']),
+                // The summary ends with the after-care page once there is care
+                // to describe (appendToRecord), so saving or emailing it then
+                // hands the patient their instructions too — and the button
+                // says so only then.
+                el('button', { class: 'btn btn--ghost btn--block', onClick: async () => { try { const r = await api.pdfGenerate(id, 'summary'); if (r && r.saved) toast('Saved: ' + r.path, 'success'); } catch (e) { toast(e.message, 'error'); } } }, [icon('save', { size: 16 }), summaryLabel]),
                 p.email
-                  ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => emailSummary(p) }, [icon('mail', { size: 16 }), 'Email summary to patient'])
+                  ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => emailSummary(p, acParts.result) }, [icon('mail', { size: 16 }), 'Email summary to patient'])
                   : el('div', {}, [
                       el('button', { class: 'btn btn--ghost btn--block', disabled: 'disabled' }, [icon('mail', { size: 16 }), 'Email summary to patient']),
                       el('p', { class: 'view-sub', style: 'margin-top:6px' }, ['No email on file.']),
@@ -230,7 +239,9 @@ export function renderCheckout(ctx, params = {}) {
     // for a patient whose language has no version yet it prints in English
     // anyway, and a second button doing the same would only confuse.
     const englishBtn = el('button', { class: 'btn btn--ghost btn--block', type: 'button', style: lang === 'en' ? 'display:none' : null, onClick: () => printAftercare(p, 'en') }, [icon('print', { size: 16 }), 'Print in English']);
-    api.aftercareGet(p.id, lang).then((ac) => {
+    // `result` is the after-care as looked up (null if the lookup failed), for
+    // anything else on the screen that has to say whether it carries it.
+    const result = api.aftercareGet(p.id, lang).then((ac) => {
       chips.replaceChildren(...ac.sections.map((x) => el('span', { class: 'pill pill--info', dataset: { key: x.key } }, [x.title_en])));
       note.textContent = [
         stageNote(p, ac),
@@ -238,10 +249,12 @@ export function renderCheckout(ctx, params = {}) {
         ac.status === 'draft' ? `Draft wording (${ac.version}) until MMW’s own templates replace it.` : '',
       ].filter(Boolean).join(' ');
       englishBtn.style.display = ac.lang !== 'en' ? '' : 'none';
+      return ac;
     }).catch(() => {
       chips.replaceChildren(el('span', { class: 'view-sub' }, ['Could not list the instructions here — Preview shows the sheet.']));
+      return null;
     });
-    return { lang, chips, note, printBtn, englishBtn };
+    return { lang, chips, note, printBtn, englishBtn, result };
   }
 
   // Why the list is what it is. A patient examined at Dental Triage and parked
@@ -250,7 +263,7 @@ export function renderCheckout(ctx, params = {}) {
   function stageNote(p, ac) {
     if (ac.stage === 'not_treated') {
       if (p.status === 'treatment_waiting') return 'Examined at Dental Triage and still waiting for a treatment chair — the treatment is not done yet, so only the general advice will print.';
-      if (p.status === 'dismissed') return 'Checked out while still waiting for a treatment chair — nothing charted was done, so the sheet carries only the general advice.';
+      if (p.status === 'dismissed') return 'Checked out before reaching a treatment chair — nothing charted was done, so the sheet carries only the general advice.';
       return 'Not yet at a treatment chair, so only the general advice will print.';
     }
     if (!ac.keys.length) return 'No procedure is recorded for this visit, so the sheet carries only the general advice.';
@@ -258,8 +271,7 @@ export function renderCheckout(ctx, params = {}) {
     return '';
   }
 
-  function aftercareBlock(p) {
-    const a = aftercareParts(p);
+  function aftercareBlock(p, a) {
     return el('div', { class: 'action-stack' }, [
       el('span', { class: 'field-label' }, ['After-care instructions']),
       a.chips,
@@ -323,7 +335,7 @@ export function renderCheckout(ctx, params = {}) {
   // Email the visit summary to the patient. mailto cannot auto-attach a file
   // cross-platform, so we save the summary PDF first and the user attaches it in
   // their email program — same offline flow as records.js emailRecord.
-  async function emailSummary(p) {
+  async function emailSummary(p, acResult) {
     if (!p.email) return;
     const ok = await modal({
       title: 'Email summary to patient', cancelText: 'Cancel', confirmText: 'Open email',
@@ -332,12 +344,16 @@ export function renderCheckout(ctx, params = {}) {
     if (!ok) return;
     // The message goes to the patient, so it is in their language where the
     // after-care sheet is (the same rule as the survey); the PDF carries the
-    // instructions themselves.
+    // instructions themselves — when it does. The summary has an after-care
+    // page only once there is care to describe (appendToRecord), so the
+    // message promises one only then.
+    const ac = acResult ? await acResult.catch(() => null) : null;
+    const withCare = !!(ac && ac.appendToRecord);
     const es = p.language === 'es';
     const subject = es ? 'Su resumen de la visita a Mission Minded' : 'Your Mission Minded visit summary';
     const body = es
-      ? 'Adjunto está el resumen de su visita a Mission Minded Worldwide, con sus instrucciones de cuidado.'
-      : 'Your visit summary from Mission Minded Worldwide is attached, with your after-care instructions.';
+      ? `Adjunto está el resumen de su visita a Mission Minded Worldwide${withCare ? ', con sus instrucciones de cuidado' : ''}.`
+      : `Your visit summary from Mission Minded Worldwide is attached${withCare ? ', with your after-care instructions' : ''}.`;
     try {
       const r = await api.pdfGenerate(p.id, 'summary');
       if (r && r.saved) {
