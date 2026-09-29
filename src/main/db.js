@@ -27,6 +27,7 @@ function init(userDataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  _colMeta = new Map(); // column facts belong to the database just opened
 
   migrate();
   seed();
@@ -2335,15 +2336,18 @@ function importClinicBundle(actor, bundle) {
     for (const p of b.patients) {
       const uid = p.uid || crypto.randomUUID();
       const existing = db.prepare('SELECT id FROM patients WHERE uid = ?').get(uid);
+      // A backup from an older version lacks the newer columns; those keep
+      // what this laptop has (or take the default) rather than being blanked.
+      const pcols = writableCols('patients', PCOLS, p, null);
       if (existing) {
-        db.prepare(`UPDATE patients SET ${PCOLS.map((c) => c + '=?').join(', ')}, event_id=? WHERE id=?`)
-          .run(...PCOLS.map((c) => (p[c] === undefined ? null : p[c])), eventId, existing.id);
+        db.prepare(`UPDATE patients SET ${pcols.map((c) => c + '=?, ').join('')}event_id=? WHERE id=?`)
+          .run(...pcols.map((c) => p[c]), eventId, existing.id);
         idByUid.set(uid, existing.id);
         counts.updated++;
       } else {
         const info = db.prepare(
-          `INSERT INTO patients (uid, event_id, ${PCOLS.join(', ')}) VALUES (?, ?, ${PCOLS.map(() => '?').join(', ')})`
-        ).run(uid, eventId, ...PCOLS.map((c) => (p[c] === undefined ? null : p[c])));
+          `INSERT INTO patients (uid, event_id${pcols.map((c) => ', ' + c).join('')}) VALUES (?, ?${pcols.map(() => ', ?').join('')})`
+        ).run(uid, eventId, ...pcols.map((c) => p[c]));
         idByUid.set(uid, info.lastInsertRowid);
         counts.patients++;
       }
@@ -2359,12 +2363,14 @@ function importClinicBundle(actor, bundle) {
       for (const row of (b[table] || [])) {
         const pid = childOf(row);
         if (!pid) continue;
-        const existing = db.prepare(`SELECT id FROM ${table} WHERE patient_id = ?`).get(pid);
-        const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
+        const existing = db.prepare(`SELECT * FROM ${table} WHERE patient_id = ?`).get(pid);
+        // Keys an older backup never had keep their local value / default.
+        const use = writableCols(table, cols, row, existing);
+        const vals = use.map((c) => row[c]);
         if (existing) {
-          db.prepare(`UPDATE ${table} SET ${cols.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
+          if (use.length) db.prepare(`UPDATE ${table} SET ${use.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
         } else {
-          db.prepare(`INSERT INTO ${table} (uid, patient_id, ${cols.join(', ')}) VALUES (?, ?, ${cols.map(() => '?').join(', ')})`)
+          db.prepare(`INSERT INTO ${table} (uid, patient_id${use.map((c) => ', ' + c).join('')}) VALUES (?, ?${use.map(() => ', ?').join('')})`)
             .run(row.uid || crypto.randomUUID(), pid, ...vals);
         }
       }
@@ -2375,11 +2381,12 @@ function importClinicBundle(actor, bundle) {
         if (!pid) continue;
         const uid = row.uid || crypto.randomUUID();
         const existing = db.prepare(`SELECT id FROM ${table} WHERE uid = ?`).get(uid);
-        const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
+        const use = writableCols(table, cols, row, null);
+        const vals = use.map((c) => row[c]);
         if (existing) {
-          db.prepare(`UPDATE ${table} SET ${cols.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
+          if (use.length) db.prepare(`UPDATE ${table} SET ${use.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
         } else {
-          db.prepare(`INSERT INTO ${table} (uid, patient_id, ${cols.join(', ')}) VALUES (?, ?, ${cols.map(() => '?').join(', ')})`)
+          db.prepare(`INSERT INTO ${table} (uid, patient_id${use.map((c) => ', ' + c).join('')}) VALUES (?, ?${use.map(() => ', ?').join('')})`)
             .run(uid, pid, ...vals);
           if (counterKey) counts[counterKey]++;
         }
@@ -2896,6 +2903,48 @@ const NAME_SOURCE = {
   vitals_by_name: 'vitals_by', routed_by_name: 'routed_by', completed_by_name: 'completed_by',
 };
 
+/* ---------------- An absent key is not a NULL ----------------
+   A row that reaches this laptop from a peer still on an older version, or
+   from a backup exported before a column existed, has no value at all for that
+   column. Writing NULL in its place is not "no change": it erases what this
+   laptop holds, and for a NOT NULL column it throws — which silently skipped
+   the whole row on sync (fillings and extractions included) and aborted the
+   whole restore of an old backup. So a key the incoming row does not carry is
+   left out of the write: an UPDATE keeps the local value, an INSERT takes the
+   column's default. Used by applyRemoteRows and by the clinic-bundle restore. */
+let _colMeta = new Map();
+function columnMeta(table) {
+  if (!_colMeta.has(table)) {
+    const m = new Map();
+    for (const c of db.prepare(`PRAGMA table_info(${table})`).all()) m.set(c.name, { notnull: !!c.notnull });
+    _colMeta.set(table, m);
+  }
+  return _colMeta.get(table);
+}
+// JSON blobs a peer that never received them holds as '{}' — restorative and
+// services never synced before v0.0.15, so every other laptop has an empty one.
+// Once they sync, that empty copy must not be able to overwrite the dentist's
+// real entry. The Dental Triage screen always saves all four restorative
+// entries, so a genuine save is never an empty object.
+const KEEP_NONEMPTY = { treatments: ['restorative', 'services'] };
+function isEmptyJson(v) {
+  if (v == null || v === '') return true;
+  if (typeof v === 'object') return !Object.keys(v).length;
+  try { const p = JSON.parse(v); return p == null || (typeof p === 'object' && !Object.keys(p).length); } catch { return false; }
+}
+function writableCols(table, cols, incoming, local) {
+  const meta = columnMeta(table);
+  const keep = KEEP_NONEMPTY[table] || [];
+  return cols.filter((c) => {
+    if (!incoming || !Object.prototype.hasOwnProperty.call(incoming, c) || incoming[c] === undefined) return false;
+    // NULL into a NOT NULL column can only fail; keep local / take the default.
+    if (incoming[c] === null && meta.get(c) && meta.get(c).notnull) return false;
+    if (local && keep.includes(c) && isEmptyJson(incoming[c]) && !isEmptyJson(local[c])) return false;
+    return true;
+  });
+}
+
+
 function nameOfId(uid) { if (!uid) return null; const u = db.prepare('SELECT full_name FROM users WHERE id = ?').get(uid); return u ? u.full_name : null; }
 // A globally-unique, totally-ordered revision stamp: a strictly-increasing
 // per-device ISO time, PERSISTED across restarts (so a wall-clock rewind can't
@@ -3144,7 +3193,13 @@ function applyRemoteRows(remoteRows) {
         if (dupe) { db.prepare(`UPDATE ${table} SET uid = ? WHERE id = ?`).run(env.uid, dupe.id); return applyOne(env); }
       }
     }
-    const cols = [...SYNC_COLS[entity]];
+    // Only the keys this row actually carries are written (see writableCols).
+    // rowSig above still hashes the row as sent, so when this laptop keeps a
+    // value the sender did not have, its copy differs from the hash, counts as
+    // changed, and is pushed back — which is what puts the kept value back in
+    // the cloud copy the older laptop just overwrote.
+    const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
+    const cols = writableCols(table, SYNC_COLS[entity], env.data, local);
     const vals = cols.map((c) => data[c]);
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];
