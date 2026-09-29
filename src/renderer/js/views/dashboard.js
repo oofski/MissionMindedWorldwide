@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import { store } from '../store.js';
 import { icon } from '../icons.js';
 import { STATUS_LABELS } from '../../i18n/dentalLists.js';
+import { openPatientInfo } from '../components/patientHistory.js';
 
 // The clinic pipeline as visual columns — where every patient physically is,
 // live. Computed from each patient's status + route + whether vitals are in.
@@ -193,6 +194,10 @@ export function renderDashboard(ctx) {
 
     // Route "open" to a view the current role may actually see.
     function openByStatus(p) {
+      // The front desk has no station screen to open a record in, and a toast
+      // saying where the patient is was all it used to get. It gets the
+      // patient's own information to read and correct, as at Arrivals.
+      if (store.is('registration')) { openPatientInfo(p.id); return; }
       const go = (view) => ctx.navigate(view, { id: p.id });
       const canEmt = store.can('admin', 'emt', 'triage');
       const canRecords = store.can('admin', 'doctor', 'checkout');

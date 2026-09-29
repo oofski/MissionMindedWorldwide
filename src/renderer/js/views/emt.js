@@ -2,7 +2,9 @@ import { el, clear, toast, modal } from '../dom.js';
 import { t } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
-import { patientHistoryPanel } from '../components/patientHistory.js';
+import { patientInfoPanel } from '../components/patientHistory.js';
+import { lockBanner } from '../components/recordLock.js';
+import { store } from '../store.js';
 import { bloodThinnerStatus, bloodThinnerText, bpStatus, BP_SYS_MAX, BP_DIA_MAX } from '../medFlags.js';
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
@@ -39,15 +41,6 @@ const ROUTES = {
 // The "other" provider for a one-tap transfer. 'both' has no single opposite.
 const OTHER = { dentist: 'hygienist', hygienist: 'dentist' };
 
-// v1.2.0 (C1): the short yes/no medical review the EMT runs through with the
-// patient. Keys match the emt_review object persisted on the triage row.
-const REVIEW_QS = [
-  ['pregnant', 'Pregnant?'],
-  ['recent_surgery', 'Recent surgery/hospitalization?'],
-  ['diabetic', 'Diabetic?'],
-  ['allergies_meds', 'Any medication allergies?'],
-];
-
 function routePill(route, prefix = '') {
   const r = ROUTES[route];
   if (!r) return el('span', { class: 'subtle small' }, ['—']);
@@ -60,8 +53,12 @@ function fmtWhen(w) {
   return isNaN(d.getTime()) ? String(w) : d.toLocaleString();
 }
 
-// EMT / Nurse view (F11): record vitals, run a quick yes/no review, confirm
-// blood thinners, then sign the patient off to the Dental Triage or hygienist queue.
+// EMT / Nurse view (F11): record vitals, confirm blood thinners, go through the
+// patient's medical history with them (and correct it), then sign the patient
+// off to the Dental Triage or hygienist queue. v0.0.15: the four-question "EMT
+// review" card is gone — the whole history is reviewed and edited here with
+// the check-in form itself; what those four questions recorded on older visits
+// is still shown, with the history, as the earlier EMT confirmations.
 export function renderEmt(ctx, params = {}) {
   const root = el('div', { class: 'view' });
   if (params.id) detail(params.id); else queue();
@@ -73,6 +70,7 @@ export function renderEmt(ctx, params = {}) {
     // A–Z by surname, like every other patient list. The Vitals column still
     // shows who needs seeing, so nothing is lost by not ordering by work stage.
     const live = sortedByName(patients.filter((p) => p.status !== 'dismissed'));
+    const canExport = store.can('admin', 'doctor', 'checkout');
     const rows = live.map((p) => el('tr', {
       style: 'cursor:pointer',
       onClick: () => detail(p.id),
@@ -89,12 +87,14 @@ export function renderEmt(ctx, params = {}) {
       el('td', {}, [routePill(p.route)]),
       el('td', {}, [statusPill(p.status)]),
       el('td', {}, [el('div', { style: 'display:flex;gap:var(--space-1);justify-content:flex-end;align-items:center' }, [
-        // C3: export a summary PDF straight from the list, without opening the row.
-        el('button', {
+        // C3: export a summary PDF straight from the list, without opening the
+        // row — offered only to the roles allowed to export (pdf:generate), so
+        // an EMT is never handed a button that can only answer "no permission".
+        canExport ? el('button', {
           class: 'btn btn--ghost btn--sm',
           title: 'Patient summary PDF',
           onClick: (e) => { e.stopPropagation(); exportSummary(p.id); },
-        }, [icon('records', { size: 15 })]),
+        }, [icon('records', { size: 15 })]) : null,
         el('button', {
           class: 'btn btn--primary btn--sm',
           onClick: (e) => { e.stopPropagation(); detail(p.id); },
@@ -157,10 +157,14 @@ export function renderEmt(ctx, params = {}) {
 
   async function detail(id) {
     ctx.setDetail && ctx.setDetail(true);
-    const p = await api.getPatient(id);
+    // `p` follows the record as the history is edited on this screen, so the
+    // blood-thinner prompt and banner read the medications as they now stand.
+    let p = await api.getPatient(id);
     const tr = p.triage || {};
     const m = p.medical_history || {};
-    const flag = bloodThinnerStatus(p);
+    // A signed-off, locked record is read here, not changed: the data layer
+    // refuses vitals and routing on it for everyone but an administrator.
+    const readOnly = !!(p.treatment && p.treatment.locked) && !store.is('admin');
 
     const sys = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.bpSys'), value: tr.bp_systolic != null ? tr.bp_systolic : (m.bp_systolic || '') });
     const dia = el('input', { class: 'input', type: 'number', min: '0', max: '200', placeholder: t('intake.bpDia'), value: tr.bp_diastolic != null ? tr.bp_diastolic : (m.bp_diastolic || '') });
@@ -231,12 +235,12 @@ export function renderEmt(ctx, params = {}) {
     function updateRecheckAffordance() {
       const high = bpStatus(sys.value, dia.value).high;
       recheckSection.style.display = (high || recheckRows.children.length) ? '' : 'none';
-      addRecheckBtn.style.display = (high && recheckRows.children.length < 2) ? '' : 'none';
+      addRecheckBtn.style.display = (!readOnly && high && recheckRows.children.length < 2) ? '' : 'none';
     }
     (tr.bp_rechecks || []).slice(0, 2).forEach((r) => makeRecheck(r));
 
     // Current vitals to carry through to secondary saves (avoids clobbering). The
-    // re-checks travel with every save so a review/thinner save preserves them.
+    // re-checks travel with every save so a blood-thinner save preserves them.
     function currentVitals() {
       return {
         bp_systolic: sys.value.trim(), bp_diastolic: dia.value.trim(), heart_rate: hr.value.trim(),
@@ -260,7 +264,7 @@ export function renderEmt(ctx, params = {}) {
             class: 'input',
             type: 'text',
             placeholder: 'e.g. Eliquis, Warfarin, Plavix, aspirin',
-            value: flag.confirmed === 'yes' ? (flag.names || []).join(', ') : '',
+            value: (() => { const flag = bloodThinnerStatus(p); return flag.confirmed === 'yes' ? (flag.names || []).join(', ') : ''; })(),
           });
           await modal({
             title: 'Which blood thinner(s)?',
@@ -296,38 +300,19 @@ export function renderEmt(ctx, params = {}) {
       } catch (e) { toast(e.message, 'error'); }
     }
 
-    // C1: persist the yes/no review (attaches to the record + PDF) then re-render.
-    const reviewState = { ...(tr.emt_review || {}) };
-    async function saveReview() {
-      try {
-        await api.saveVitals(id, { ...currentVitals(), emt_review: { ...reviewState } });
-        toast('Review saved', 'success');
-        detail(id);
-      } catch (e) { toast(e.message, 'error'); }
+    // The blood-thinner banner and status line follow the history: a thinner
+    // added while going through it with the patient shows here at once.
+    const thinnerSlot = el('div', {});
+    function paintThinnerBanner() {
+      const flag = bloodThinnerStatus(p);
+      thinnerSlot.replaceChildren(...(flag.onThinner
+        ? [el('div', { class: 'banner banner--alert' }, [
+            icon('alert', { size: 16 }),
+            `BLOOD THINNER${flag.names.length ? ' — ' + flag.names.join(', ') : ''} — critical before any extraction`,
+          ])]
+        : []));
     }
-
-    // Two-button Yes/No toggle bound to reviewState[key]; restyles in place.
-    function reviewToggle(key) {
-      const btn = (val, label) => el('button', {
-        class: `btn btn--sm ${reviewState[key] === val ? 'btn--primary' : 'btn--ghost'}`,
-        dataset: { val },
-        onClick: (e) => {
-          reviewState[key] = val;
-          const group = e.currentTarget.parentElement;
-          Array.from(group.children).forEach((b) => {
-            b.className = `btn btn--sm ${b.dataset.val === reviewState[key] ? 'btn--primary' : 'btn--ghost'}`;
-          });
-        },
-      }, [label]);
-      return el('div', { style: 'display:flex;gap:var(--space-1);flex:0 0 auto' }, [btn('yes', 'Yes'), btn('no', 'No')]);
-    }
-
-    const banner = flag.onThinner
-      ? el('div', { class: 'banner banner--alert' }, [
-          icon('alert', { size: 16 }),
-          `BLOOD THINNER${flag.names.length ? ' — ' + flag.names.join(', ') : ''} — critical before any extraction`,
-        ])
-      : null;
+    paintThinnerBanner();
 
     const lastRecorded = tr.vitals_at
       ? el('p', { class: 'subtle small' }, [`Last recorded by ${p.vitals_by_name || '—'} · ${new Date(tr.vitals_at).toLocaleString()}`])
@@ -335,30 +320,26 @@ export function renderEmt(ctx, params = {}) {
 
     // Canonical blood-thinner status line (shared helper) — same wording every
     // screen shows. The dedicated Yes/No modal is the single source of truth.
-    const bt = bloodThinnerText(p);
-    const bloodThinnerLine = el('p', { style: 'margin-top:var(--space-2)' }, [
-      bt.level === 'danger'
+    const bloodThinnerLine = el('p', { style: 'margin-top:var(--space-2)' });
+    function paintThinnerLine() {
+      const bt = bloodThinnerText(p);
+      bloodThinnerLine.replaceChildren(bt.level === 'danger'
         ? el('span', { class: 'pill pill--danger' }, [el('span', { class: 'pill-dot' }), bt.text])
-        : el('span', { class: 'subtle small' }, [bt.text]),
-    ]);
+        : el('span', { class: 'subtle small' }, [bt.text]));
+    }
+    paintThinnerLine();
 
-    // EMT review card (C1).
-    const reviewCard = el('div', { class: 'card', style: 'margin-top:var(--space-4)' }, [
-      el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'EMT review']),
-      el('p', { class: 'subtle small' }, ['Ask the patient and record each answer.']),
-      el('div', { style: 'display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-2)' },
-        REVIEW_QS.map(([key, label]) => el('div', {
-          style: 'display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)',
-        }, [
-          el('span', { class: 'field-label' }, [label]),
-          reviewToggle(key),
-        ]))),
-      el('button', {
-        class: 'btn btn--soft btn--block',
-        style: 'margin-top:var(--space-3)',
-        onClick: saveReview,
-      }, [icon('save', { size: 16 }), 'Save review']),
-    ]);
+    // The patient's health history, where the EMT review card used to be: the
+    // whole history as the patient gave it, reviewed with them here — "Reviewed
+    // with patient — no changes", or Edit with the check-in form itself. Open,
+    // because going through it is part of this station's job. It saves in
+    // place, so vitals typed above and not yet saved are kept.
+    const historyPanel = patientInfoPanel(p, {
+      open: true,
+      review: true,
+      onSaved: (np) => { p = np; paintThinnerBanner(); paintThinnerLine(); },
+    });
+    historyPanel.style.marginTop = 'var(--space-4)';
 
     // Whatever is typed in the vitals fields right now — routing saves this
     // first so the vitals gate sees the reading the nurse just took.
@@ -428,10 +409,19 @@ export function renderEmt(ctx, params = {}) {
       ]);
     }
 
+    // A locked record is not re-routed from here (the data layer refuses it);
+    // where the patient has been sent is still shown.
+    if (readOnly) {
+      nextStepBody = el('p', { class: 'subtle small' }, [
+        tr.route && ROUTES[tr.route] ? `Sent to ${ROUTES[tr.route].label}${p.routed_by_name ? ' by ' + p.routed_by_name : ''}. ` : '',
+        'The record is signed off and locked, so the patient is not re-routed from this station.',
+      ]);
+    }
     const nextStep = el('div', { class: 'card', style: 'margin-top:var(--space-4)' }, [
       el('div', { class: 'card-title' }, [icon('checkCircle', { size: 15 }), 'Next step']),
       nextStepBody,
     ]);
+    if (readOnly) [sys, dia, hr, glu, resp, ...recheckRows.querySelectorAll('input')].forEach((inp) => { inp.disabled = true; });
 
     clear(root);
     root.append(el('div', {}, [
@@ -446,9 +436,11 @@ export function renderEmt(ctx, params = {}) {
         statusPill(p.status),
       ]),
 
-      banner,
+      thinnerSlot,
 
-      patientHistoryPanel(p, [], { open: false }),
+      // Signed off and locked: said at the top, with who locked it; an
+      // administrator can unlock it from here.
+      lockBanner(p, { onChanged: () => detail(id) }),
 
       // The band, with a reprint: a torn or missing band otherwise strands the
       // patient at every later station, which all key off the scan.
@@ -477,10 +469,10 @@ export function renderEmt(ctx, params = {}) {
         recheckSection,
         lastRecorded,
         bloodThinnerLine,
-        el('button', { class: 'btn btn--soft btn--block', style: 'margin-top:var(--space-3)', onClick: save }, [icon('save', { size: 16 }), 'Save vitals']),
+        readOnly ? null : el('button', { class: 'btn btn--soft btn--block', style: 'margin-top:var(--space-3)', onClick: save }, [icon('save', { size: 16 }), 'Save vitals']),
       ]),
 
-      reviewCard,
+      historyPanel,
 
       nextStep,
     ]));

@@ -6,6 +6,8 @@ import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
 import { openExitSurvey, surveyStatus } from '../components/exitSurvey.js';
 import { scanBox } from '../components/wristband.js';
+import { patientInfoPanel } from '../components/patientHistory.js';
+import { lockBanner, adminLockButtons } from '../components/recordLock.js';
 
 const fmtWhen = (ts) => { if (!ts) return '—'; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
 
@@ -164,6 +166,7 @@ export function renderCheckout(ctx, params = {}) {
             tx.clinical_notes ? el('div', { class: 'box', style: 'margin-top:8px' }, [el('span', { class: 'field-label' }, ['Dental notes']), el('p', {}, [tx.clinical_notes])]) : null,
             tx.provider_signature ? el('img', { class: 'sig-locked', src: tx.provider_signature }) : null,
           ]),
+          ...recordPanels(p, id),
         ]),
         el('div', { class: 'col' }, [
           el('div', { class: 'card' }, [
@@ -242,6 +245,22 @@ export function renderCheckout(ctx, params = {}) {
         toast('Summary saved — attach it in your email program.', 'success');
       }
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // v0.0.15 — the record itself, below the visit review: its lock (who locked
+  // it; an administrator can unlock it to amend, or lock a finished visit that
+  // was never locked) and the patient's information, where check-out can
+  // correct contact details for follow-up. Check-out and the exit survey stay
+  // open on a locked record: locking is about the clinical record, not about
+  // letting the patient leave.
+  function recordPanels(p, id) {
+    const again = () => detail(id);
+    const lockCtl = p.lock && (p.lock.locked || p.lock.amending) ? null : adminLockButtons(p, { onChanged: again });
+    return [
+      lockBanner(p, { onChanged: again }),
+      lockCtl ? el('div', { class: 'inline-row', style: 'margin-bottom:var(--space-4)' }, [lockCtl]) : null,
+      patientInfoPanel(p, { title: 'Patient information & history' }),
+    ].filter(Boolean);
   }
 
   function kv(label, val) { return el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, [label]), el('span', { class: 'kv-val' }, [val || '—'])]); }

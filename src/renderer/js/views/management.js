@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
+import { adminLockButtons } from '../components/recordLock.js';
 
 // v1.4.0 — Admin management console. A live, cloud-synced overview of every
 // patient in the clinic where an administrator can override the flow: move a
@@ -73,7 +74,11 @@ export function renderManagement(ctx) {
     const rows = list.map((p) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]), p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:6px' }, ['Blood thinner']) : el('span')]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
-      el('td', {}, [statusPill(p.status)]),
+      el('td', {}, [statusPill(p.status),
+        // The record lock at a glance: a signed-off record, or one an
+        // administrator unlocked to amend and has not locked again yet.
+        p.locked ? el('span', { class: 'pill pill--neutral', style: 'margin-left:6px', title: 'Signed off and locked' }, [icon('lock', { size: 11 }), 'Locked']) : null,
+        p.amending ? el('span', { class: 'pill pill--warning', style: 'margin-left:6px', title: 'Unlocked to amend — lock it again when the correction is made' }, [icon('unlock', { size: 11 }), 'Amending']) : null]),
       el('td', {}, [el('span', { class: p.route ? 'pill pill--teal' : 'subtle small' }, [routeLabel(p.route)])]),
       el('td', {}, [actions(p, isDone)]),
     ]));
@@ -97,6 +102,10 @@ export function renderManagement(ctx) {
     const wrap = el('div', { class: 'inline-row', style: 'margin:0; gap:6px; flex-wrap:wrap; justify-content:flex-end;' });
     // Open the patient in the station that matches their stage.
     wrap.append(btn('chevron', 'Open', () => ctx.navigate(stationFor(p), { id: p.id })));
+    // Unlock a signed-off record to amend it (reason required; the patient is
+    // not moved), or lock a finished one. "Re-open" below is the workflow move.
+    const lockBtn = adminLockButtons(p, { onChanged: () => paint() });
+    if (lockBtn) wrap.append(lockBtn);
     // Backward moves first (walking a patient back up the flow), then forward.
     // "Check-in" is the full rewind: not confirmed present, not signed off, not
     // assigned onward — their recorded vitals are kept.

@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { scanBox } from '../components/wristband.js';
+import { openPatientInfo } from '../components/patientHistory.js';
 
 // The front desk's arrival check. Everyone who has checked in — at the desk or
 // online, sometimes days earlier — waits here until someone confirms they are
@@ -154,6 +155,14 @@ export function renderArrivals(ctx) {
               .filter(Boolean).join(' · ') || '—',
           ]),
           el('div', { class: 'arrival-tags' }, tags),
+          // The patient's record, to read and correct at the desk — a
+          // misspelt name or a wrong phone number is best caught while the
+          // patient is standing here. It opens over the page, so the list's
+          // own refresh every 15 seconds cannot close it or lose an edit.
+          el('button', {
+            class: 'btn btn--ghost btn--sm arrival-info', type: 'button',
+            onClick: () => openPatientInfo(p.id, { onChanged: () => load().catch(() => {}) }),
+          }, [icon('eye', { size: 14 }), 'View / edit']),
         ]),
         confirmed
           ? el('div', { class: 'arrival-done' }, [
