@@ -538,6 +538,10 @@
 .surface-pills{ display:inline-flex; gap:4px; }
 .surf-chip{ width:30px; height:30px; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--surface); cursor:pointer; font-size:var(--fs-sm); font-weight:var(--fw-semibold); color:var(--text-muted); font-family:var(--font-mono); }
 .surf-chip--on{ background:var(--accent); color:#fff; border-color:var(--accent); }
+/* A surfaces value with no pill of its own — before v0.0.15 the pills were the
+   NUMBER of surfaces (1–4). Shown as recorded, visibly not one of M F L O B. */
+.surf-chip--legacy{ display:inline-flex; align-items:center; justify-content:center; width:auto; padding:0 7px;
+  border-style:dashed; font-family:inherit; font-size:var(--fs-2xs); cursor:default; }
 .antpost{ display:inline-flex; gap:4px; }
 .filling-row{ display:grid; grid-template-columns:108px auto auto auto; gap:10px; align-items:center; padding:8px; border:var(--border-line); border-radius:var(--radius-sm); background:var(--surface); }
 .filling-row .field{ margin:0; }
@@ -790,9 +794,9 @@ a:focus-visible{ outline:none; box-shadow:var(--focus-ring); border-radius:var(-
 .journey-title{ font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:var(--tracking-eyebrow);
   color:var(--text-subtle); font-weight:var(--fw-semibold); margin-bottom:18px; }
 .steps{ list-style:none; margin:0; padding:0; display:flex; position:relative; }
-.steps::before{ content:''; position:absolute; left:10%; right:10%; top:7px; height:3px;
+.steps::before{ content:''; position:absolute; left:var(--steps-edge, 10%); right:var(--steps-edge, 10%); top:7px; height:3px;
   background:var(--surface-sunken); border-radius:2px; }
-.steps-fill{ position:absolute; left:10%; top:7px; height:3px; border-radius:2px;
+.steps-fill{ position:absolute; left:var(--steps-edge, 10%); top:7px; height:3px; border-radius:2px;
   background:linear-gradient(90deg, var(--cyan-deep), var(--cyan));
   transition:width var(--dur-slow) var(--ease-out); }
 .step{ flex:1; display:flex; flex-direction:column; align-items:center; gap:8px; position:relative; z-index:1; }

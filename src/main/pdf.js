@@ -142,12 +142,77 @@ const EXT_LABELS = {
   simple: 'Simple', impact_soft: 'Impact soft tissue', impact_bony: 'Impact part bony',
   surgical: 'Surgical', root_tip: 'Root tip',
 };
+// 'fluoride' and 'scaling' are keys an early build stored; they still print by
+// name on the records that carry them.
 const CLEAN_LABELS = {
   adult_prophy: 'Adult prophy', adult_fluoride: 'Adult fluoride', fluoride: 'Fluoride',
   gross_debridement: 'Gross debridement', quad_deep_scaling: 'Quadrant deep scaling',
+  scaling: 'Deep scaling',
   sealant: 'Sealant', ohi: 'Oral hygiene instruction',
 };
-const ANES_LABELS = { lidocaine: 'Lidocaine 2%', articaine: 'Articaine 4%', other: 'Other', supplemental: 'Supplemental' };
+// An extraction's type(s): the list of keys stored since the multi-select, or
+// the single key an early build stored as `type` — both printed by name.
+const extTypesText = (e) => (Array.isArray(e.types) ? e.types : (e.type ? [e.type] : []))
+  .map((k) => EXT_LABELS[k] || k).join(', ');
+// Dental Triage lists and the printing rules the spreadsheet shares: surfaces,
+// anaesthetic agent and site, restorative, referral, status. The agent names
+// mirror the clinic list (retired agents included) and are pinned to it by the
+// harness — the map that used to live here knew two of the five, so a
+// mepivacaine block printed as "mepivacaine".
+const DL = require('./dentalLabels');
+// The retired triage-station checklist, still on older records.
+const CHECKLIST_LABELS = { referral: 'Referral (triage checklist)' };
+
+// One filling: "#14 · MO · Post". Surfaces recorded before v0.0.15 are the
+// NUMBER of surfaces and read "#14 · 2-surface".
+function fillingChip(f) {
+  const surf = DL.formatSurfaces(f.surfaces);
+  const ap = [f.ant ? 'Ant' : '', f.post ? 'Post' : ''].filter(Boolean).join('/') || esc(f.position || '');
+  return `<span>#${esc(f.tooth)}${surf ? ' · ' + esc(surf) : ''}${ap ? ' · ' + esc(ap) : ''}${f.note ? ' — ' + esc(f.note) : ''}</span>`;
+}
+// One administration: agent by name, carpules, tooth, injection site. The site
+// is a list key since v0.0.15; older free text prints as it was typed.
+function anesChips(stored) {
+  return DL.anesRows(stored).map((a) => {
+    const site = DL.anesSiteText(a);
+    return `<span>${esc(DL.anesAgentLabel(a))}${a.carps ? ' × ' + esc(a.carps) + ' carp(s)' : ''}${a.tooth ? ' · #' + esc(a.tooth) : ''}${site ? ' · ' + esc(site) : ''}</span>`;
+  });
+}
+function cleaningChips(t) {
+  return DL.cleaningDone(t.cleaning)
+    .map((k) => `<span>${esc(CLEAN_LABELS[k] || k)}${k === 'quad_deep_scaling' && t.cleaning.quad_detail ? ' (' + esc(t.cleaning.quad_detail) + ')' : ''}</span>`)
+    .join('');
+}
+// Restorative (core build-up, re-cement, denture, bridge) and the retired
+// Services counts. Neither reached any printed record before v0.0.15, so a
+// denture or a pulpotomy done at the chair was missing from the patient's copy.
+// Printed only when something was recorded.
+function restorativeHtml(t) {
+  const rst = DL.restorativeItems(t.restorative);
+  const svc = DL.servicesItems(t.services);
+  return (rst.length ? `<div><span class="label">Restorative</span><div class="chips">${rst.map((x) => `<span>${esc(x)}</span>`).join('')}</div></div>` : '')
+    + (svc.length ? `<div><span class="label">Services</span><div class="chips">${svc.map((x) => `<span>${esc(x)}</span>`).join('')}</div></div>` : '');
+}
+// The outbound Referral (treatments.referral_out). Distinct from the
+// "Referral source" printed in the full packet, which is how the patient heard
+// about MMW and has its own map below.
+function referralOutOf(t) {
+  const r = t && t.referral_out;
+  if (!r) return null;
+  if (typeof r === 'object') return r;
+  try { return JSON.parse(r); } catch { return null; }
+}
+// Printed only when the patient is sent somewhere — the rule the report count,
+// the records list and the spreadsheet's "Referred to" all use — so the record
+// never shows a Referral the clinic's totals say was not made.
+function referralHtml(t) {
+  const r = referralOutOf(t);
+  if (!DL.hasReferralOut(r)) return '';
+  const bits = [`<b>${esc(DL.referralDestinations(r))}</b>`];
+  if (r.urgency) bits.push('Urgency: ' + esc(DL.referralUrgencyLabel(r.urgency)));
+  if (r.tooth) bits.push('Tooth #' + esc(r.tooth));
+  return `<div class="box"><span class="label">Referred to: </span>${bits.join(' · ')}${r.reason ? '<br>' + esc(r.reason) : ''}</div>`;
+}
 
 // F4: map known referral keys to English labels; pass legacy/free text through.
 // (pdf.js cannot import the renderer i18n module, so the small map is hardcoded.)
@@ -181,38 +246,31 @@ const OREGON_CONSENT =
 function progressNoteBody(p) {
   const t = p.treatment || {};
   const tr = p.triage || {};
-  const fillings = (t.fillings || []).map((f) => {
-    const surf = Array.isArray(f.surfaces) ? f.surfaces.join(',') : (f.surfaces || '');
-    const ap = [f.ant ? 'Ant' : '', f.post ? 'Post' : ''].filter(Boolean).join('/') || esc(f.position || '');
-    return `<span>#${esc(f.tooth)}${surf ? ' · surf ' + esc(surf) : ''}${ap ? ' · ' + esc(ap) : ''}${f.note ? ' — ' + esc(f.note) : ''}</span>`;
-  }).join('') || '<span class="muted">None</span>';
+  const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = Array.isArray(e.types) ? e.types.map((k) => EXT_LABELS[k] || k).join(', ') : (e.type || '');
+    const types = extTypesText(e);
     return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
   }).join('') || '<span class="muted">None</span>';
-  const anesEntries = Array.isArray(t.anesthetic)
-    ? t.anesthetic.map((a) => `<span>${esc(a.agent === 'other' ? (a.name || 'Other') : (ANES_LABELS[a.agent] || a.agent))}${a.carps ? ' × ' + esc(a.carps) + ' carp(s)' : ''}${a.tooth ? ' · #' + esc(a.tooth) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span>`)
-    : Object.entries(t.anesthetic || {}).map(([k, v]) => {
-        const label = k === 'other' && v.name ? `Other (${v.name})` : (ANES_LABELS[k] || k);
-        return `<span>${esc(label)}${v.carps ? ' × ' + esc(v.carps) + ' carp(s)' : ''}${v.tooth ? ' · #' + esc(v.tooth) : ''}${v.location ? ' · ' + esc(v.location) : ''}</span>`;
-      });
-  const anesthetic = anesEntries.join('') || '<span class="muted">None</span>';
-  const cleaning = Object.entries(t.cleaning || {})
-    .filter(([k, v]) => v && k !== 'quad_detail')
-    .map(([k]) => `<span>${esc(CLEAN_LABELS[k] || k)}${k === 'quad_deep_scaling' && t.cleaning.quad_detail ? ' (' + esc(t.cleaning.quad_detail) + ')' : ''}</span>`)
-    .join('') || '<span class="muted">None</span>';
+  const anesthetic = anesChips(t.anesthetic).join('') || '<span class="muted">None</span>';
+  const cleaning = cleaningChips(t) || '<span class="muted">None</span>';
   const checklist = Object.entries(tr.checklist || {})
     .filter(([, v]) => v)
-    .map(([k]) => `<span>${esc(k)}</span>`)
+    .map(([k]) => `<span>${esc(CHECKLIST_LABELS[k] || titleKey(k))}</span>`)
     .join('') || '<span class="muted">—</span>';
+  // X-rays TAKEN is the count the dentist typed at Dental Triage; the images
+  // uploaded are a separate figure. A visit from before that field existed
+  // counts its images, as this line always did. A station number recorded by
+  // the old "X-ray station #" field is kept, and said to be one.
+  const images = tr.xray_count != null ? tr.xray_count : (p.xrays || []).length;
+  const taken = tr.xrays_taken != null ? tr.xrays_taken : images;
 
   return `
     <h2>Patient & Visit</h2>
     <table class="grid">
       <tr>${field('Patient', `${p.first_name} ${p.last_name}`)}${field('Date of Birth', p.dob)}</tr>
       <tr>${field('Age', p.age != null ? p.age : '—')}${field('Event', p.event ? p.event.name : '—')}</tr>
-      <tr>${field('Chief Complaint', tr.complaint)}${field('Status', p.status)}</tr>
+      <tr>${field('Chief Complaint', tr.complaint)}${field('Status', DL.statusLabel(p.status))}</tr>
     </table>
 
     <h2>Clinical Assessment</h2>
@@ -222,13 +280,15 @@ function progressNoteBody(p) {
     <div class="chips">${checklist}</div>
     <div class="box"><span class="label">Teeth of concern: </span>${(tr.teeth || []).map((x) => `<b>${esc(x)}</b>`).join(', ') || '<span class="muted">—</span>'}</div>
     ${tr.notes ? `<div class="box"><span class="label">Assessment notes</span><br>${esc(tr.notes)}</div>` : ''}
-    <div class="box"><span class="label">X-rays taken: </span>${esc(tr.xray_count || 0)}${tr.xray_station ? ' · Station ' + esc(tr.xray_station) : ''}</div>
+    <div class="box"><span class="label">X-rays taken: </span>${esc(taken)} · <span class="label">Images uploaded: </span>${esc(images)}${tr.xray_station ? ' · X-ray station ' + esc(tr.xray_station) + ' (recorded earlier)' : ''}</div>
 
     <h2>Treatment Provided</h2>
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
     <div><span class="label">Anesthetic</span><div class="chips">${anesthetic}</div></div>
+    ${restorativeHtml(t)}
+    ${referralHtml(t)}
     ${t.other_procedures ? `<div class="box"><span class="label">Other procedures</span><br>${esc(t.other_procedures)}</div>` : ''}
     ${t.clinical_notes ? `<div class="box"><span class="label">Clinical notes</span><br>${esc(t.clinical_notes)}</div>` : ''}
 
@@ -478,30 +538,18 @@ function healthBlock(p) {
 function summaryBody(p) {
   const t = p.treatment || {};
 
-  const fillings = (t.fillings || []).map((f) => {
-    const surf = Array.isArray(f.surfaces) ? f.surfaces.join(',') : (f.surfaces || '');
-    const ap = [f.ant ? 'Ant' : '', f.post ? 'Post' : ''].filter(Boolean).join('/') || esc(f.position || '');
-    return `<span>#${esc(f.tooth)}${surf ? ' · surf ' + esc(surf) : ''}${ap ? ' · ' + esc(ap) : ''}${f.note ? ' — ' + esc(f.note) : ''}</span>`;
-  }).join('') || '<span class="muted">None</span>';
+  const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
 
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = Array.isArray(e.types) ? e.types.map((k) => EXT_LABELS[k] || k).join(', ') : (e.type || '');
+    const types = extTypesText(e);
     return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
   }).join('') || '<span class="muted">None</span>';
 
-  const cleaning = Object.entries(t.cleaning || {})
-    .filter(([k, v]) => v && k !== 'quad_detail')
-    .map(([k]) => `<span>${esc(CLEAN_LABELS[k] || k)}${k === 'quad_deep_scaling' && t.cleaning.quad_detail ? ' (' + esc(t.cleaning.quad_detail) + ')' : ''}</span>`)
-    .join('') || '<span class="muted">None</span>';
+  const cleaning = cleaningChips(t) || '<span class="muted">None</span>';
 
-  const anesEntries = Array.isArray(t.anesthetic)
-    ? t.anesthetic.map((a) => `<span>${esc(a.agent === 'other' ? (a.name || 'Other') : (ANES_LABELS[a.agent] || a.agent))}${a.carps ? ' × ' + esc(a.carps) + ' carp(s)' : ''}${a.tooth ? ' · #' + esc(a.tooth) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span>`)
-    : Object.entries(t.anesthetic || {}).map(([k, v]) => {
-        const label = k === 'other' && v.name ? `Other (${v.name})` : (ANES_LABELS[k] || k);
-        return `<span>${esc(label)}${v.carps ? ' × ' + esc(v.carps) + ' carp(s)' : ''}${v.tooth ? ' · #' + esc(v.tooth) : ''}${v.location ? ' · ' + esc(v.location) : ''}</span>`;
-      });
-  const anesthetic = anesEntries.join('') || '<span class="muted">None</span>';
+  const anesthetic = anesChips(t.anesthetic).join('') || '<span class="muted">None</span>';
+  const referral = referralHtml(t);
 
   const xrays = xrayGallery(p);
 
@@ -519,7 +567,10 @@ function summaryBody(p) {
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
     <div><span class="label">Anesthetic</span><div class="chips">${anesthetic}</div></div>
+    ${restorativeHtml(t)}
     ${t.other_procedures ? `<div class="box"><span class="label">Other procedures</span><br>${esc(t.other_procedures)}</div>` : ''}
+
+    ${referral ? `<h2>Referral</h2>${referral}` : ''}
 
     ${t.clinical_notes ? `<h2>Clinical / Dental Notes</h2><div class="box">${esc(t.clinical_notes)}</div>` : ''}
 

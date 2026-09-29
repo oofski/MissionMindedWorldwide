@@ -11,13 +11,14 @@ import { scanBox, wristbandLabel, printWristband } from '../components/wristband
 // Route metadata shared by the queue pills, the next-step card and the toasts.
 // 'both' is retained only so legacy records still render a sensible label — the
 // EMT no longer routes to both (check-in is either/or), so it is never offered.
+// The 'dentist' key is the Dental Triage station; the stored key never changed.
 const ROUTES = {
   dentist: {
-    label: 'Dentist',
-    choice: 'Dentist (fillings / extractions)',
+    label: 'Dental Triage',
+    choice: 'Dental Triage (fillings / extractions)',
     pill: 'pill--info',
     ic: 'tooth',
-    toast: 'Signed off — sent to the dentist queue',
+    toast: 'Signed off — sent to the Dental Triage queue',
   },
   hygienist: {
     label: 'Hygienist',
@@ -27,11 +28,11 @@ const ROUTES = {
     toast: 'Signed off — sent to the hygienist queue',
   },
   both: {
-    label: 'Dentist + Hygienist',
-    choice: 'Both — dentist + hygienist',
+    label: 'Dental Triage + Hygienist',
+    choice: 'Both — Dental Triage + hygienist',
     pill: 'pill--warning',
     ic: 'checkCircle',
-    toast: 'Sent to the dentist and hygienist queues',
+    toast: 'Sent to the Dental Triage and hygienist queues',
   },
 };
 
@@ -60,7 +61,7 @@ function fmtWhen(w) {
 }
 
 // EMT / Nurse view (F11): record vitals, run a quick yes/no review, confirm
-// blood thinners, then sign the patient off to the dentist or hygienist queue.
+// blood thinners, then sign the patient off to the Dental Triage or hygienist queue.
 export function renderEmt(ctx, params = {}) {
   const root = el('div', { class: 'view' });
   if (params.id) detail(params.id); else queue();
@@ -106,7 +107,7 @@ export function renderEmt(ctx, params = {}) {
         el('div', {}, [
           el('h1', {}, ['Vitals & Routing']),
           el('p', { class: 'view-sub' }, [
-            `Station 2 — record vitals, then sign each patient off to the dentist or hygienist · ${live.length} patient(s)`,
+            `Station 2 — record vitals, then sign each patient off to Dental Triage or the hygienist · ${live.length} patient(s)`,
           ]),
         ]),
         el('button', { class: 'btn btn--ghost btn--sm', onClick: queue }, [icon('refresh', { size: 15 }), 'Refresh']),
@@ -375,7 +376,7 @@ export function renderEmt(ctx, params = {}) {
     const vitalsGateNote = vitalsOnFile ? null : el('p', {
       class: 'subtle small',
       style: 'margin-top:var(--space-2); color:var(--warning)',
-    }, ['Record a blood pressure or pulse above first — a patient can’t go to the dentist or hygienist without vitals.']);
+    }, ['Record a blood pressure or pulse above first — a patient can’t go to Dental Triage or the hygienist without vitals.']);
 
     let nextStepBody;
     if (tr.emt_signed_off && tr.route && ROUTES[tr.route]) {
@@ -417,7 +418,7 @@ export function renderEmt(ctx, params = {}) {
       nextStepBody = el('div', {}, [
         // Nothing to derive a station from: a returning patient starting a
         // fresh visit has no visit type yet. Better to ask than to guess and
-        // silently put a cleaning in the dentist's queue.
+        // silently put a cleaning in the Dental Triage queue.
         el('p', { class: 'subtle small' }, ['Nothing recorded to route from — choose a station:']),
         vitalsGateNote,
         el('div', { style: 'display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-2)' }, [

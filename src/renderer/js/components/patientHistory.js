@@ -1,4 +1,5 @@
 import { el } from '../dom.js';
+import { statusLabel } from '../../i18n/dentalLists.js';
 import { icon } from '../icons.js';
 import { referralLabel } from '../i18n.js';
 import { medicalDisplay, dentalDisplay } from '../medicalHistory.js';
@@ -199,7 +200,8 @@ export function patientHistoryCards(p, priorVisits = []) {
           el('td', {}, [new Date(v.created_at).toLocaleDateString()]),
           el('td', {}, [v.event_name]),
           el('td', {}, [v.summary]),
-          el('td', {}, [v.status]),
+          // Labelled, never the stored code ("treatment_waiting").
+          el('td', {}, [statusLabel(v.status)]),
         ]))),
       ])])));
   }

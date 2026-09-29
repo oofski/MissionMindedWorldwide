@@ -15,12 +15,14 @@ const VISIT_LABEL = {
   filling: 'Filling',
   cleaning: 'Dental cleaning',
 };
-const STATION_LABEL = { dentist: 'Dentist', hygienist: 'Hygienist' };
+// The 'dentist' key is the Dental Triage station; the stored key never changed.
+const STATION_LABEL = { dentist: 'Dental Triage', hygienist: 'Hygienist' };
 // Why a scanned band is not on this screen. Everything past 'checked_in' has
 // already been confirmed here and moved on, so the answer is never "no such
 // patient" — it is "you are looking at the wrong screen", which is worth saying.
 const PAST_ARRIVAL = {
   triaged: 'they are already through and waiting for their station',
+  treatment_waiting: 'they are through Dental Triage and waiting for a treatment chair',
   in_treatment: 'they are already in treatment',
   completed: 'their visit is finished — they are waiting at check-out',
   dismissed: 'they have already been checked out',
@@ -117,7 +119,7 @@ export function renderArrivals(ctx) {
       // Station comes from what the patient said they need; the desk can override.
       const stationSel = el('select', { class: 'input input--sm' }, [
         el('option', { value: '' }, ['— choose —']),
-        el('option', { value: 'dentist', selected: p.route === 'dentist' }, ['Dentist']),
+        el('option', { value: 'dentist', selected: p.route === 'dentist' }, ['Dental Triage']),
         el('option', { value: 'hygienist', selected: p.route === 'hygienist' }, ['Hygienist']),
       ]);
       if (p.route) stationSel.value = p.route;

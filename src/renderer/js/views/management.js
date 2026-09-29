@@ -9,7 +9,8 @@ import { statusPill } from './dashboard.js';
 // patient to any stage, re-open a finished record, check them out, or remove a
 // bad record. Also surfaces the cloud connection so the admin can confirm the
 // whole system is talking to the shared server.
-const routeLabel = (r) => (r === 'dentist' ? 'Dentist' : r === 'hygienist' ? 'Hygienist' : r === 'both' ? 'Dentist + Hygienist' : '—');
+// The 'dentist' route key is the Dental Triage station; the stored key never changed.
+const routeLabel = (r) => (r === 'dentist' ? 'Dental Triage' : r === 'hygienist' ? 'Hygienist' : r === 'both' ? 'Dental Triage + Hygienist' : '—');
 const fmtTime = (ts) => { if (!ts) return ''; const d = new Date(ts); return isNaN(d) ? '' : d.toLocaleTimeString(); };
 
 export function renderManagement(ctx) {
@@ -110,7 +111,8 @@ export function renderManagement(ctx) {
       wrap.append(
         backToCheckin,
         btn('syringe', 'EMT', () => move('emt', 'sent back to vitals')),
-        btn('tooth', 'Dentist', () => move('dentist', 'sent to the dentist')),
+        btn('tooth', 'Dental Triage', () => move('dentist', 'sent to Dental Triage')),
+        btn('calendar', 'Treatment waiting', () => move('treatment_waiting', 'moved to Treatment Waiting')),
         btn('sparkle', 'Hygienist', () => move('hygienist', 'sent to the hygienist')),
         btn('checkCircle', 'Check out', () => move('dismiss', 'checked out'), 'btn--soft'),
       );

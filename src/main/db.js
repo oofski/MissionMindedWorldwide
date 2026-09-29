@@ -27,6 +27,7 @@ function init(userDataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  _colMeta = new Map(); // column facts belong to the database just opened
 
   migrate();
   seed();
@@ -334,6 +335,23 @@ function migrate() {
   addColumn('triage', 'vitals_by_name', 'TEXT');
   addColumn('triage', 'routed_by_name', 'TEXT');
   addColumn('treatments', 'completed_by_name', 'TEXT');
+  // v0.0.15 Dental Triage. Every one of these is NULLABLE on purpose: a row from
+  // a laptop that has not been upgraded yet carries none of them, and a NOT NULL
+  // column would turn that row into a failed write instead of "not recorded".
+  //   xrays_taken — how many x-rays the dentist TOOK, typed at the chair. Not
+  //     xray_count, which is the number of images uploaded and is recounted
+  //     from the xrays table on every upload, so a typed number stored there
+  //     would be silently overwritten.
+  //   treatment_waiting_* — when, and by whom, Dental Triage parked the patient
+  //     in the Treatment Waiting queue for a treatment chair.
+  //   referral_out — JSON {to:[keys], to_other, urgency, tooth, reason}: where
+  //     the dentist sent the patient for care this clinic cannot give. Never
+  //     "referral", which has always meant how the patient heard about MMW.
+  addColumn('triage', 'xrays_taken', 'INTEGER');
+  addColumn('triage', 'treatment_waiting_at', 'TEXT');
+  addColumn('triage', 'treatment_waiting_by', 'INTEGER');
+  addColumn('triage', 'treatment_waiting_by_name', 'TEXT');
+  addColumn('treatments', 'referral_out', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sync_patients ON patients(uid)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sync_events ON events(uid)');
   // v1.5.21 ONE-TIME HEAL. Until now the pull cursor was a timestamp high-water
@@ -376,6 +394,10 @@ function migrate() {
     }
     setSetting('cloud_severed_v1', 'done');
   }
+
+  // Last, once every column exists: a release that syncs more columns must not
+  // make every row look freshly edited (see rebaselineSyncColumns).
+  rebaselineSyncColumns();
 }
 
 
@@ -1334,7 +1356,10 @@ function patientHistory(patientId) {
     let summary = [];
     if (tx) {
       const f = safeJson(tx.fillings, []).length, x = safeJson(tx.extractions, []).length;
-      const c = Object.values(safeJson(tx.cleaning, {})).some(Boolean);
+      // The report's own rule: the teeth tapped on the chart and the quadrant
+      // note are not a cleaning. Every dentist save stores teeth: [], which is
+      // truthy, so the old test called every prior visit a cleaning.
+      const c = didCleaning(tx);
       if (f) summary.push(`${f} filling(s)`);
       if (x) summary.push(`${x} extraction(s)`);
       if (c) summary.push('cleaning');
@@ -1421,6 +1446,9 @@ function getPatient(id) {
         anesthetic: safeJson(t.anesthetic, []),
         restorative: safeJson(t.restorative, {}),
         services: safeJson(t.services, {}),
+        // null (not {}) when nothing was recorded, so "was a referral made" is
+        // a plain truthiness test for every reader.
+        referral_out: t.referral_out ? safeJson(t.referral_out, null) : null,
       }
     : null;
   p.xrays = db.prepare('SELECT id, station, note, created_at FROM xrays WHERE patient_id = ?').all(id);
@@ -1435,6 +1463,7 @@ function getPatient(id) {
   p.triaged_by_name = tr ? (tr.triaged_by_name || nameOf(tr.triaged_by)) : null;
   p.vitals_by_name = tr ? (tr.vitals_by_name || nameOf(tr.vitals_by)) : null;
   p.routed_by_name = tr ? (tr.routed_by_name || nameOf(tr.routed_by)) : null;
+  p.treatment_waiting_by_name = tr ? (tr.treatment_waiting_by_name || nameOf(tr.treatment_waiting_by)) : null;
   p.completed_by_name = t ? (t.completed_by_name || nameOf(t.completed_by)) : null;
   p.dismissed_by_name = p.dismissed_by_name || nameOf(p.dismissed_by);
   return p;
@@ -1505,19 +1534,22 @@ function hasVitalsRecorded(patientId) {
 }
 function requireVitals(patientId) {
   if (!hasVitalsRecorded(patientId)) {
-    throw new Error('Vitals have not been recorded yet. This patient must have their blood pressure or pulse taken at the vitals station before they can go to the dentist or hygienist.');
+    throw new Error('Vitals have not been recorded yet. This patient must have their blood pressure or pulse taken at the vitals station before they can go to Dental Triage or the hygienist.');
   }
 }
 function routePatient(actor, patientId, route) {
-  if (!ROUTES.includes(route)) throw new Error('Choose where the patient goes next: dentist, hygienist, or both.');
+  if (!ROUTES.includes(route)) throw new Error('Choose where the patient goes next: Dental Triage, the hygienist, or both.');
   requireVitals(patientId);
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   if (!tr) {
     db.prepare(`INSERT INTO triage (patient_id, status, route, routed_by, routed_at, emt_signed_off)
                 VALUES (?, 'ready', ?, ?, ?, 1)`).run(patientId, route, actor ? actor.id : null, now());
   } else {
+    // A patient already examined (waiting for a chair, in treatment, or done)
+    // keeps that clinical state when they are only being re-routed — a
+    // transfer to the hygienist is not a return to the start of the queue.
     db.prepare(`UPDATE triage SET route=?, routed_by=?, routed_at=?, emt_signed_off=1,
-                  status = CASE WHEN status IN ('completed','in_treatment') THEN status ELSE 'ready' END
+                  status = CASE WHEN status IN ('completed','in_treatment','treatment_waiting') THEN status ELSE 'ready' END
                 WHERE patient_id=?`).run(route, actor ? actor.id : null, now(), patientId);
   }
   // Routing IS the EMT sign-off: it moves the patient out of the vitals queue and
@@ -1563,7 +1595,7 @@ function confirmArrival(actor, patientId, opts = {}) {
   const route = ['dentist', 'hygienist'].includes(opts.route) ? opts.route : r.route;
   if (!r.general_signed) throw new Error('The general consent has not been signed yet. Have the patient sign it before sending them through.');
   if (!r.surgery_signed) throw new Error('This patient is here for an extraction, so the Oral Surgery consent must be signed too.');
-  if (!route) throw new Error('Choose which station this patient goes to: dentist or hygienist.');
+  if (!route) throw new Error('Choose which station this patient goes to: Dental Triage or the hygienist.');
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   if (!tr) {
     // Seed the complaint the same way check-in does. Without it the whole
@@ -1634,14 +1666,44 @@ function dismissPatient(actor, id) {
 // can be edited again, or check them out). Admin-only via the IPC role matrix.
 // Where an admin can move a patient, forwards or back. 'checkin' and 'emt' walk
 // the patient BACK up the flow; the rest move them on.
-const MOVE_TARGETS = ['checkin', 'emt', 'dentist', 'hygienist', 'reopen', 'dismiss'];
+// 'dentist' is the Dental Triage station (the stored route key never changed);
+// 'treatment_waiting' parks the patient in the queue for a treatment chair.
+const MOVE_TARGETS = ['checkin', 'emt', 'dentist', 'treatment_waiting', 'hygienist', 'reopen', 'dismiss'];
+// Leaving the Treatment Waiting stage by any route but treatment itself.
+const CLEAR_WAITING_SQL = 'treatment_waiting_at=NULL, treatment_waiting_by=NULL, treatment_waiting_by_name=NULL';
 function adminMovePatient(actor, id, target) {
   if (!MOVE_TARGETS.includes(target)) throw new Error('Unknown move target.');
   const p = db.prepare('SELECT * FROM patients WHERE id = ?').get(id);
   if (!p) throw new Error('Patient not found.');
   // Moving TO a treatment chair still obeys the vitals gate, so an override
   // can't quietly walk a patient past the vitals station.
+  if (target === 'dentist' && p.status === 'treatment_waiting') {
+    // Sending a waiting patient to Dental Triage means "examine them again", so
+    // they go back into the triage queue rather than keeping their place in
+    // the queue for a chair. Everyone else keeps their clinical status, as a
+    // re-route always has.
+    routePatient(actor, id, 'dentist');
+    db.prepare(`UPDATE triage SET status='ready', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
+    db.prepare("UPDATE patients SET status='triaged', updated_at=? WHERE id=?").run(now(), id);
+    audit(actor, 'admin_move', 'patient', id, target);
+    return getPatient(id);
+  }
   if (target === 'dentist' || target === 'hygienist') return routePatient(actor, id, target);
+  if (target === 'treatment_waiting') {
+    // Treatment Waiting is a Dental Triage queue. A patient the EMT never
+    // signed off there is routed first, which also enforces the vitals gate.
+    requireVitals(id);
+    const tr = db.prepare('SELECT route, emt_signed_off FROM triage WHERE patient_id = ?').get(id);
+    if (!tr || !tr.emt_signed_off || !(tr.route === 'dentist' || tr.route === 'both')) {
+      routePatient(actor, id, tr && tr.route === 'both' ? 'both' : 'dentist');
+    }
+    // From check-out back to a chair: the visit is open again, like a re-open.
+    db.prepare('UPDATE patients SET dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL WHERE id=?').run(id);
+    db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
+    markTreatmentWaiting(actor, id);
+    audit(actor, 'admin_move', 'patient', id, target);
+    return getPatient(id);
+  }
   if (target === 'checkin') {
     // All the way back to the front desk: they are no longer confirmed present,
     // no longer signed off by the EMT, and no longer assigned onward. Recorded
@@ -1650,7 +1712,7 @@ function adminMovePatient(actor, id, target) {
     db.prepare(`UPDATE patients SET status='checked_in', arrived_at=NULL, arrived_by_name=NULL,
                   dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
     db.prepare(`UPDATE triage SET route=NULL, routed_by=NULL, routed_at=NULL, emt_signed_off=0,
-                  status='waiting' WHERE patient_id=?`).run(id);
+                  status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
     db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
   } else if (target === 'emt') {
     // Back to the vitals queue: undo the EMT sign-off that sent them onward, so
@@ -1659,14 +1721,15 @@ function adminMovePatient(actor, id, target) {
     db.prepare(`UPDATE patients SET status='checked_in', dismissed_by=NULL, dismissed_by_name=NULL,
                   dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
     db.prepare(`UPDATE triage SET routed_at=NULL, emt_signed_off=0,
-                  status='waiting' WHERE patient_id=?`).run(id);
+                  status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
     db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
   } else if (target === 'reopen') {
     // Bring a completed OR dismissed patient back into treatment and unlock the
     // record so it can be edited again (clears any dismissal).
     db.prepare("UPDATE patients SET status='in_treatment', dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?").run(now(), id);
     db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
-    db.prepare("UPDATE triage SET status='in_treatment' WHERE patient_id=? AND status='completed'").run(id);
+    db.prepare("UPDATE triage SET status='in_treatment' WHERE patient_id=? AND status IN ('completed','treatment_waiting')").run(id);
+    db.prepare(`UPDATE triage SET ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
   } else if (target === 'dismiss') {
     // Admin override: check a patient out from any stage.
     db.prepare("UPDATE patients SET status='dismissed', dismissed_by=?, dismissed_at=?, updated_at=? WHERE id=?").run(actor ? actor.id : null, now(), now(), id);
@@ -1705,17 +1768,48 @@ function importPatientFromPortable(actor, portable) {
     (portable.consents || []).forEach((c) => addConsent(pid, c));
   }
   // Triage, treatment, vitals, x-rays from the portable file.
-  if (portable.triage) saveTriage(actor, pid, portable.triage);
+  if (portable.triage) saveTriage(actor, pid, portable.triage, { replay: true });
   if (portable.treatment) {
     // Preserve the treatment's completion state on import: a locked record stays
     // locked, a completed-but-unlocked record stays completed (v1.2.1 "Mark visit
     // complete"), and only a genuinely in-progress record imports as such —
     // otherwise USB checkout silently reverted completed visits to in_treatment.
     const t = portable.treatment;
-    const mode = t.locked ? 'lock' : (t.completed_at ? 'complete' : false);
+    const waiting = portable.status === 'treatment_waiting';
+    const mode = t.locked ? 'lock' : (t.completed_at ? 'complete' : (waiting ? 'waiting' : false));
     saveTreatment(actor, pid, t, mode);
+  } else if (portable.status === 'treatment_waiting') {
+    // Parked for a chair with nothing charted yet — an admin can move a patient
+    // there from Management without a treatment row. Without this they arrived
+    // as 'checked_in', back at the front of the clinic.
+    markTreatmentWaiting(actor, pid);
   }
-  (portable.xrays || []).forEach((x) => { if (x.image_png) db.prepare('INSERT INTO xrays (patient_id, station, image_png, note, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(pid, x.station || null, x.image_png, x.note || null, x.created_at || now(), now()); });
+  // The Treatment Waiting stamp says who examined the patient and parked them,
+  // and when. It is carried over whatever happened since — still waiting, taken
+  // into a chair, finished — because it is also what puts a patient in a chair
+  // in the In treatment list rather than back in Dental Triage's, and it is
+  // their stamp, not whoever ran the import. The id is local to the laptop the
+  // file came from, so only the name travels.
+  const ptr = portable.triage || {};
+  if (ptr.treatment_waiting_at) {
+    db.prepare('UPDATE triage SET treatment_waiting_at=?, treatment_waiting_by=NULL, treatment_waiting_by_name=? WHERE patient_id=?')
+      .run(ptr.treatment_waiting_at, portable.treatment_waiting_by_name || ptr.treatment_waiting_by_name || null, pid);
+  } else {
+    // No stamp in the file. A file from this version that says so (the key is
+    // there, empty) had the patient examined at Dental Triage without being
+    // parked, or sent back to it; a patient back before the examination
+    // ('triaged', or at the front desk) was never parked, whichever version
+    // wrote the file. Either way a stamp left here would later file them in
+    // the In treatment list instead of Dental Triage's. A file from an older
+    // laptop, which knows nothing of the stage, leaves a stamp this laptop
+    // holds for a patient past the examination alone.
+    const st = (db.prepare('SELECT status FROM patients WHERE id = ?').get(pid) || {}).status;
+    const saysNone = Object.prototype.hasOwnProperty.call(ptr, 'treatment_waiting_at');
+    if (st !== 'treatment_waiting' && (saysNone || st === 'triaged' || st === 'checked_in')) {
+      db.prepare(`UPDATE triage SET ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(pid);
+    }
+  }
+  (portable.xrays || []).forEach((x) => { if (x.image_png) db.prepare('INSERT INTO xrays (patient_id, station, image_png, note, tooth, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run(pid, x.station || null, x.image_png, x.note || null, x.tooth || null, x.created_at || now(), now()); });
   recountXrays(pid);
   audit(actor, 'usb_import', 'patient', pid, `${portable.first_name} ${portable.last_name}`.trim());
   return getPatient(pid);
@@ -1738,7 +1832,7 @@ function listPatients({ eventId, search } = {}) {
   sql += ' ORDER BY p.created_at DESC';
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
-    const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at FROM triage WHERE patient_id = ?').get(p.id);
+    const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -1768,6 +1862,10 @@ function listPatients({ eventId, search } = {}) {
       // Stage timestamps for the live board's "total time" + "time at stage" tags.
       vitals_at: tr ? tr.vitals_at : null,
       routed_at: tr ? tr.routed_at : null,
+      // When Dental Triage parked the patient for a treatment chair. Also what
+      // separates "in treatment at the chair" from "in progress at triage" on
+      // the queues and the board, since both are status in_treatment.
+      treatment_waiting_at: tr ? tr.treatment_waiting_at : null,
       dismissed_at: pt.dismissed_at || null,
       emt_signed_off: !!(tr && tr.emt_signed_off),
       blood_thinner: tr ? tr.blood_thinner : null,
@@ -2115,9 +2213,16 @@ function sanitizeSurveyAnswers(raw) {
   return out;
 }
 
-function saveTriage(actor, patientId, data) {
+// opts.replay: a USB import replaying another laptop's record, which states the
+// patient's stage as that laptop has it (see importPatientFromPortable). Never
+// set over IPC, which passes three arguments.
+function saveTriage(actor, patientId, data, opts = {}) {
   const existing = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
+  // Validated before anything is written, so a refused count leaves the rest
+  // of the triage row exactly as it was.
+  const hasXraysTaken = Object.prototype.hasOwnProperty.call(d, 'xrays_taken');
+  const xraysTaken = hasXraysTaken ? xraysTakenValue(d.xrays_taken) : null;
   if (existing) {
     db.prepare(
       `UPDATE triage SET complaint=?, flags=?, checklist=?, teeth=?, teeth_notes=?, notes=?,
@@ -2154,11 +2259,34 @@ function saveTriage(actor, patientId, data) {
       actor ? actor.id : null, now()
     );
   }
+  // Number of X-rays taken, typed at Dental Triage. Written only when the
+  // caller sends it, so a triage save from an older portable file (or any path
+  // that does not know the field) never blanks a count already recorded.
+  if (hasXraysTaken) db.prepare('UPDATE triage SET xrays_taken = ? WHERE patient_id = ?').run(xraysTaken, patientId);
   if (d.status === 'ready') {
-    db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('triaged', now(), patientId);
+    // Never pulls a patient back out of Treatment Waiting: only moving them on
+    // (treatment) or an admin move may do that. A USB import is the exception:
+    // a file whose patient an admin sent back to Dental Triage says so, and
+    // the guard used to leave the local copy parked for a chair while its
+    // triage row said 'ready'.
+    if (opts.replay) db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('triaged', now(), patientId);
+    else db.prepare("UPDATE patients SET status = ?, updated_at = ? WHERE id = ? AND status != 'treatment_waiting'").run('triaged', now(), patientId);
   }
   audit(actor, 'triage', 'patient', patientId, d.status || 'saved');
   return getPatient(patientId);
+}
+
+// A count a person typed: blank means "not recorded", anything else has to be a
+// whole number of films a chair could plausibly take. Refused rather than
+// quietly dropped, so a mistyped "150" is corrected instead of lost.
+function xraysTakenValue(v) {
+  if (v == null || String(v).trim() === '') return null;
+  const s = String(v).trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isInteger(n) || n < 0 || n > 99) {
+    throw new Error('Number of X-rays taken must be a whole number from 0 to 99.');
+  }
+  return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2172,14 +2300,28 @@ function saveTreatment(actor, patientId, data, finalize) {
   // v1.2.1: decouple "complete" from "lock". Patients move through the stations
   // without being forced to sign off and lock a record. finalize can be:
   //   falsy      -> save progress (status in_treatment), record stays editable
+  //   'waiting'  -> v0.0.15: save progress AND park the patient in Treatment
+  //                 Waiting — examined at Dental Triage, waiting for a chair
+  //   'cleaning' -> v0.0.15: the hygienist's progress save — a patient waiting
+  //                 for a treatment chair keeps their place (see below)
   //   'complete' -> mark the visit done (status completed) but NOT locked/editable
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
   const lock = finalize === true || finalize === 'lock';
   const complete = lock || finalize === 'complete';
+  const waiting = !complete && finalize === 'waiting';
+  // Restorative, Services and Referral are written only by the Dental Triage
+  // screen. Every other writer — the hygienist's cleaning save, a USB import of
+  // an older file — leaves them out, and a key left out must mean "leave it
+  // alone", not "wipe it": each hygienist save after the dentist used to erase
+  // the dentist's denture, crown and pulpotomy entries.
+  const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
+  const restorative = has('restorative') ? JSON.stringify(d.restorative || {}) : ((existing && existing.restorative) || '{}');
+  const services = has('services') ? JSON.stringify(d.services || {}) : ((existing && existing.services) || '{}');
+  const referralOut = has('referral_out') ? cleanReferralOut(d.referral_out) : (existing ? existing.referral_out : null);
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
-         restorative=?, services=?,
+         restorative=?, services=?, referral_out=?,
          other_procedures=?, clinical_notes=?, provider_name=?, provider_signature=?,
          locked=?, completed_by=?, completed_at=?
        WHERE patient_id=?`
@@ -2188,8 +2330,9 @@ function saveTreatment(actor, patientId, data, finalize) {
       JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}),
       JSON.stringify(d.anesthetic || []),
-      JSON.stringify(d.restorative || {}),
-      JSON.stringify(d.services || {}),
+      restorative,
+      services,
+      referralOut,
       d.other_procedures || null,
       d.clinical_notes || null,
       d.provider_name || null,
@@ -2202,13 +2345,13 @@ function saveTreatment(actor, patientId, data, finalize) {
   } else {
     db.prepare(
       `INSERT INTO treatments (patient_id, fillings, extractions, cleaning, anesthetic,
-          restorative, services,
+          restorative, services, referral_out,
           other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       patientId, JSON.stringify(d.fillings || []), JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}), JSON.stringify(d.anesthetic || []),
-      JSON.stringify(d.restorative || {}), JSON.stringify(d.services || {}),
+      restorative, services, referralOut,
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
       complete ? (actor ? actor.id : null) : null, complete ? now() : null
@@ -2217,12 +2360,83 @@ function saveTreatment(actor, patientId, data, finalize) {
   if (complete) {
     db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('completed', now(), patientId);
     db.prepare("UPDATE triage SET status = 'completed' WHERE patient_id = ?").run(patientId);
+  } else if (waiting) {
+    markTreatmentWaiting(actor, patientId);
   } else {
-    db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('in_treatment', now(), patientId);
-    db.prepare("UPDATE triage SET status = 'in_treatment' WHERE patient_id = ? AND status != 'completed'").run(patientId);
+    // A cleaning saved at the hygienist's station for a patient who is waiting
+    // for a treatment chair (a 'both' patient) has not taken them into
+    // treatment — they keep their place in Dental Triage's Treatment Waiting
+    // queue. The station says so ('cleaning'); it is not read from who is
+    // signed in, because an administrator works the hygienist's screen too, and
+    // their cleaning save used to move the patient into a chair. Any other
+    // progress save, including the treating dentist opening a waiting patient,
+    // is the move into treatment.
+    const cur = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+    const keepWaiting = !!(cur && cur.status === 'treatment_waiting' && finalize === 'cleaning');
+    if (!keepWaiting) {
+      db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('in_treatment', now(), patientId);
+      db.prepare("UPDATE triage SET status = 'in_treatment' WHERE patient_id = ? AND status != 'completed'").run(patientId);
+    }
   }
-  audit(actor, lock ? 'sign_off' : complete ? 'complete' : 'treatment', 'patient', patientId, null);
+  audit(actor, lock ? 'sign_off' : complete ? 'complete' : waiting ? 'treatment_waiting' : 'treatment', 'patient', patientId, null);
   return getPatient(patientId);
+}
+
+// Park a patient in Treatment Waiting: examined at Dental Triage, waiting for a
+// treatment chair. The stamp says who parked them and when; the board times the
+// wait from it, and it is what later tells "in treatment at the chair" apart
+// from "in progress at triage" (both are status in_treatment).
+function markTreatmentWaiting(actor, patientId) {
+  const at = now();
+  const tr = db.prepare('SELECT id, route FROM triage WHERE patient_id = ?').get(patientId);
+  if (!tr) {
+    db.prepare("INSERT INTO triage (patient_id, status) VALUES (?, 'treatment_waiting')").run(patientId);
+  } else if (tr.route === 'hygienist') {
+    // Treatment Waiting is Dental Triage's queue for a chair, whichever way the
+    // patient gets there. A patient the dentist opened from the hygienist's
+    // list and parked for a chair used to keep route 'hygienist': the provider
+    // screen and the board then filed them with the hygienist while the
+    // Treatment waiting count included them, so no chair queue showed them.
+    // They are re-routed as an admin move to Treatment waiting routes them;
+    // 'both' already reaches Dental Triage and stays as it is.
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, at, patientId);
+    audit(actor, 'route', 'patient', patientId, 'dentist');
+  }
+  // The name is stored alongside the id at the moment of the move, so a later
+  // sync can never pair this stamp with a stale name from an earlier one.
+  db.prepare(`UPDATE triage SET status='treatment_waiting', treatment_waiting_at=?, treatment_waiting_by=?,
+                treatment_waiting_by_name=? WHERE patient_id=?`)
+    .run(at, actor ? actor.id : null, (actor && actor.full_name) || null, patientId);
+  db.prepare("UPDATE patients SET status='treatment_waiting', updated_at=? WHERE id=?").run(at, patientId);
+}
+
+// The outbound Referral card, as stored. Whitelisted and trimmed so the blob a
+// report or the after-care sheet reads is always the same shape; nothing at all
+// recorded is NULL, which is how "no referral" reads everywhere, and details
+// with no destination are refused (hasReferralOut in dentalLabels is the rule).
+const REFERRAL_URGENCIES = ['routine', 'soon', 'urgent'];
+function cleanReferralOut(v) {
+  const r = typeof v === 'string' ? safeJson(v, null) : v;
+  if (!r || typeof r !== 'object') return null;
+  const str = (x, max) => String(x == null ? '' : x).trim().slice(0, max);
+  const out = {
+    // Destination keys are not checked against today's list: a key a newer
+    // laptop added must survive a save here rather than vanish.
+    to: Array.from(new Set((Array.isArray(r.to) ? r.to : []).map((k) => str(k, 40)).filter(Boolean))).slice(0, 12),
+    to_other: str(r.to_other, 200),
+    urgency: REFERRAL_URGENCIES.includes(r.urgency) ? r.urgency : '',
+    tooth: str(r.tooth, 40),
+    reason: str(r.reason, 1000),
+  };
+  if (!out.to.length && !out.to_other) {
+    // A referral is where the patient is sent. An urgency, tooth or reason with
+    // nowhere to send them is refused here as on the screen, rather than kept
+    // where no count, list or printed record would ever show it.
+    if (out.urgency || out.tooth || out.reason) throw new Error('Required: Refer to — tick where the patient is being referred.');
+    return null;
+  }
+  return JSON.stringify(out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2297,6 +2511,8 @@ function dashboardStats() {
     total: count(''),
     checked_in: count(" AND status = 'checked_in'"),
     triaged: count(" AND status = 'triaged'"),
+    // Examined at Dental Triage, waiting for a treatment chair.
+    treatment_waiting: count(" AND status = 'treatment_waiting'"),
     in_treatment: count(" AND status = 'in_treatment'"),
     completed: count(" AND status = 'completed'"),
     // "Waiting for vitals" = checked in, no vitals taken yet. This must be read
@@ -2397,15 +2613,18 @@ function importClinicBundle(actor, bundle) {
     for (const p of b.patients) {
       const uid = p.uid || crypto.randomUUID();
       const existing = db.prepare('SELECT id FROM patients WHERE uid = ?').get(uid);
+      // A backup from an older version lacks the newer columns; those keep
+      // what this laptop has (or take the default) rather than being blanked.
+      const pcols = writableCols('patients', PCOLS, p, null);
       if (existing) {
-        db.prepare(`UPDATE patients SET ${PCOLS.map((c) => c + '=?').join(', ')}, event_id=? WHERE id=?`)
-          .run(...PCOLS.map((c) => (p[c] === undefined ? null : p[c])), eventId, existing.id);
+        db.prepare(`UPDATE patients SET ${pcols.map((c) => c + '=?, ').join('')}event_id=? WHERE id=?`)
+          .run(...pcols.map((c) => p[c]), eventId, existing.id);
         idByUid.set(uid, existing.id);
         counts.updated++;
       } else {
         const info = db.prepare(
-          `INSERT INTO patients (uid, event_id, ${PCOLS.join(', ')}) VALUES (?, ?, ${PCOLS.map(() => '?').join(', ')})`
-        ).run(uid, eventId, ...PCOLS.map((c) => (p[c] === undefined ? null : p[c])));
+          `INSERT INTO patients (uid, event_id${pcols.map((c) => ', ' + c).join('')}) VALUES (?, ?${pcols.map(() => ', ?').join('')})`
+        ).run(uid, eventId, ...pcols.map((c) => p[c]));
         idByUid.set(uid, info.lastInsertRowid);
         counts.patients++;
       }
@@ -2421,12 +2640,14 @@ function importClinicBundle(actor, bundle) {
       for (const row of (b[table] || [])) {
         const pid = childOf(row);
         if (!pid) continue;
-        const existing = db.prepare(`SELECT id FROM ${table} WHERE patient_id = ?`).get(pid);
-        const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
+        const existing = db.prepare(`SELECT * FROM ${table} WHERE patient_id = ?`).get(pid);
+        // Keys an older backup never had keep their local value / default.
+        const use = writableCols(table, cols, row, existing);
+        const vals = use.map((c) => row[c]);
         if (existing) {
-          db.prepare(`UPDATE ${table} SET ${cols.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
+          if (use.length) db.prepare(`UPDATE ${table} SET ${use.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
         } else {
-          db.prepare(`INSERT INTO ${table} (uid, patient_id, ${cols.join(', ')}) VALUES (?, ?, ${cols.map(() => '?').join(', ')})`)
+          db.prepare(`INSERT INTO ${table} (uid, patient_id${use.map((c) => ', ' + c).join('')}) VALUES (?, ?${use.map(() => ', ?').join('')})`)
             .run(row.uid || crypto.randomUUID(), pid, ...vals);
         }
       }
@@ -2437,11 +2658,12 @@ function importClinicBundle(actor, bundle) {
         if (!pid) continue;
         const uid = row.uid || crypto.randomUUID();
         const existing = db.prepare(`SELECT id FROM ${table} WHERE uid = ?`).get(uid);
-        const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
+        const use = writableCols(table, cols, row, null);
+        const vals = use.map((c) => row[c]);
         if (existing) {
-          db.prepare(`UPDATE ${table} SET ${cols.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
+          if (use.length) db.prepare(`UPDATE ${table} SET ${use.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
         } else {
-          db.prepare(`INSERT INTO ${table} (uid, patient_id, ${cols.join(', ')}) VALUES (?, ?, ${cols.map(() => '?').join(', ')})`)
+          db.prepare(`INSERT INTO ${table} (uid, patient_id${use.map((c) => ', ' + c).join('')}) VALUES (?, ?${use.map(() => ', ?').join('')})`)
             .run(uid, pid, ...vals);
           if (counterKey) counts[counterKey]++;
         }
@@ -2505,6 +2727,19 @@ const didCleaning = (t) => {
 };
 // Through the clinic and gone: treatment finished, or checked out and left.
 const isFinishedStatus = (s) => s === 'completed' || s === 'dismissed';
+// A referral counts when it sends the patient somewhere — a reason or urgency
+// typed with no destination is a note, not a referral.
+const madeReferral = (t) => {
+  const r = t ? safeJson(t.referral_out, null) : null;
+  return !!(r && ((Array.isArray(r.to) && r.to.length) || (r.to_other && String(r.to_other).trim())));
+};
+// X-rays TAKEN is the number the dentist typed at the chair. A visit from before
+// that field existed, or where it was left blank, counts its uploaded images
+// instead — the only figure it has, and what "x-rays taken" meant until now.
+const xraysTakenOf = (tri, images) => {
+  const typed = tri && tri.xrays_taken != null && tri.xrays_taken !== '' ? Number(tri.xrays_taken) : NaN;
+  return Number.isFinite(typed) && typed >= 0 ? typed : images;
+};
 
 // One town, one bucket. "Sandy, OR", "sandy, OR" and "Sandy , OR" were three
 // rows of the by-city table a grant return is written from; they are folded
@@ -2547,6 +2782,7 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
   const conditions = {}, visit_types = {}, days = {};
   const dayRow = (k) => (days[k] = days[k] || { date: k, seen: 0, completed: 0, fillings: 0, extractions: 0, cleanings: 0, treatments: 0 });
   let extractions = 0, fillings = 0, cleanings = 0, xrays = 0, completed = 0;
+  let xrays_taken = 0, referrals = 0;
   let checked_out = 0, flagged = 0, patients_with_xray = 0;
   let pre_signups = 0, pre_checked_out = 0, onsite_signups = 0, onsite_checked_out = 0;
   // Mean age is kept as a SUM and a COUNT, never as an average. mergeSummaries
@@ -2597,6 +2833,8 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     const nx = xrayCountOf(p);
     xrays += nx;
     if (nx) patients_with_xray++;
+    xrays_taken += xraysTakenOf(tri, nx);
+    if (madeReferral(t)) referrals++;
 
     const seenDay = dayRow(dayOf(p.created_at));
     seenDay.seen++;
@@ -2652,6 +2890,8 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     patients_with_xray,
     pre_signups, pre_checked_out, onsite_signups, onsite_checked_out,
     extractions, fillings, cleanings, xrays,
+    // v0.0.15: xrays is the images uploaded; xrays_taken is what was taken.
+    xrays_taken, referrals,
     by_gender, by_age, by_language, by_city, by_day, by_status, visit_types, by_race,
     age_sum, age_known, race_answered, race_declined,
     conditions,
@@ -2668,7 +2908,7 @@ function buildEventSummary(eventId) {
     event, patients,
     (p) => db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT COUNT(*) AS n FROM xrays WHERE patient_id = ?').get(p.id).n,
-    (p) => db.prepare('SELECT flags FROM triage WHERE patient_id = ?').get(p.id),
+    (p) => db.prepare('SELECT flags, xrays_taken FROM triage WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT answers, declined, registration_status, exit_status FROM exit_surveys WHERE patient_id = ?').get(p.id),
   );
 }
@@ -2679,12 +2919,13 @@ function buildEventSummary(eventId) {
 function mergeSummaries(list) {
   const NUM = ['patients_seen', 'visits_completed', 'checked_out', 'flagged', 'patients_with_xray',
     'pre_signups', 'pre_checked_out', 'onsite_signups', 'onsite_checked_out',
-    'extractions', 'fillings', 'cleanings', 'xrays',
+    'extractions', 'fillings', 'cleanings', 'xrays', 'referrals',
     'age_sum', 'age_known', 'race_answered', 'race_declined'];
   const MAPS = ['by_gender', 'by_age', 'by_language', 'by_city', 'by_day', 'by_status', 'visit_types', 'conditions', 'by_race'];
   const SURVEY_NUM = ['responses', 'declined', 'not_asked'];
   const out = { generated_at: now() };
   NUM.forEach((k) => { out[k] = 0; });
+  out.xrays_taken = 0;
   MAPS.forEach((k) => { out[k] = {}; });
   out.survey = {
     responses: 0, declined: 0, not_asked: 0, answers: {},
@@ -2700,6 +2941,11 @@ function mergeSummaries(list) {
   for (const s of list) {
     if (!s) continue;
     if (s.checked_out === undefined) legacy++;
+    // Totals kept before v0.0.15 have no xrays_taken; for them "x-rays taken"
+    // was the image count, so that is what they contribute — the same fallback
+    // summarize() applies to a single visit. A kept report has no referrals
+    // figure at all, and contributes zero to that one.
+    out.xrays_taken += s.xrays_taken !== undefined ? (Number(s.xrays_taken) || 0) : (Number(s.xrays) || 0);
     NUM.forEach((k) => { out[k] += Number(s[k]) || 0; });
     MAPS.forEach((k) => {
       Object.entries(s[k] || {}).forEach(([kk, v]) => { out[k][kk] = (out[k][kk] || 0) + (Number(v) || 0); });
@@ -2964,8 +3210,13 @@ const SYNC_COLS = {
   // event scoping travels via event_uid (the parent), NULL for global admins.
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
   patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
-  triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name'],
-  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name'],
+  triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name',
+    'xrays_taken', 'treatment_waiting_at', 'treatment_waiting_by_name'],
+  // restorative and services were added as columns in v0.0.4 but never listed
+  // here, so the dentist's denture, crown and pulpotomy entries lived only on
+  // the laptop that entered them and were dropped by every clinic restore.
+  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name',
+    'restorative', 'services', 'referral_out'],
   // deemed_consent was added as a column and written by both consent paths, but
   // never listed here — so the HIV/Hepatitis answer a patient gives has been
   // silently dropped on every sync and every USB clinic restore since it shipped.
@@ -2984,11 +3235,72 @@ const SYNC_COLS = {
   inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
   inv_move: ['delta', 'reason', 'note', 'created_by_name', 'created_at'],
 };
+// The lists every station synced with before v0.0.15, frozen. They are what a
+// database from before rebaselineSyncColumns existed was hashed under, so they
+// are how its rows are recognised as in step. Never edit these: add to
+// SYNC_COLS above, and the stored copy of the lists takes care of the rest.
+const SYNC_COLS_BEFORE_V0_0_15 = {
+  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at'],
+  user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
+  patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
+  triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name'],
+  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name'],
+  consent: ['type', 'version', 'language', 'signer_name', 'relationship', 'signature_png', 'signed_at', 'tooth_numbers', 'amended_by', 'amended_at', 'deemed_consent', 'signature_method'],
+  xray: ['station', 'image_png', 'note', 'created_at', 'tooth'],
+  report: ['summary', 'patients_seen', 'finished_at', 'finished_by_name', 'created_at'],
+  survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
+  inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
+  inv_move: ['delta', 'reason', 'note', 'created_by_name', 'created_at'],
+};
+Object.values(SYNC_COLS_BEFORE_V0_0_15).forEach(Object.freeze);
+Object.freeze(SYNC_COLS_BEFORE_V0_0_15);
 // Denormalized name field -> the local user-id column it is resolved from.
 const NAME_SOURCE = {
   dismissed_by_name: 'dismissed_by', triaged_by_name: 'triaged_by',
   vitals_by_name: 'vitals_by', routed_by_name: 'routed_by', completed_by_name: 'completed_by',
+  treatment_waiting_by_name: 'treatment_waiting_by',
 };
+
+/* ---------------- An absent key is not a NULL ----------------
+   A row that reaches this laptop from a peer still on an older version, or
+   from a backup exported before a column existed, has no value at all for that
+   column. Writing NULL in its place is not "no change": it erases what this
+   laptop holds, and for a NOT NULL column it throws — which silently skipped
+   the whole row on sync (fillings and extractions included) and aborted the
+   whole restore of an old backup. So a key the incoming row does not carry is
+   left out of the write: an UPDATE keeps the local value, an INSERT takes the
+   column's default. Used by applyRemoteRows and by the clinic-bundle restore. */
+let _colMeta = new Map();
+function columnMeta(table) {
+  if (!_colMeta.has(table)) {
+    const m = new Map();
+    for (const c of db.prepare(`PRAGMA table_info(${table})`).all()) m.set(c.name, { notnull: !!c.notnull });
+    _colMeta.set(table, m);
+  }
+  return _colMeta.get(table);
+}
+// JSON blobs a peer that never received them holds as '{}' — restorative and
+// services never synced before v0.0.15, so every other laptop has an empty one.
+// Once they sync, that empty copy must not be able to overwrite the dentist's
+// real entry. The Dental Triage screen always saves all four restorative
+// entries, so a genuine save is never an empty object.
+const KEEP_NONEMPTY = { treatments: ['restorative', 'services'] };
+function isEmptyJson(v) {
+  if (v == null || v === '') return true;
+  if (typeof v === 'object') return !Object.keys(v).length;
+  try { const p = JSON.parse(v); return p == null || (typeof p === 'object' && !Object.keys(p).length); } catch { return false; }
+}
+function writableCols(table, cols, incoming, local) {
+  const meta = columnMeta(table);
+  const keep = KEEP_NONEMPTY[table] || [];
+  return cols.filter((c) => {
+    if (!incoming || !Object.prototype.hasOwnProperty.call(incoming, c) || incoming[c] === undefined) return false;
+    // NULL into a NOT NULL column can only fail; keep local / take the default.
+    if (incoming[c] === null && meta.get(c) && meta.get(c).notnull) return false;
+    if (local && keep.includes(c) && isEmptyJson(incoming[c]) && !isEmptyJson(local[c])) return false;
+    return true;
+  });
+}
 
 function nameOfId(uid) { if (!uid) return null; const u = db.prepare('SELECT full_name FROM users WHERE id = ?').get(uid); return u ? u.full_name : null; }
 // A globally-unique, totally-ordered revision stamp: a strictly-increasing
@@ -3014,10 +3326,20 @@ function sig(obj) { return crypto.createHash('sha256').update(JSON.stringify(obj
 function uidOf(table, id) { if (!id) return null; const r = db.prepare(`SELECT uid FROM ${table} WHERE id = ?`).get(id); return r ? r.uid : null; }
 function localIdByUid(table, uid) { if (!uid) return null; const r = db.prepare(`SELECT id FROM ${table} WHERE uid = ?`).get(uid); return r ? r.id : null; }
 
+// A stamp that sorts immediately after `stamp` and before any later one: the
+// same instant, then this device. It replaces the copy that carries `stamp`
+// under last-write-wins, and loses to any edit made after it anywhere else.
+function justAbove(stamp) {
+  return String(stamp) + '~' + (getSetting('cloud_device_id') || '0');
+}
+
 // Build the ordered, stable payload object for a row (denormalizing names).
 function buildData(entity, row) {
+  return buildDataCols(SYNC_COLS[entity], row);
+}
+function buildDataCols(cols, row) {
   const out = {};
-  for (const col of SYNC_COLS[entity]) {
+  for (const col of cols) {
     if (NAME_SOURCE[col]) {
       // Keep an already-stored name verbatim (including an empty string synced
       // from a peer) so its content hash is stable and it isn't re-pushed every
@@ -3028,6 +3350,54 @@ function buildData(entity, row) {
     }
   }
   return out;
+}
+
+/* ---------------- A newly synced column is not a new edit ----------------
+   Whether a row needs sending is decided by a hash of its synced columns, so
+   adding a column to SYNC_COLS changes the hash of EVERY row, and the next sync
+   used to re-stamp each one with the current time and push it. Sync pushes
+   before it pulls: a laptop whose copy was behind (switched off just before a
+   colleague's last edit) pushed its whole stale table with fresh stamps, and
+   those won last-write-wins over the newer edits in the cloud and then on every
+   laptop — fillings, notes, the completion, the lock.
+
+   So when the lists change, a row that was in step under the OLD lists is
+   re-hashed under the new ones and keeps its stamp. A row with an edit still
+   waiting to go keeps its stamp too, which is when that edit was made. Only a
+   row whose newly synced columns hold something the cloud has never had — the
+   dentist's Restorative and Services entries, which were never synced before
+   v0.0.15 — is sent again, and with a stamp just above its own: enough to
+   replace the copy the cloud holds, never enough to beat a later edit made
+   elsewhere. The lists are stored once handled, so the next release that syncs
+   another column is dealt with the same way. */
+function rebaselineSyncColumns() {
+  const current = JSON.stringify(SYNC_COLS);
+  const seen = getSetting('sync_cols_seen');
+  if (seen === current) return;
+  const prior = safeJson(seen, null) || SYNC_COLS_BEFORE_V0_0_15;
+  db.transaction(() => {
+    for (const [entity, cols] of Object.entries(SYNC_COLS)) {
+      const oldCols = prior[entity];
+      // A brand-new entity has nothing in the cloud to be in step with.
+      if (!Array.isArray(oldCols) || JSON.stringify(oldCols) === JSON.stringify(cols)) continue;
+      const table = ENTITY_TABLE[entity];
+      const added = cols.filter((c) => !oldCols.includes(c));
+      const upd = db.prepare(`UPDATE ${table} SET content_rev = ?, synced_rev = ?, updated_at = ? WHERE id = ?`);
+      // content_rev IS NULL: never collected, so first sync stamps it fairly.
+      for (const row of db.prepare(`SELECT * FROM ${table} WHERE content_rev IS NOT NULL`).all()) {
+        const oldSig = sig(buildDataCols(oldCols, row));
+        // Edited since it was last stamped: an ordinary local change, which the
+        // next collect stamps now — exactly as it would have without an upgrade.
+        if (row.content_rev !== oldSig) continue;
+        const data = buildData(entity, row);
+        const newSig = sig(data);
+        if (row.synced_rev !== oldSig) upd.run(newSig, row.synced_rev, row.updated_at, row.id);
+        else if (added.some((c) => !isEmptyJson(data[c]))) upd.run(newSig, row.synced_rev, row.updated_at ? justAbove(row.updated_at) : null, row.id);
+        else upd.run(newSig, newSig, row.updated_at, row.id);
+      }
+    }
+    setSetting('sync_cols_seen', current);
+  })();
 }
 
 // Give every syncable row a uid (once). Cheap, idempotent.
@@ -3238,7 +3608,12 @@ function applyRemoteRows(remoteRows) {
         if (dupe) { db.prepare(`UPDATE ${table} SET uid = ? WHERE id = ?`).run(env.uid, dupe.id); return applyOne(env); }
       }
     }
-    const cols = [...SYNC_COLS[entity]];
+    // Only the keys this row actually carries are written (see writableCols).
+    // When this laptop keeps a value the sender did not have, its copy is no
+    // longer the row that arrived, and is pushed back (below) — which is what
+    // puts the kept value back in the cloud copy the older laptop overwrote.
+    const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
+    const cols = writableCols(table, SYNC_COLS[entity], env.data, local);
     const vals = cols.map((c) => data[c]);
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];
@@ -3258,6 +3633,26 @@ function applyRemoteRows(remoteRows) {
       const allCols = [...cols, ...extraCols];
       const ph = allCols.map(() => '?').join(', ');
       db.prepare(`INSERT INTO ${table} (${allCols.join(', ')}) VALUES (${ph})`).run(...vals, ...extraVals);
+    }
+    // The merged copy differs from what arrived — a column the sender's version
+    // does not have, a real Restorative kept against an empty one, a name only
+    // this laptop can resolve — so it has to go back up. It is stamped JUST
+    // above the row it merged, never with the current time: a current stamp
+    // outranks every edit made elsewhere since the sender's, so a colleague's
+    // later, genuine edit was refused here on the next pull and lost in the
+    // cloud, and the older laptop's content won everywhere.
+    // Only a row that could have been merged is read back and re-hashed: one
+    // with a column not written from what arrived, or an existing row whose
+    // name the sender left empty, which buildData may fill from the local id
+    // (a new row has no local id to fill it from). Every other row IS what
+    // arrived, which rowSig already describes — re-reading and re-hashing them
+    // all (x-ray images included) doubled the cost of a full pull.
+    const mayDiffer = cols.length !== SYNC_COLS[entity].length
+      || (!!existing && SYNC_COLS[entity].some((c) => NAME_SOURCE[c] && data[c] == null));
+    const merged = mayDiffer && env.updated_at ? db.prepare(`SELECT * FROM ${table} WHERE uid = ?`).get(env.uid) : null;
+    const mergedSig = merged ? sig(buildData(entity, merged)) : rowSig;
+    if (mergedSig !== rowSig) {
+      db.prepare(`UPDATE ${table} SET updated_at = ?, content_rev = ? WHERE id = ?`).run(justAbove(env.updated_at), mergedSig, merged.id);
     }
     applied++;
   };
@@ -3397,4 +3792,6 @@ module.exports = {
   // v1.1.0 cloud sync
   collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
   getSyncPending, setSyncPending, resetSyncCursor,
+  // Read-only; lets the harness rebuild a database exactly as v0.0.14 left it.
+  SYNC_COLS_BEFORE_V0_0_15,
 };

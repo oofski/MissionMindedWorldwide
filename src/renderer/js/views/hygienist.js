@@ -10,6 +10,7 @@ import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
 import { scanBox } from '../components/wristband.js';
 import { sortedByName } from '../patientSort.js';
+import { toothList } from '../../i18n/dentalLists.js';
 
 // Cleaning options a hygienist performs (mirrors the provider's cleaning set).
 const CLEANING_OPTS = [
@@ -35,9 +36,11 @@ export function renderHygienist(ctx, params = {}) {
     const patients = await api.listPatients({});
     const live = patients.filter((p) => p.status !== 'dismissed');
     // B1/B2 QUEUE GATE: a patient only belongs in the cleaning queue once the EMT
-    // has signed them off into a clinical queue (status 'triaged'/'in_treatment')
-    // AND they were routed to the hygienist. Checked-in patients stay with the EMT.
-    const forCleaning = sortedByName(live.filter((p) => routedToHygienist(p) && ['triaged', 'in_treatment'].includes(p.status)));
+    // has signed them off into a clinical queue (status 'triaged'/'in_treatment',
+    // or 'treatment_waiting' — examined at Dental Triage and waiting for a
+    // chair, which a 'both' patient can be while still due a cleaning) AND they
+    // were routed to the hygienist. Checked-in patients stay with the EMT.
+    const forCleaning = sortedByName(live.filter((p) => routedToHygienist(p) && ['triaged', 'treatment_waiting', 'in_treatment'].includes(p.status)));
     const rows = forCleaning.map((p) => el('tr', { style: 'cursor:pointer', onClick: () => detail(p.id) }, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`])]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
@@ -82,7 +85,9 @@ export function renderHygienist(ctx, params = {}) {
 
     // Cleaning state — preserved from any prior save; teeth tracked as a Set.
     const cleanState = { ...(tx.cleaning || {}) };
-    const teeth = new Set(cleanState.teeth || []);
+    // An older record's teeth as a string ("1,2") used to become a set of
+    // characters here, and was saved back with the comma as a tooth.
+    const teeth = new Set(toothList(cleanState.teeth));
 
     const odo = Odontogram({
       mode: 'adult',
@@ -124,11 +129,17 @@ export function renderHygienist(ctx, params = {}) {
 
     // Build a full treatment payload that PRESERVES the doctor's fillings/
     // extractions/anesthetic and only rewrites the cleaning + sign-off fields.
+    // Restorative, Services and the dentist's Referral are carried through too:
+    // leaving them out used to wipe the dentist's denture and pulpotomy entries
+    // on every save here.
     function buildPayload() {
       return {
         fillings: tx.fillings || [],
         extractions: tx.extractions || [],
         anesthetic: tx.anesthetic || [],
+        restorative: tx.restorative || {},
+        services: tx.services || {},
+        referral_out: tx.referral_out || null,
         other_procedures: tx.other_procedures || null,
         cleaning: { ...cleanState, teeth: [...teeth], quad_detail: quadDetail.value.trim() },
         clinical_notes: notes.value.trim() || tx.clinical_notes || null,
@@ -139,6 +150,9 @@ export function renderHygienist(ctx, params = {}) {
 
     // v1.2.1: mode is false (save), 'complete' (mark the cleaning done and send
     // the patient onward — stays editable), or 'lock' (optional read-only finalize).
+    // A plain save goes to the data layer as 'cleaning': this station saying
+    // what it is doing, so a patient waiting for a treatment chair keeps their
+    // place whoever is signed in here (an administrator can work this screen).
     async function save(mode) {
       const payload = buildPayload();
       // Same rule as the dentist: a cleaning record has to name the hygienist
@@ -154,25 +168,26 @@ export function renderHygienist(ctx, params = {}) {
         if (!ok) return;
       }
       try {
-        await api.saveTreatment(id, payload, mode);
+        await api.saveTreatment(id, payload, mode || 'cleaning');
         toast(mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out' : 'Cleaning saved', 'success');
         if (mode) queue(); else detail(id);
       } catch (e) { toast(e.message, 'error'); }
     }
 
-    // B3: hand a patient off to the dentist when they actually need restorative
-    // work (extraction/filling). Confirms, routes, then refreshes back to the queue
-    // (the patient leaves the cleaning list once routed to the dentist).
+    // B3: hand a patient off to Dental Triage when they actually need
+    // restorative work (extraction/filling). Confirms, routes, then refreshes back
+    // to the queue (the patient leaves the cleaning list once routed there). The
+    // route key stays 'dentist'; only the station's name changed.
     async function transferToDentist() {
       const ok = await modal({
-        title: 'Transfer to dentist?',
-        body: 'Send this patient to the dentist for restorative work (extraction/filling). They will leave the cleaning queue. Continue?',
-        confirmText: 'Transfer to dentist', cancelText: 'Cancel',
+        title: 'Transfer to Dental Triage?',
+        body: 'Send this patient to Dental Triage for restorative work (extraction/filling). They will leave the cleaning queue. Continue?',
+        confirmText: 'Transfer to Dental Triage', cancelText: 'Cancel',
       });
       if (!ok) return;
       try {
         await api.routePatient(id, 'dentist');
-        toast('Patient transferred to the dentist', 'success');
+        toast('Patient transferred to Dental Triage', 'success');
         queue();
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -192,7 +207,7 @@ export function renderHygienist(ctx, params = {}) {
           el('p', { class: 'view-sub' }, [`${p.age != null ? p.age + ' yrs · ' : ''}${p.gender || ''}`]),
         ]),
         el('div', { class: 'inline-row', style: 'align-items:center;gap:8px' }, [
-          locked ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to the dentist for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to dentist']),
+          locked ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to Dental Triage for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to Dental Triage']),
           statusPill(p.status),
         ]),
       ]),

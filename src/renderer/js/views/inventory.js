@@ -35,7 +35,9 @@ const REASONS = [
  * otherwise.
  */
 const STARTER = [
-  ...ANESTHETICS.map((a) => ({ name: a.en, category: 'Anaesthetic', unit: 'carpule', par_level: 50 })),
+  // A retired agent stays in ANESTHETICS so old records still name it; the
+  // clinic no longer stocks it, so it is not offered as a starting item.
+  ...ANESTHETICS.filter((a) => !a.retired).map((a) => ({ name: a.en, category: 'Anaesthetic', unit: 'carpule', par_level: 50 })),
   ...ANTIBIOTICS.map((a) => ({ name: a.en, category: 'Antibiotic', unit: 'course', par_level: 10 })),
   { name: 'Exam gloves — small', category: 'PPE', unit: 'box', par_level: 5 },
   { name: 'Exam gloves — medium', category: 'PPE', unit: 'box', par_level: 8 },

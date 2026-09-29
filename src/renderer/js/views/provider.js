@@ -11,6 +11,10 @@ import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
 import { bloodThinnerStatus, bloodThinnerText, bpStatus } from '../medFlags.js';
 import { scanBox } from '../components/wristband.js';
+import { chipGrid } from '../forms.js';
+import {
+  SURFACES, LEGACY_SURFACE_COUNTS, surfaceList, toothList, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY,
+} from '../../i18n/dentalLists.js';
 
 const QUADRANTS = [['UR', 'UR'], ['UL', 'UL'], ['LR', 'LR'], ['LL', 'LL']];
 const fmtWhen = (ts) => { if (!ts) return ''; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
@@ -32,11 +36,24 @@ export function renderProvider(ctx, params = {}) {
   async function queue() {
     ctx.setDetail && ctx.setDetail(false);
     const patients = await api.listPatients({});
-    const ready = patients.filter((p) => ['triaged', 'in_treatment'].includes(p.status));
-    // EMT routing: 'dentist' and 'both' belong here; route null = legacy rows
-    // (pre-routing data) which default to the dentist. Patients routed only to
-    // the hygienist wait in a collapsed list below — they may come back later.
-    const dentistQueue = sortedByName(ready.filter((p) => p.route === 'dentist' || p.route === 'both' || p.route == null));
+    const ready = patients.filter((p) => ['triaged', 'treatment_waiting', 'in_treatment'].includes(p.status));
+    // EMT routing: 'dentist' (the Dental Triage station — the stored key never
+    // changed) and 'both' belong here; route null = legacy rows (pre-routing
+    // data) which default to Dental Triage. Patients routed only to the
+    // hygienist wait in a collapsed list below — they may come back later.
+    const atDental = (p) => p.route === 'dentist' || p.route === 'both' || p.route == null;
+    // Three stages at this station, each its own A–Z list so nobody is lost in
+    // a long mixed one:
+    //  - Dental Triage: signed off by Vitals and waiting to be examined, or
+    //    being examined now (a progress save that was never parked);
+    //  - Treatment waiting: examined and parked for a treatment chair;
+    //  - In treatment: a treating dentist has taken them from that queue.
+    // "Being examined" and "In treatment" are both status in_treatment; the
+    // Treatment Waiting stamp is what tells the chair apart from triage.
+    const triageQueue = sortedByName(ready.filter((p) => atDental(p)
+      && (p.status === 'triaged' || (p.status === 'in_treatment' && !p.treatment_waiting_at))));
+    const waitingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'treatment_waiting'));
+    const treatingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'in_treatment' && p.treatment_waiting_at));
     const atHygienist = sortedByName(ready.filter((p) => p.route === 'hygienist'));
     const row = (p) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
@@ -45,7 +62,11 @@ export function renderProvider(ctx, params = {}) {
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
       el('td', {}, [p.complaint || '—']),
       el('td', {}, [p.assigned_to || '—']),
-      el('td', {}, [statusPill(p.status)]),
+      el('td', {}, [statusPill(p.status),
+        // How long they have been waiting for a chair — the number the floor
+        // lead balances fifteen chairs against.
+        p.status === 'treatment_waiting' && p.treatment_waiting_at
+          ? el('span', { class: 'subtle small', style: 'margin-left:6px' }, [waitedFor(p.treatment_waiting_at)]) : null]),
       el('td', {}, [chevronBtn('Treat', () => detail(p.id))]),
     ]);
     const table = (list, emptyMsg) => el('div', { class: 'data-table-wrap' }, [
@@ -54,13 +75,19 @@ export function renderProvider(ctx, params = {}) {
         el('tbody', {}, list.length ? list.map(row) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
       ]),
     ]);
+    const listCard = (ic, title, list, emptyMsg) => el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon(ic, { size: 15 }), `${title} (${list.length})`]),
+      table(list, emptyMsg),
+    ]);
     mount(root,
       el('div', { class: 'view-head' }, [
-        el('div', {}, [el('h1', {}, [t('nav.provider')]), el('p', { class: 'view-sub' }, [`${dentistQueue.length} patient(s) in the dentist queue — patients arrive here once the EMT station records vitals and routes them`])]),
+        el('div', {}, [el('h1', {}, [t('nav.provider')]), el('p', { class: 'view-sub' }, [`${triageQueue.length} in the Dental Triage queue · ${waitingQueue.length} waiting for a treatment chair · ${treatingQueue.length} in treatment — patients arrive here once the EMT station records vitals and routes them`])]),
         ghostBtn('refresh', 'Refresh', queue),
       ]),
       el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: (pt) => detail(pt.id) })]),
-      el('div', { class: 'card' }, [table(dentistQueue, 'No patients in the dentist queue yet — the EMT station sends patients here after vitals.')]),
+      listCard('clipboard', 'Dental Triage', triageQueue, 'No patients in the Dental Triage queue yet — the EMT station sends patients here after vitals.'),
+      listCard('calendar', 'Treatment waiting', waitingQueue, 'Nobody is waiting for a treatment chair — Dental Triage moves patients here once they have been examined.'),
+      listCard('tooth', 'In treatment', treatingQueue, 'Nobody is in a treatment chair yet.'),
       atHygienist.length ? el('details', { class: 'collapse' }, [
         el('summary', {}, [`At the hygienist (${atHygienist.length})`]),
         el('div', { class: 'collapse-body' }, [table(atHygienist, '')]),
@@ -142,7 +169,15 @@ export function renderProvider(ctx, params = {}) {
     /* ---------- Visit row (paper: top of sheet) ---------- */
     const complaint = input(tr.complaint || p.dental_history.reason || '', 'Chief complaint', locked);
     const triageNotes = textarea(tr.notes || '', 'Triage notes', 2, locked);
-    const station = input(tr.xray_station || '', 'Station #', locked, 'input--sm');
+    // Number of X-rays TAKEN, typed by the dentist. Not the images uploaded
+    // (xray_count, recounted on every upload), which is shown beside it. It
+    // replaces the old "X-ray station #": a station number recorded on older
+    // visits is kept and shown read-only, never read as a count.
+    const xraysTaken = el('input', {
+      class: 'input input--sm num', type: 'number', min: '0', max: '99', step: '1', inputmode: 'numeric',
+      placeholder: '0', value: tr.xrays_taken != null ? String(tr.xrays_taken) : '',
+    });
+    if (locked) xraysTaken.disabled = true;
     const xrayCountEl = el('span', { class: 'xray-count-badge' }, [icon('xray', { size: 16 }), el('span', {}, [String(xrays.length)])]);
 
     /* ---------- Odontogram (the mouth) — click a tooth to tag + note ---------- */
@@ -209,23 +244,44 @@ export function renderProvider(ctx, params = {}) {
     function addFilling(f = {}, auto = false) {
       const toothF = toothField(f.tooth, () => refreshMarks());
       const tooth = toothF.input;
-      const surf = new Set((f.surfaces || []).map(String));
-      const surfWrap = el('div', { class: 'surface-pills' }, ['1', '2', '3', '4'].map((n) =>
-        el('button', { type: 'button', class: 'surf-chip' + (surf.has(n) ? ' surf-chip--on' : ''), onClick: (e) => { if (locked) return; if (surf.has(n)) surf.delete(n); else surf.add(n); e.currentTarget.classList.toggle('surf-chip--on'); } }, [n])));
+      // M F L O B, in the order a note writes them. surfaceList also reads the
+      // legacy shapes (a "1,2" string used to crash this row). A value that is
+      // not one of the five — the old 1–4 surface COUNTS above all — has no
+      // pill and cannot be turned into letters, so it is shown read-only as
+      // what it was and saved back with the row, beside any letters ticked now.
+      const surf = new Set(surfaceList(f.surfaces));
+      const legacySurf = [...surf].filter((v) => !SURFACES.some((s) => s.key === v));
+      const surfWrap = el('div', { class: 'surface-pills' }, [
+        ...SURFACES.map(({ key, en }) =>
+          el('button', { type: 'button', title: en, class: 'surf-chip' + (surf.has(key) ? ' surf-chip--on' : ''), onClick: (e) => { if (locked) return; if (surf.has(key)) surf.delete(key); else surf.add(key); e.currentTarget.classList.toggle('surf-chip--on'); } }, [key])),
+        ...legacySurf.map((v) => el('span', {
+          class: 'surf-chip surf-chip--legacy',
+          title: LEGACY_SURFACE_COUNTS.includes(v)
+            ? `Recorded before v0.0.15 as the number of surfaces (${v}) — kept as recorded`
+            : `Recorded earlier as "${v}" — kept as recorded`,
+        }, [LEGACY_SURFACE_COUNTS.includes(v) ? `${v}-surf` : v])),
+      ]);
       let ant = !!f.ant, post = !!f.post;
       const antBtn = toggleChip('Ant', ant, (on) => { ant = on; }, locked);
       const postBtn = toggleChip('Post', post, (on) => { post = on; }, locked);
+      // Whatever else an older build stored on the row — a single `position`
+      // the printed record still reads when Ant/Post are unset, above all — is
+      // saved back untouched rather than dropped by the next save.
+      const keptF = legacyKeys(f, ['tooth', 'surfaces', 'ant', 'post', 'note']);
+      const positionChip = f.position != null && String(f.position).trim()
+        ? el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${f.position}" — kept as recorded` }, [String(f.position)])
+        : null;
       const noteChip = el('span', { class: 'tx-note' + (f.note ? '' : ' hidden') }, [f.note || '']);
       const row = el('div', { class: 'filling-row', style: 'grid-template-columns:160px auto auto auto' }, [
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Surfaces']), surfWrap]),
-        el('div', { class: 'antpost' }, [antBtn, postBtn]),
+        el('div', { class: 'antpost' }, [antBtn, postBtn, positionChip]),
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = f.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptF, tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       fillingRows.append(row);
     }
@@ -237,19 +293,27 @@ export function renderProvider(ctx, params = {}) {
     function addExtraction(x = {}, auto = false) {
       const toothF = toothField(x.tooth, () => refreshMarks());
       const tooth = toothF.input;
-      const types = new Set(x.types || []);
+      // An early build stored one type as `type`; it is the same choice, so it
+      // is shown ticked and saved in `types` — the printed record already reads
+      // it by name, and a re-save used to write it away as no type at all. A
+      // key this build does not list is kept, shown as recorded.
+      const types = new Set(Array.isArray(x.types) ? x.types : (x.type ? [x.type] : []));
       const typeChips = EXTRACTION_TYPES.map(([k, label]) =>
         toggleChip(label, types.has(k), (on) => { if (on) types.add(k); else types.delete(k); }, locked));
+      const unknownTypes = [...types].filter((k) => !EXTRACTION_TYPES.some(([key]) => key === k))
+        .map((k) => el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${k}" — kept as recorded` }, [`(recorded) ${k}`]));
+      const keptX = legacyKeys(x, ['tooth', 'types', 'type', 'note']);
       const noteChip = el('span', { class: 'tx-note' + (x.note ? '' : ' hidden') }, [x.note || '']);
       const row = el('div', { class: 'ext-row' }, [
         el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         ...typeChips,
+        ...unknownTypes,
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = x.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptX, tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       extractRows.append(row);
     }
@@ -260,7 +324,8 @@ export function renderProvider(ctx, params = {}) {
 
     /* ---------- Cleaning ---------- */
     const cleanState = { ...(tx.cleaning || {}) };
-    if (!cleanState.teeth) cleanState.teeth = [];
+    // An older record's teeth as a string ("1,2") stopped this screen drawing.
+    cleanState.teeth = toothList(cleanState.teeth);
     const quadDetail = el('input', { class: 'input input--sm', placeholder: 'Quadrant(s) e.g. UR, LL', value: cleanState.quad_detail || '', style: cleanState.quad_deep_scaling ? '' : 'display:none' });
     const cleanTeeth = el('div', { class: 'odo-selected-list', style: 'margin-top:8px' });
     function renderCleanTeeth() {
@@ -286,73 +351,92 @@ export function renderProvider(ctx, params = {}) {
     // multiple entries are captured (e.g. #14 1.5 carps buccal; #30 1 carp lingual).
     // Saved as an ARRAY (see collectTreatment); legacy object-keyed data is parsed
     // on load so prior records pre-fill correctly.
-    // All five anaesthetics MMW carries, from the clinic's own drug list, plus
-    // Other. Offering only two of the five meant a mepivacaine or bupivacaine
-    // block had to be recorded as "Other" free text, where nothing could count
-    // it — and what was given is exactly what a later provider needs to read.
-    const ANES_AGENTS = [...ANESTHETICS.map((a) => [a.key, a.en]), ['other', 'Other']];
-    const ANES_KEYS = ANES_AGENTS.map(([k]) => k);
+    // The clinic's own anaesthetic list, plus Other. When MMW's new list
+    // arrives, an agent it drops is kept in ANESTHETICS with retired:true
+    // rather than deleted: it is no longer offered for a new administration,
+    // but a row that already records it still shows it and saves it back
+    // unchanged — deleting it would rewrite every old record that used it.
+    const AGENT_KEYS = [...ANESTHETICS.map((a) => a.key), 'other'];
+    const DEFAULT_AGENT = (ANESTHETICS.find((a) => !a.retired) || { key: 'other' }).key;
+    const agentOptions = (current) => [
+      ...ANESTHETICS.filter((a) => !a.retired || a.key === current).map((a) => [a.key, a.en]),
+      // A key this build does not know (an early build's "supplemental", or an
+      // agent a newer laptop added) is shown and saved back as recorded.
+      ...(current && !AGENT_KEYS.includes(current) ? [[current, `(recorded) ${current}`]] : []),
+      ['other', 'Other'],
+    ];
     const anesRows = el('div', { class: 'tx-rows' });
     function anesFromStored(stored) {
-      const known = (k) => ANES_KEYS.includes(k);
-      if (Array.isArray(stored)) {
-        return stored.map((a) => ({
-          agent: known(a.agent) ? a.agent : 'other',
-          carps: a.carps != null ? String(a.carps) : '',
-          location: a.location || '',
-          tooth: a.tooth != null ? String(a.tooth) : '',
-          name: a.name || (known(a.agent) ? '' : (a.agent || '')),
-        }));
-      }
       // Legacy object shape keyed by agent: { lidocaine:{carps,location,tooth?}, other:{name,...} }.
-      return Object.entries(stored || {}).map(([k, v]) => {
-        v = v || {};
-        return {
-          agent: known(k) ? k : 'other',
-          carps: v.carps != null ? String(v.carps) : '',
-          location: v.location || '',
-          tooth: v.tooth != null ? String(v.tooth) : '',
-          name: v.name || (known(k) ? '' : k),
-        };
-      });
+      const rows = Array.isArray(stored) ? stored : Object.entries(stored || {}).map(([k, v]) => ({ ...(v || {}), agent: k }));
+      return rows.filter(Boolean).map((a) => ({
+        agent: a.agent || 'other',
+        carps: a.carps != null ? String(a.carps) : '',
+        location: a.location || '',
+        location_other: a.location_other || '',
+        tooth: a.tooth != null ? String(a.tooth) : '',
+        name: a.name || '',
+      }));
     }
     function addAnes(a = {}) {
-      const agent = ANES_KEYS.includes(a.agent) ? a.agent : 'lidocaine';
-      const agentSel = el('select', { class: 'input input--sm' }, ANES_AGENTS.map(([k, l]) =>
+      const agent = a.agent || DEFAULT_AGENT;
+      const agentSel = el('select', { class: 'input input--sm' }, agentOptions(agent).map(([k, l]) =>
         el('option', { value: k, selected: k === agent }, [l])));
       const nameInput = el('input', { class: 'input input--sm', placeholder: 'Agent name', value: a.name || '', style: agent === 'other' ? '' : 'display:none' });
       agentSel.addEventListener('change', () => { nameInput.style.display = agentSel.value === 'other' ? '' : 'none'; });
       const carps = el('input', { class: 'input input--sm num', type: 'number', min: '0', step: '0.5', placeholder: 'Carps', value: a.carps || '' });
       const toothF = toothField(a.tooth, null);
-      const loc = el('input', { class: 'input input--sm', placeholder: 'e.g. buccal', value: a.location || '' });
-      if (locked) { agentSel.disabled = true; nameInput.disabled = true; carps.disabled = true; loc.disabled = true; }
+      // Injection site: a dropdown now (PROVISIONAL list until MMW's arrives).
+      // It starts blank, so the empty row offered on a new chart is not saved.
+      // A site typed as free text before v0.0.15 ("buccal", "#14 lingual") is
+      // offered as its own "(recorded)" choice, selected, so it reads as it was
+      // written and survives a re-save instead of silently becoming blank. A
+      // site retired from the list when MMW's own arrives is offered only on a
+      // row that already records it, by its name, like a retired agent.
+      const site = a.location || '';
+      const knownSite = ANES_SITES.some((s) => s.key === site);
+      const loc = el('select', { class: 'input input--sm' }, [
+        el('option', { value: '' }, ['—']),
+        site && !knownSite ? el('option', { value: site, selected: true }, [`(recorded) ${site}`]) : null,
+        ...ANES_SITES.filter((s) => !s.retired || s.key === site)
+          .map((s) => el('option', { value: s.key, selected: s.key === site }, [s.en])),
+      ]);
+      const locOther = el('input', { class: 'input input--sm', placeholder: 'Describe the site', value: a.location_other || '', style: site === 'other' ? '' : 'display:none' });
+      loc.addEventListener('change', () => { locOther.style.display = loc.value === 'other' ? '' : 'none'; });
+      if (locked) { agentSel.disabled = true; nameInput.disabled = true; carps.disabled = true; loc.disabled = true; locOther.disabled = true; }
       const fieldCol = (label, node) => el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, [label]), node]);
-      const row = el('div', { class: 'anes-admin-row', style: 'display:grid;grid-template-columns:1.3fr 76px 168px 1.1fr auto;gap:8px;align-items:end;padding:8px;border:var(--border-line);border-radius:var(--radius-sm);background:var(--surface);margin-bottom:7px' }, [
+      const row = el('div', { class: 'anes-admin-row', style: 'display:grid;grid-template-columns:1.2fr 76px 168px 1.4fr auto;gap:8px;align-items:end;padding:8px;border:var(--border-line);border-radius:var(--radius-sm);background:var(--surface);margin-bottom:7px' }, [
         el('label', { class: 'field', style: 'margin:0' }, [
           el('span', { class: 'field-label' }, ['Agent']),
           el('div', { style: 'display:flex;flex-direction:column;gap:4px' }, [agentSel, nameInput]),
         ]),
         fieldCol('Carps', carps),
         fieldCol('Tooth #', toothF.node),
-        fieldCol('Location', loc),
+        el('label', { class: 'field', style: 'margin:0' }, [
+          el('span', { class: 'field-label' }, ['Injection site']),
+          el('div', { style: 'display:flex;flex-direction:column;gap:4px' }, [loc, locOther]),
+        ]),
         locked ? el('span') : iconBtn('x', () => { row.remove(); }),
       ]);
       row._get = () => {
         const ag = agentSel.value;
-        return { agent: ag, carps: carps.value.trim(), location: loc.value.trim(), tooth: toothF.input.value.trim(), name: ag === 'other' ? nameInput.value.trim() : '' };
+        return {
+          agent: ag, carps: carps.value.trim(), location: loc.value,
+          location_other: loc.value === 'other' ? locOther.value.trim() : '',
+          tooth: toothF.input.value.trim(), name: ag === 'other' ? nameInput.value.trim() : '',
+        };
       };
       anesRows.append(row);
     }
     anesFromStored(tx.anesthetic).forEach((a) => addAnes(a));
-    if (!anesRows.children.length && !locked) addAnes({ agent: 'lidocaine' });
+    if (!anesRows.children.length && !locked) addAnes({});
 
-    /* ---------- Restorative & Services ----------
-       The two blocks on the printed Patient Record that the app had no home for,
-       so everything here used to be typed into "Other procedure" as prose and
-       could not be counted in a report. Field names and options follow the form
-       exactly, so a volunteer working from paper finds them where they expect. */
+    /* ---------- Restorative ----------
+       A block on the printed Patient Record that the app had no home for, so
+       it used to be typed into "Other procedure" as prose and could not be
+       counted in a report. Field names and options follow the form exactly, so
+       a volunteer working from paper finds them where they expect. */
     const rst = tx.restorative || {};
-    const svc = tx.services || {};
 
     const chk = (on, label, onChange) => {
       const box = el('input', { type: 'checkbox', checked: !!on, disabled: locked });
@@ -383,10 +467,6 @@ export function renderProvider(ctx, params = {}) {
       denture: { on: !!(rst.denture && rst.denture.on), kind: (rst.denture || {}).kind || '', action: (rst.denture || {}).action || '' },
       bridge: { on: !!(rst.bridge && rst.bridge.on), action: (rst.bridge || {}).action || '' },
     };
-    const sState = {
-      alveoplasty: svc.alveoplasty || '', buccal: svc.buccal || '',
-      irm: svc.irm || '', pulpotomy: svc.pulpotomy || '',
-    };
 
     const cbTooth = toothIn(rState.core_buildup.tooth);
     cbTooth.addEventListener('input', () => { rState.core_buildup.tooth = cbTooth.value.trim(); });
@@ -414,18 +494,64 @@ export function renderProvider(ctx, params = {}) {
       ]),
     ]);
 
-    const svcInputs = {};
-    const servicesCard = el('div', { class: 'card' }, [
-      el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Services']),
-      el('p', { class: 'subtle small', style: 'margin:-6px 0 12px' }, ['Record the number performed, as on the paper record.']),
-      el('div', { class: 'proc-grid proc-grid--2' }, [
-        ...[['alveoplasty', 'Alveoplasty'], ['irm', 'IRM'], ['buccal', 'Buccal'], ['pulpotomy', 'Pulpotomy']].map(([k, label]) => {
-          const inp = el('input', { class: 'input input--sm svc-in', type: 'number', min: '0', max: '99', value: sState[k], disabled: locked, placeholder: '0' });
-          inp.addEventListener('input', () => { sState[k] = inp.value.trim(); });
-          svcInputs[k] = inp;
-          return el('label', { class: 'proc-row' }, [el('span', { class: 'proc-label' }, [label]), inp]);
-        }),
+    /* ---------- Referral (replaces the Services card, v0.0.15) ----------
+       Where the dentist sends the patient for care this clinic cannot give.
+       Stored as treatments.referral_out — never "referral", which has always
+       meant how the patient heard about MMW. Several destinations can be
+       ticked; urgency is a single choice. The Services counts (alveoplasty,
+       IRM, buccal, pulpotomy) are no longer collected, but a record that has
+       them keeps them: they are shown read-only here and saveTreatment leaves
+       the stored values alone, because this screen no longer sends them. */
+    const ro = tx.referral_out || {};
+    const storedTo = Array.isArray(ro.to) ? ro.to : [];
+    // The list is provisional. A destination retired from it is offered only on
+    // a record that already names it, and a key this build does not know (one
+    // a newer laptop added) is shown as recorded — both selected, so the
+    // dentist can see them and untick them, rather than being saved back
+    // unseen. "Other" stays last.
+    const refItems = [
+      ...DENTAL_REFERRAL_TO.filter((d) => d.key !== 'other' && (!d.retired || storedTo.includes(d.key))).map((d) => ({ key: d.key, label: d.en })),
+      ...storedTo.filter((k) => !DENTAL_REFERRAL_TO.some((d) => d.key === k)).map((k) => ({ key: k, label: `(recorded) ${k}` })),
+      ...DENTAL_REFERRAL_TO.filter((d) => d.key === 'other').map((d) => ({ key: d.key, label: d.en })),
+    ];
+    const refTo = chipGrid('Refer to', refItems, { selected: storedTo });
+    const refOther = el('input', { class: 'input', placeholder: 'Name the clinic or provider', value: ro.to_other || '' });
+    const refOtherField = el('label', { class: 'field', style: (ro.to || []).includes('other') ? '' : 'display:none' }, [
+      el('span', { class: 'field-label' }, ['Other destination']), refOther,
+    ]);
+    // The chip grid toggles on its own click; this runs after it, on the bubble.
+    refTo.node.addEventListener('click', () => { refOtherField.style.display = refTo.get().includes('other') ? '' : 'none'; });
+    const refUrgency = el('select', { class: 'input select' }, [
+      el('option', { value: '' }, ['—']),
+      ...REFERRAL_URGENCY.map((u) => el('option', { value: u.key, selected: ro.urgency === u.key }, [u.en])),
+    ]);
+    const refTooth = el('input', { class: 'input input--sm tooth-in', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: ro.tooth || '' });
+    const refReason = el('textarea', { class: 'input textarea', rows: 2, placeholder: 'Why the patient is being referred' }, [ro.reason || '']);
+    if (locked) {
+      refTo.node.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      [refOther, refUrgency, refTooth, refReason].forEach((n) => { n.disabled = true; });
+    }
+    const svc = tx.services || {};
+    const SERVICE_LABELS = [['alveoplasty', 'Alveoplasty'], ['irm', 'IRM'], ['buccal', 'Buccal'], ['pulpotomy', 'Pulpotomy']];
+    const legacyServices = SERVICE_LABELS.filter(([k]) => Number(svc[k]) > 0).map(([k, label]) => `${label} × ${Number(svc[k])}`);
+    const referralCard = el('div', { class: 'card' }, [
+      el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Referral']),
+      el('p', { class: 'subtle small', style: 'margin:-6px 0 12px' }, ['Record where this patient is being sent for care this clinic cannot give today.']),
+      refTo.node,
+      refOtherField,
+      el('div', { class: 'field-row' }, [
+        el('label', { class: 'field', style: 'flex:1;margin:0' }, [el('span', { class: 'field-label' }, ['Urgency']), refUrgency]),
+        el('label', { class: 'field', style: 'margin:0;max-width:120px' }, [el('span', { class: 'field-label' }, ['Tooth #']), refTooth]),
       ]),
+      el('label', { class: 'field', style: 'margin-top:10px' }, [el('span', { class: 'field-label' }, ['Reason']), refReason]),
+      // The retired triage-station checklist had a "referral" tick. It was a
+      // plan, not a referral, so it is pointed out rather than converted.
+      tr.checklist && tr.checklist.referral
+        ? el('p', { class: 'subtle small', style: 'margin:8px 0 0' }, [icon('info', { size: 12 }), ' The earlier triage checklist marked this patient for referral (recorded before v0.0.15).'])
+        : null,
+      legacyServices.length
+        ? el('p', { class: 'subtle small', style: 'margin:8px 0 0' }, [`Services recorded earlier (no longer collected): ${legacyServices.join(' · ')}`])
+        : null,
     ]);
 
     /* ---------- Notes ---------- */
@@ -548,7 +674,9 @@ export function renderProvider(ctx, params = {}) {
           try {
             const jpeg = await toJpegDataUrl(dataUrl);
             const tooth = mode === 'tooth' ? toothInput.value.trim() : '';
-            await api.addXray({ patientId: id, image_png: jpeg, note: label() + '.jpg', tooth, station: station.input ? station.input.value.trim() : '' });
+            // No station: the old "X-ray station #" field is gone, and the new
+            // count must never be read back as a station on the image caption.
+            await api.addXray({ patientId: id, image_png: jpeg, note: label() + '.jpg', tooth, station: '' });
             xrays = await api.listXrays(id); renderGallery();
             let removed = false;
             if (srcPath) { try { await api.deleteDiskFile(srcPath); removed = true; } catch (_) { /* best-effort */ } }
@@ -782,14 +910,27 @@ export function renderProvider(ctx, params = {}) {
       const anesthetic = Array.from(anesRows.children)
         .map((r) => r._get())
         .filter((a) => a.carps || a.location || a.tooth || a.name)
-        .map((a) => ({ agent: a.agent, carps: a.carps, location: a.location, tooth: a.tooth, ...(a.name ? { name: a.name } : {}) }));
+        .map((a) => ({
+          agent: a.agent, carps: a.carps, location: a.location, tooth: a.tooth,
+          ...(a.location_other ? { location_other: a.location_other } : {}),
+          ...(a.name ? { name: a.name } : {}),
+        }));
+      const refDest = refTo.get();
       return {
         fillings: Array.from(fillingRows.children).map((r) => r._get()).filter((x) => x.tooth),
         extractions,
         cleaning: { ...cleanState, quad_detail: quadDetail.value.trim() },
         anesthetic,
         restorative: rState,
-        services: sState,
+        // services is deliberately not sent: the card is retired, and a key
+        // left out is kept as stored (see saveTreatment).
+        referral_out: {
+          to: refDest,
+          to_other: refDest.includes('other') ? refOther.value.trim() : '',
+          urgency: refUrgency.value,
+          tooth: refTooth.value.trim(),
+          reason: refReason.value.trim(),
+        },
         other_procedures: otherProc.get(),
         clinical_notes: dentalNotes.get(),
         provider_name: providerName.value.trim(),
@@ -807,7 +948,10 @@ export function renderProvider(ctx, params = {}) {
         teeth_notes: odo.getNotes(),
         notes: triageNotes.get(),
         xray_count: xrays.length,
-        xray_station: station.get(),
+        xrays_taken: xraysTaken.value.trim(),
+        // Legacy only: carried through untouched so a re-save of an older visit
+        // does not blank the station it recorded (saveTriage writes every column).
+        xray_station: tr.xray_station || null,
         assigned_to: tr.assigned_to || null,
         status: (p.triage && p.triage.status) || 'ready',
         triage_signature: tr.triage_signature || null,
@@ -818,13 +962,40 @@ export function renderProvider(ctx, params = {}) {
     // v1.2.1: mode is false (save progress), 'complete' (mark the visit done and
     // send the patient onward — record STAYS editable), or 'lock' (optional
     // finalize that locks the record read-only). Nobody has to lock to move a
-    // patient through to check-out.
+    // patient through to check-out. v0.0.15: 'waiting' saves the same way and
+    // parks the patient in Treatment Waiting for a treatment chair.
     async function save(mode) {
       // Gate: the dentist can't document treatment until the general consent is on
       // file. Every kiosk check-in already captures it; if it's somehow missing,
       // the Consents panel above lets the patient complete it right here first.
       if (!(p.consents || []).some((c) => c.type === 'general')) {
         toast('The general consent must be completed before documenting treatment — use the Consents panel above.', 'error');
+        return;
+      }
+      // Checked here so the dentist is told at once, rather than by a refusal
+      // after the rest of the chart has been sent.
+      const taken = xraysTaken.value.trim();
+      if (taken && !(/^\d+$/.test(taken) && Number(taken) <= 99)) {
+        toast('Number of X-rays taken must be a whole number from 0 to 99.', 'error');
+        xraysTaken.focus();
+        return;
+      }
+      // A referral is where the patient is sent. Urgency, a tooth or a reason
+      // with nowhere ticked is not one — no count, list or printed record would
+      // show it — so the dentist is asked where, rather than it being kept out
+      // of sight.
+      const refDest = refTo.get();
+      if (!refDest.length && (refUrgency.value || refTooth.value.trim() || refReason.value.trim())) {
+        toast(t('common.required') + ': Refer to', 'error');
+        const firstChip = refTo.node.querySelector('button');
+        if (firstChip) firstChip.focus();
+        return;
+      }
+      // "Other" is a destination only once it is named: ticked alone and left
+      // blank it counted as a referral and printed as "Referred to: Other".
+      if (refDest.includes('other') && !refOther.value.trim()) {
+        toast(t('common.required') + ': Other destination', 'error');
+        refOther.focus();
         return;
       }
       const payload = collectTreatment();
@@ -842,9 +1013,14 @@ export function renderProvider(ctx, params = {}) {
         if (!ok) return;
       }
       try {
+        // Order matters: the treatment save is what sets the patient's status
+        // (in treatment, waiting for a chair, completed), so it runs last.
         await api.saveTriage(id, collectTriage());
         await api.saveTreatment(id, payload, mode);
-        toast(mode === 'lock' ? 'Record signed off and locked' : mode === 'complete' ? 'Visit complete — sent to check-out' : 'Progress saved', 'success');
+        toast(mode === 'lock' ? 'Record signed off and locked'
+          : mode === 'complete' ? 'Visit complete — sent to check-out'
+            : mode === 'waiting' ? 'Moved to Treatment Waiting — the patient is in the queue for a treatment chair'
+              : 'Progress saved', 'success');
         if (mode) ctx.navigate('provider'); else detail(id);
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -910,6 +1086,10 @@ export function renderProvider(ctx, params = {}) {
       vitalsStrip(),
       flags.length ? el('div', { class: 'banner banner--alert' }, [icon('flag', { size: 16 }), 'Medical flags: ' + flags.join(' · ')]) : null,
       locked ? el('div', { class: 'banner banner--locked' }, [icon('lock', { size: 16 }), 'This record is signed off and locked. View or export below.']) : null,
+      // Parked for a treatment chair. Said plainly, because the next save here
+      // is what takes the patient out of that queue and into treatment.
+      !locked && p.status === 'treatment_waiting' ? el('div', { class: 'banner banner--info' }, [icon('calendar', { size: 16 }),
+        `Treatment waiting — examined at Dental Triage${p.treatment_waiting_by_name ? ' by ' + p.treatment_waiting_by_name : ''}${tr.treatment_waiting_at ? ' · ' + fmtWhen(tr.treatment_waiting_at) : ''}. Saving here takes the patient into treatment.`]) : null,
 
       // F20: accountability — who triaged / took vitals / signed off, with timestamps.
       accountabilityCard(p, tr, tx),
@@ -928,11 +1108,12 @@ export function renderProvider(ctx, params = {}) {
       // consent (esp. oral surgery, with tooth numbers) completed at the chair.
       consentsPanel(),
 
-      // Visit bar (paper top row) — the dentist is the planning hub now.
+      // Visit bar (paper top row) — Dental Triage is the planning hub now.
       panel('clipboard', 'Visit & treatment plan',
         el('div', { class: 'field-row', style: 'margin-bottom:10px' }, [
-          el('div', {}, [el('span', { class: 'field-label' }, ['Total x-rays']), el('div', { style: 'padding-top:6px' }, [xrayCountEl])]),
-          el('label', { class: 'field', style: 'margin:0;max-width:130px' }, [el('span', { class: 'field-label' }, ['X-ray station #']), station.node]),
+          el('label', { class: 'field', style: 'margin:0;max-width:190px' }, [el('span', { class: 'field-label' }, ['Number of X-rays taken']), xraysTaken]),
+          el('div', {}, [el('span', { class: 'field-label' }, ['Images uploaded']), el('div', { style: 'padding-top:6px' }, [xrayCountEl])]),
+          tr.xray_station ? el('div', {}, [el('span', { class: 'field-label' }, ['X-ray station (recorded earlier)']), el('div', { style: 'padding-top:6px' }, [String(tr.xray_station)])]) : null,
         ]),
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Chief complaint']), complaint.node]),
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Triage notes']), triageNotes.node]),
@@ -958,16 +1139,16 @@ export function renderProvider(ctx, params = {}) {
           el('label', { class: 'field', style: 'margin:0;max-width:90px' }, [el('span', { class: 'field-label' }, ['Tooth #']), extOtherTooth]),
         ])),
 
-      // Restorative and Services sit between the chairside work and the
-      // anaesthetic, mirroring the order of the printed Patient Record.
+      // Restorative, then Referral where Services used to be, between the
+      // chairside work and the anaesthetic — the order of the printed record.
       restorativeCard,
-      servicesCard,
+      referralCard,
 
       // Anesthetic supports the extractions/fillings above — kept adjacent.
       panel('syringe', 'Anesthetic administered',
-        el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Record each administration — agent, carpules, tooth and location. Add a row per site (e.g. #14 buccal, #30 lingual).']),
+        el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Record each administration — agent, carpules, tooth and injection site. Add a row per site (e.g. #14 buccal infiltration, #30 IANB).']),
         anesRows,
-        locked ? null : softBtn('plus', 'Add anesthetic', () => addAnes({ agent: 'lidocaine' }))),
+        locked ? null : softBtn('plus', 'Add anesthetic', () => addAnes({}))),
 
       // DEMOTED: cleaning belongs to the hygienist. Rendered inside a lightly
       // styled <details> that is CLOSED by default, so it never competes with
@@ -1021,6 +1202,12 @@ export function renderProvider(ctx, params = {}) {
           : el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
               // ONE clear primary action for the station; everything else is secondary.
               primaryBtn('checkCircle', 'Mark visit complete', () => save('complete')),
+              // Dental Triage has examined the patient and hands them on to a
+              // treatment chair. Hidden once they are already waiting — saving
+              // progress is then the treating dentist taking them in.
+              p.status !== 'treatment_waiting'
+                ? el('button', { class: 'btn btn--soft btn--block', type: 'button', onClick: () => save('waiting') }, [icon('calendar', { size: 16 }), 'Move Patient to Treatment Waiting'])
+                : null,
               el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save progress']),
               // Less-common actions tucked away so the screen isn't a wall of buttons.
               el('details', { class: 'collapse', style: 'margin-top:8px' }, [
@@ -1069,6 +1256,7 @@ function accountabilityCard(p, tr, tx) {
 
   line('user', 'Triaged by', p.triaged_by_name, tr.triaged_at);
   line('syringe', 'Vitals by', p.vitals_by_name, tr.vitals_at);
+  line('calendar', 'Moved to Treatment Waiting by', p.treatment_waiting_by_name, tr.treatment_waiting_at);
   line('pen', 'Signed off by', p.completed_by_name, tx.completed_at);
   if (p.dismissed_by_name || p.dismissed_at) line('checkCircle', 'Checked out by', p.dismissed_by_name, p.dismissed_at);
 
@@ -1100,12 +1288,26 @@ function toggleChip(label, on, cb, disabled) {
   else b.addEventListener('click', () => { const now = !b.classList.contains('chip-btn--on'); b.classList.toggle('chip-btn--on', now); cb(now); });
   return b;
 }
+// The keys of a stored row this screen does not edit, to be saved back as they
+// were (a shape an older or newer build wrote), minus the ones it rebuilds.
+function legacyKeys(row, rebuilt) {
+  const out = {};
+  Object.keys(row || {}).forEach((k) => { if (!rebuilt.includes(k) && row[k] !== undefined) out[k] = row[k]; });
+  return out;
+}
 function iconBtn(name, onClick) { return el('button', { class: 'btn btn--ghost btn--sm btn--icon', type: 'button', onClick }, [icon(name, { size: 15 })]); }
 function ghostBtn(name, label, onClick) { return el('button', { class: 'btn btn--ghost btn--sm', onClick }, [icon(name, { size: 15 }), label]); }
 function softBtn(name, label, onClick) { return el('button', { class: 'btn btn--soft btn--sm', type: 'button', onClick }, [icon(name, { size: 15 }), label]); }
 function primaryBtn(name, label, onClick) { return el('button', { class: 'btn btn--primary btn--block', onClick }, [icon(name, { size: 16 }), label]); }
 function backBtn(onClick) { return el('button', { class: 'btn btn--ghost btn--sm', onClick }, [icon('back', { size: 15 }), t('common.back')]); }
 function chevronBtn(label, onClick) { return el('button', { class: 'btn btn--primary btn--sm', onClick }, [label, icon('chevron', { size: 15 })]); }
+// "waiting 25m" / "waiting 1h 5m", from when the patient was parked.
+function waitedFor(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms)) return '';
+  const m = Math.max(0, Math.round(ms / 60000));
+  return `waiting ${m < 60 ? m + 'm' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm'}`;
+}
 function flagDot(n) { return el('span', { class: 'flag-dot' }, [icon('flag', { size: 13 }), String(n)]); }
 
 // Seed the odontogram from existing treatment + triage so the mouth reflects
@@ -1114,7 +1316,7 @@ function initialTeeth(tx, tr) {
   const data = {};
   (tx.fillings || []).forEach((f) => { if (f.tooth) data[f.tooth] = { tx: 'filling', note: f.note || '' }; });
   (tx.extractions || []).forEach((x) => { if (x.tooth && !x.other) data[x.tooth] = { tx: 'extraction', note: x.note || '' }; });
-  ((tx.cleaning && tx.cleaning.teeth) || []).forEach((id) => { if (!data[id]) data[id] = { tx: 'cleaning', note: '' }; });
+  toothList(tx.cleaning && tx.cleaning.teeth).forEach((id) => { if (!data[id]) data[id] = { tx: 'cleaning', note: '' }; });
   (tr.teeth || []).forEach((id) => { if (!data[id]) data[id] = { tx: null, note: (tr.teeth_notes && tr.teeth_notes[id]) || '' }; });
   Object.entries(tr.teeth_notes || {}).forEach(([id, note]) => { if (data[id] && !data[id].note) data[id].note = note; });
   return data;
