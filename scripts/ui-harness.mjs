@@ -4683,6 +4683,16 @@ async function main() {
     log(usbAfter.treatment.locked && usbAfter.medical_history.condition_answers.hiv === 'no'
       && db.patientAudit(cmp.id).some((a) => a.action === 'usb_import' && /skipped/.test(a.detail)),
       'lock: a patient\'s USB file cannot rewrite a record signed off here since it was written — skipped, and the log says so');
+    // A locked file arriving on a laptop that has no copy keeps its own
+    // sign-off — and a file from before the lock trail gets the one lock it
+    // evidences, never a trail naming whoever ran the import.
+    const src = db.getPatient(cmp.id);
+    const nuNew = db.importPatientFromPortable(currentUser, { ...src, id: undefined, first_name: 'Porta', last_name: 'Newfile', dob: '1971-01-01' });
+    const oldTx = { ...src.treatment, locked_at: undefined, locked_by_name: undefined, lock_history: undefined };
+    const nuOld = db.importPatientFromPortable(currentUser, { ...src, lock: undefined, id: undefined, first_name: 'Porta', last_name: 'Oldfile', dob: '1972-01-01', completed_by_name: 'Dr File', treatment: oldTx });
+    log(nuNew.treatment.locked && nuNew.lock.locked_by_name === 'Administrator' && JSON.stringify(nuNew.lock.history) === JSON.stringify(src.lock.history)
+      && nuOld.treatment.locked && nuOld.lock.locked_by_name === 'Dr File' && nuOld.lock.history.length === 1 && nuOld.lock.history[0].by === 'Dr File',
+      'lock: a locked USB file keeps who locked it; an older file without the trail is locked by its own sign-off, not by the importer');
 
     /* ---- routing names its router ---- */
     const rtP = mkC('Rita', 'Route', { vitals: true });

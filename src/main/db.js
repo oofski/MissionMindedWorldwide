@@ -2119,9 +2119,14 @@ function importPatientFromPortable(actor, portable) {
     // import. A file from before those existed falls back to its completion.
     if (t.locked) {
       const lk = portable.lock || {};
-      const hist = Array.isArray(t.lock_history) && t.lock_history.length ? JSON.stringify(t.lock_history) : null;
-      db.prepare('UPDATE treatments SET locked_at = COALESCE(?, locked_at), locked_by_name = COALESCE(?, locked_by_name), lock_history = COALESCE(?, lock_history) WHERE patient_id = ?')
-        .run(t.locked_at || lk.locked_at || t.completed_at || null, t.locked_by_name || lk.locked_by_name || portable.completed_by_name || null, hist, pid);
+      const lockedAt = t.locked_at || lk.locked_at || t.completed_at || null;
+      const lockedBy = t.locked_by_name || lk.locked_by_name || portable.completed_by_name || null;
+      // The file's own trail; an older file without one gets the single lock it
+      // does evidence, rather than one naming whoever ran the import.
+      const hist = Array.isArray(t.lock_history) && t.lock_history.length
+        ? t.lock_history : [{ action: 'lock', at: lockedAt, by: lockedBy }];
+      db.prepare('UPDATE treatments SET locked_at = COALESCE(?, locked_at), locked_by_name = COALESCE(?, locked_by_name), lock_history = ? WHERE patient_id = ?')
+        .run(lockedAt, lockedBy, JSON.stringify(hist), pid);
     }
   } else if (portable.status === 'treatment_waiting') {
     // Parked for a chair with nothing charted yet — an admin can move a patient
