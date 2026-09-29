@@ -559,7 +559,7 @@ const en = {
     ],
     postOpTitle: 'Post-Operative Instructions',
     postOp: 'Bite firmly on gauze for 30–45 minutes. Do not rinse, spit, smoke, or use a straw for 24 hours. Eat soft foods and avoid the surgical area. Mild swelling and bleeding are normal. Take medications as directed.',
-    emergency: 'For after-hours emergencies call 541-556-5902.',
+    emergency: 'For after-hours emergencies call (951) 317-4968.',
     agree: 'I have read and understand the above, and I consent.',
   },
 };
@@ -649,7 +649,7 @@ const es = {
     ],
     postOpTitle: 'Instrucciones Postoperatorias',
     postOp: 'Muerda firmemente la gasa durante 30–45 minutos. No se enjuague, escupa, fume ni use pajilla por 24 horas. Coma alimentos blandos y evite el área quirúrgica. Una hinchazón y sangrado leves son normales. Tome los medicamentos según las indicaciones.',
-    emergency: 'Para emergencias fuera de horario llame al 541-556-5902.',
+    emergency: 'Para emergencias fuera de horario llame al (951) 317-4968.',
     agree: 'He leído y entiendo lo anterior, y doy mi consentimiento.',
   },
 };
@@ -690,7 +690,7 @@ const bzj = {
     generalIntro: "Pleez reed evri paat. Yu ku tap 'Reed loud' fi yeer it eena yu langwij.",
     agree: 'Ah reed ahn andastan di tap, ahn ah gri.',
     surgeryTitle: 'Oral Serjari / Ekstrakshan Kansent',
-    emergency: 'Fi emerjensi afta owaz kaal 541-556-5902.',
+    emergency: 'Fi emerjensi afta owaz kaal (951) 317-4968.',
   },
 };
 
@@ -729,7 +729,7 @@ const nya = {
     generalIntro: "Chonde werengani gawo lililonse. Mukhoza kukanikiza 'Werengani mokweza' kuti mumve mu chilankhulo chanu.",
     agree: 'Ndawerenga ndipo ndamvetsa zomwe zili pamwamba, ndipo ndavomera.',
     surgeryTitle: 'Chilolezo cha Opaleshoni ya Mkamwa / Kuchotsa Dzino',
-    emergency: 'Pa zadzidzidzi kunja kwa nthawi imbani 541-556-5902.',
+    emergency: 'Pa zadzidzidzi kunja kwa nthawi imbani (951) 317-4968.',
   },
 };
 
@@ -785,7 +785,7 @@ const ru = {
     agree: 'Я прочитал(а) и понимаю изложенное выше и даю согласие.',
     surgeryTitle: 'Согласие на хирургию / удаление зуба',
     surgeryIntro: 'Это дополнительное согласие необходимо, так как сегодня может быть проведено удаление.',
-    emergency: 'При неотложной ситуации вне рабочих часов звоните 541-556-5902.',
+    emergency: 'При неотложной ситуации вне рабочих часов звоните (951) 317-4968.',
   },
 };
 

@@ -4569,7 +4569,20 @@ async function main() {
     log(allText.every((x) => !/\{(?!phone\}|to\}|tooth\}|reason\})[^}]*\}/.test(x)),
       'after-care: the templates use only the placeholders the page knows how to fill');
 
+    // MMW's one number, everywhere a patient could read it.
     const PHONE = '(951) 317-4968';
+    const { CATALOG: catalog } = await import('../src/renderer/i18n/strings.js');
+    log(ac.CONTACT.phone === PHONE && readSrcA('../src/main/main.js').includes(`Telephone: ${PHONE}`)
+      && readSrcA('../cloud/worker.js').includes(PHONE) && catalog.en.consent.oralSurgeryFull.join(' ').includes(PHONE),
+      'after-care: the sheet prints the same MMW number as the About box, the consent and the online form');
+    log(['en', 'es', 'ru', 'bzj', 'nya'].every((l) => String((catalog[l] && catalog[l].consent && catalog[l].consent.emergency) || '').includes(PHONE)),
+      'the consent\'s emergency line gives MMW\'s number in all five languages');
+    const walk = (dir) => fsA.readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
+      .flatMap((d) => (d.isDirectory() ? walk(`${dir}${d.name}/`) : /\.(js|mjs|html|css)$/.test(d.name) ? [`${dir}${d.name}`] : []));
+    const stale = [...walk('../src/'), ...walk('../cloud/')].filter((f) => /541[-. ]?556[-. ]?5902/.test(readSrcA(f)));
+    log(stale.length === 0, `the stale Oregon number is gone from every screen and form${stale.length ? ' — still in ' + stale.join(', ') : ''}`);
+    log(readSrcA('../src/renderer/js/views/records.js').includes(`el('b', {}, ['${PHONE}'])`),
+      'the Records "screen display" patients photograph shows MMW\'s number');
 
     // What was performed decides the sections.
     log(same(keysOf({ extractions: [{ tooth: '30', types: ['simple'] }] }), ['extraction']),

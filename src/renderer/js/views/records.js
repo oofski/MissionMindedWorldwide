@@ -309,7 +309,12 @@ export function renderRecords(ctx, params = {}) {
       el('div', { class: 'sd-row' }, [el('span', {}, ['DOB']), el('b', {}, [p.dob || '—'])]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['Event']), el('b', {}, [p.event ? p.event.name : '—'])]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['Treatment']), el('b', {}, [treatmentSummary(p)])]),
-      el('div', { class: 'sd-row' }, [el('span', {}, ['Emergency']), el('b', {}, ['541-556-5902'])]),
+      // MMW's number — the one the after-care sheet prints (src/main/aftercare.js
+      // CONTACT) and the harness pins. Until v0.0.15 this showed an Oregon
+      // number left over from the clinic the app was first built for. It is a
+      // message line, not an emergency service, so it is labelled for what it
+      // is; the after-care sheet sends a true emergency to the ER.
+      el('div', { class: 'sd-row' }, [el('span', {}, ['Problems after your visit']), el('b', {}, ['(951) 317-4968'])]),
       el('div', { class: 'sd-hint' }, ['Take a photo of this screen with your phone']),
     ]);
     modal({ title: '', body: big, confirmText: t('common.close') });
