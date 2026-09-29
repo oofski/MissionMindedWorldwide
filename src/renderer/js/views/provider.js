@@ -1,5 +1,5 @@
 import { el, clear, mount, toast, modal } from '../dom.js';
-import { t, conditions, allergies, ANESTHETICS } from '../i18n.js';
+import { t, ANESTHETICS } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { SignaturePad } from '../components/signature.js';
