@@ -1,4 +1,4 @@
-import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE, US_STATES, MEDICATIONS, ANESTHETICS } from '../i18n/strings.js';
+import { CATALOG, LANGUAGES, CONDITIONS, ALLERGIES, REFERRALS, VISIT_TYPES, PRIOR_DENTIST, routeForVisitType, RACE, US_STATES, MEDICATIONS, ANESTHETICS, MED_CHECKLIST, SURGERY_SITES, DENTAL_QUESTIONS, DENTAL_LEGACY } from '../i18n/strings.js';
 
 let lang = 'en';
 
@@ -58,13 +58,48 @@ export function priorDentistLabel(value) {
   return hit ? (hit[lang] || hit.en) : String(value);
 }
 
+// `intake` (default true) marks what is ASKED at check-in; an entry with
+// intake:false is retired but still resolves for DISPLAY on existing records, so
+// every screen that reads these lists sees the whole catalogue and only the
+// forms filter it down.
 export function conditions() {
-  return CONDITIONS.map((c) => ({ key: c.key, flag: c.flag, label: c[lang] || c.en }));
+  return CONDITIONS.map((c) => ({ key: c.key, flag: c.flag, label: c[lang] || c.en, intake: c.intake !== false }));
 }
 export function allergies() {
-  // `intake` (default true) marks which allergies are offered at check-in; a
-  // legacy entry with intake:false still resolves for DISPLAY on existing records.
   return ALLERGIES.map((a) => ({ key: a.key, label: a[lang] || a.en, intake: a.intake !== false }));
+}
+// A stored key the catalogue does not know — written by a newer build, or by an
+// older one before a rename — is shown title-cased rather than dropped. A logged
+// allergy that silently vanished from the screen is the one failure this list
+// must never have.
+const titleCase = (k) => String(k || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+export function conditionLabel(key) {
+  const c = CONDITIONS.find((x) => x.key === key);
+  return c ? (c[lang] || c.en) : titleCase(key);
+}
+export function allergyLabel(key) {
+  const a = ALLERGIES.find((x) => x.key === key);
+  return a ? (a[lang] || a.en) : titleCase(key);
+}
+// Dr. Trinh's medication checklist. `name` is the canonical English name that is
+// STORED (the blood-thinner rules match on it); `label` is what the patient reads.
+export function medChecklist() {
+  return MED_CHECKLIST.map((m) => ({ key: m.key, name: m.en, label: m[lang] || m.en }));
+}
+export function surgerySites() {
+  return SURGERY_SITES.map((s) => ({ key: s.key, label: s[lang] || s.en }));
+}
+export function dentalQuestions() {
+  return DENTAL_QUESTIONS.map((q) => ({ key: q.key, label: q[lang] || q.en, short: q.short }));
+}
+// Yes / No / Unsure / Not applicable in the current language, for any answer
+// the intake forms store. Anything else passes through as given.
+export function answerLabel(v) {
+  if (v === 'yes') return t('common.yes');
+  if (v === 'no') return t('common.no');
+  if (v === 'unsure') return t('intake.unsure');
+  if (v === 'na') return t('intake.pregnancyNA');
+  return v == null ? '' : String(v);
 }
 export function referrals() {
   return REFERRALS.map((r) => ({ key: r.key, label: r[lang] || r.en }));
@@ -115,4 +150,4 @@ export function isSpeaking() {
 }
 
 // Re-exported so views import route derivation from the same place as labels.
-export { routeForVisitType, US_STATES, MEDICATIONS, ANESTHETICS };
+export { routeForVisitType, US_STATES, MEDICATIONS, ANESTHETICS, DENTAL_LEGACY };

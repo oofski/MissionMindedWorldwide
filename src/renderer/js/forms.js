@@ -76,15 +76,22 @@ export function yesNo(label, { value = '', yesText = 'Yes', noText = 'No', naTex
 }
 
 // Multi-select chip grid from [{key,label,flag?}].
+//
+// `set()` repaints the chips as well as the selection, so a caller enforcing a
+// rule ("No medications" clears the rest) cannot leave a chip lit that is no
+// longer selected. Each chip carries its key in data-key for the same reason.
 export function chipGrid(label, items, { selected = [], hint = '' } = {}) {
   const sel = new Set(selected);
   const grid = el('div', { class: 'chip-grid' });
+  const btns = [];
   items.forEach((it) => {
     const btn = el('button', {
       type: 'button',
       class: 'chip-select' + (sel.has(it.key) ? ' chip-select--on' : '') + (it.flag ? ' chip-select--flag' : ''),
+      dataset: { key: it.key },
       onClick: () => { if (sel.has(it.key)) sel.delete(it.key); else sel.add(it.key); btn.classList.toggle('chip-select--on'); },
     }, [it.label]);
+    btns.push([it.key, btn]);
     grid.append(btn);
   });
   const node = el('div', { class: 'field' }, [
@@ -92,5 +99,10 @@ export function chipGrid(label, items, { selected = [], hint = '' } = {}) {
     hint ? el('span', { class: 'field-hint' }, [hint]) : null,
     grid,
   ]);
-  return { node, get: () => Array.from(sel), set: (arr) => { sel.clear(); (arr || []).forEach((k) => sel.add(k)); } };
+  const set = (arr) => {
+    sel.clear();
+    (arr || []).forEach((k) => sel.add(k));
+    btns.forEach(([k, b]) => b.classList.toggle('chip-select--on', sel.has(k)));
+  };
+  return { node, get: () => Array.from(sel), set };
 }
