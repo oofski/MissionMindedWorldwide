@@ -423,7 +423,8 @@ function register(getMainWindow) {
   // (v0.0.15: the hygienist's save, complete, sign-off, and save for a patient
   // waiting for a chair), 'complete' (mark done, no lock),
   // or 'lock'/true — pass it through so each mode reaches the data layer. Same
-  // roles, so no new channel was needed.
+  // roles, so no new channel was needed. data.opened (the chart the station
+  // opened) travels inside data, untouched (see db.saveTreatment).
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
   handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));

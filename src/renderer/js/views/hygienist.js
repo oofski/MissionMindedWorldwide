@@ -25,8 +25,10 @@ const needsDoctor = (cl = {}) => !!(cl.extraction || cl.filling);
 
 // Hygienist view: a focused cleaning station. Patients the EMT station routes
 // to the hygienist land here; the doctor's extraction/filling work stays on
-// the Provider screen. Saving only ever touches the cleaning fields, so the two
-// roles can work the same chart without overwriting each other.
+// the Provider screen. This screen changes only the cleaning and its sign-off;
+// the rest of the chart is sent back as it was opened, and a save is refused
+// if another station has changed the chart since (see `opened` below), so the
+// two roles can work the same chart without overwriting each other.
 export function renderHygienist(ctx, params = {}) {
   const root = el('div', { class: 'view' });
   if (params.id) detail(params.id); else queue();
@@ -98,12 +100,19 @@ export function renderHygienist(ctx, params = {}) {
     // Examined at Dental Triage and waiting for a treatment chair when the
     // chart was opened: the station saves the cleaning and leaves them waiting,
     // and the data layer refuses a sign-off from here (db.hygienistFinalize),
-    // so the buttons say that rather than offering what cannot happen. The
-    // chart does not refresh while open, so that button sends its own intent
-    // ('cleaning_waiting'), which never completes the visit whatever the
-    // patient's status is by the time it is clicked.
+    // so the buttons say that rather than offering what cannot happen. That
+    // button sends its own intent ('cleaning_waiting'), which never completes
+    // the visit.
     const waitingForChair = p.status === 'treatment_waiting';
     const me = store.user || null;
+    // The chart does not refresh while it is open, and every save below
+    // carries the whole chart — the dentist's extractions, anesthetic, notes
+    // and signature as they were when it was opened. So each save says what
+    // was opened, taken now (the patient panel below replaces p when the
+    // history is corrected), and the data layer refuses it, writing nothing,
+    // if another station has changed the chart or moved the patient since
+    // (db.saveTreatment's data.opened).
+    const opened = { status: p.status, chart_rev: tx.chart_rev || null };
 
     // Cleaning state — preserved from any prior save; teeth tracked as a Set.
     const cleanState = { ...(tx.cleaning || {}) };
@@ -146,7 +155,15 @@ export function renderHygienist(ctx, params = {}) {
     }));
 
     const notes = el('textarea', { class: 'input textarea', rows: 2, placeholder: 'Cleaning notes (optional)', disabled: locked ? 'disabled' : null }, [tx.clinical_notes || '']);
-    const hygName = el('input', { class: 'input', placeholder: 'Printed name', value: tx.provider_name || (me ? me.full_name : ''), disabled: locked ? 'disabled' : null });
+    // The printed name is the person saving here — whoever is signed in. It
+    // used to open with the name already on the chart, which for a patient
+    // Dental Triage parked, or one a dentist has in a chair, is the dentist's:
+    // the cleaning was saved, and printed, as the dentist's. Correcting a
+    // finished record (amending) keeps the name it was signed under.
+    const storedName = tx.provider_name || '';
+    const hygName = el('input', { class: 'input', placeholder: 'Printed name',
+      value: ((locked || amending) ? (storedName || (me ? me.full_name : '')) : ((me && me.full_name) || storedName)),
+      disabled: locked ? 'disabled' : null });
     const sigPad = SignaturePad();
 
     // Build a full treatment payload that PRESERVES the doctor's fillings/
@@ -155,6 +172,7 @@ export function renderHygienist(ctx, params = {}) {
     // leaving them out used to wipe the dentist's denture and pulpotomy entries
     // on every save here.
     function buildPayload() {
+      const name = hygName.value.trim() || storedName || null;
       return {
         fillings: tx.fillings || [],
         extractions: tx.extractions || [],
@@ -165,8 +183,11 @@ export function renderHygienist(ctx, params = {}) {
         other_procedures: tx.other_procedures || null,
         cleaning: { ...cleanState, teeth: [...teeth], quad_detail: quadDetail.value.trim() },
         clinical_notes: notes.value.trim() || tx.clinical_notes || null,
-        provider_name: hygName.value.trim() || tx.provider_name || null,
-        provider_signature: sigPad.getDataUrl() || tx.provider_signature || null,
+        provider_name: name,
+        // A signature on file stays only with the name it was given under: the
+        // dentist's signature is not kept under the hygienist's name.
+        provider_signature: sigPad.getDataUrl() || (name === (storedName || null) ? tx.provider_signature : null) || null,
+        opened,
       };
     }
 
@@ -184,8 +205,9 @@ export function renderHygienist(ctx, params = {}) {
     async function save(mode) {
       const payload = buildPayload();
       // Same rule as the dentist: a cleaning record has to name the hygienist
-      // who did it, not just when the record is locked.
-      if ((mode === 'complete' || mode === 'lock' || mode === 'waiting') && !payload.provider_name) {
+      // who did it, not just when the record is locked. The name typed here —
+      // the one already on the chart may be another station's.
+      if ((mode === 'complete' || mode === 'lock' || mode === 'waiting') && !hygName.value.trim()) {
         toast('Enter the hygienist’s printed name — a treatment note has to say who provided the care.', 'error');
         hygName.focus();
         return;
@@ -202,7 +224,6 @@ export function renderHygienist(ctx, params = {}) {
         const saved = await api.saveTreatment(id, payload, { complete: 'cleaning_complete', lock: 'cleaning_lock', waiting: 'cleaning_waiting' }[mode] || 'cleaning');
         const stillWaiting = (mode === 'complete' || mode === 'waiting') && !!saved && saved.status === 'treatment_waiting';
         toast(stillWaiting ? 'Cleaning saved — the patient is still waiting for a treatment chair at Dental Triage, where the visit is completed'
-          : mode === 'waiting' ? 'Cleaning saved — the patient has since been taken to a treatment chair; the treating dentist completes the visit'
           : mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out'
           : amending ? 'Amendment saved — lock the record again when it is correct' : 'Cleaning saved', 'success');
         if (mode) queue(); else detail(id);
