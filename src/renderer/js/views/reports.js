@@ -38,6 +38,15 @@ function relabel(obj, fn) {
   return out;
 }
 /**
+ * Whether a survey summary has a registration-stage outcome worth showing: only
+ * records from the split-survey builds (v0.0.10–v0.0.14) have one. The export
+ * (src/main/reportExport.js) applies the same rule to its "At registration" row.
+ */
+function showRegistrationLine(reg) {
+  return ((Number(reg && reg.completed) || 0) + (Number(reg && reg.declined) || 0)) > 0;
+}
+
+/**
  * The exit survey, as the aggregate a grant return is written from.
  *
  * Counts and percentages only, in the survey's own order, with every question
@@ -56,7 +65,7 @@ function surveyCard(sv) {
   if (!asked) {
     return el('div', { class: 'card' }, [
       el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
-      el('p', { class: 'muted' }, ['No survey answers yet. The household questions are asked at the end of registration; the questions about the visit are asked at check-out.']),
+      el('p', { class: 'muted' }, ['No survey answers yet. The whole survey is asked at check-out, as the patient leaves.']),
     ]);
   }
 
@@ -92,12 +101,15 @@ function surveyCard(sv) {
 
   return el('div', { class: 'card' }, [
     el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Patient exit survey']),
-    // Per stage, because the survey is taken in two sittings and most patients
-    // answer one and not the other. A single pair of totals hid that entirely.
-    el('p', { class: 'awareness' }, [
-      el('strong', {}, ['At registration: ']),
-      `${reg.completed} answered · ${reg.declined} declined · ${reg.not_asked} not asked`,
-    ]),
+    // Since v0.0.15 the whole survey is asked at check-out. From v0.0.10 to
+    // v0.0.14 the household half was asked at registration, and records (or
+    // kept reports) from then still carry that outcome — so the line appears
+    // only when it has something to say. Its "not asked" is left off: for every
+    // patient since v0.0.15 it would count a question nobody was meant to ask.
+    showRegistrationLine(reg) ? el('p', { class: 'awareness' }, [
+      el('strong', {}, ['At registration (before v0.0.15): ']),
+      `${reg.completed} answered · ${reg.declined} declined`,
+    ]) : null,
     el('p', { class: 'awareness' }, [
       el('strong', {}, ['At check-out: ']),
       `${ex.completed} answered · ${ex.declined} declined · ${ex.not_asked} not asked`,

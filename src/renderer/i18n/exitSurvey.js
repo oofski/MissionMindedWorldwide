@@ -19,20 +19,31 @@
 // `value` is an English-ish slug rather than an index so a stored answer stays
 // readable in an export and survives options being reordered.
 
-export const SURVEY_VERSION = 'mmw-exit-v1';
+// v2: the whole survey in one sitting, at check-out (v0.0.15). The questions,
+// keys and values are exactly v1's — Dr. Trinh's survey_v2 differs from the
+// printed v1 only by typos — so the version marks WHERE a row was asked, not a
+// change of wording: a v1 row may have been filled in over two sittings.
+export const SURVEY_VERSION = 'mmw-exit-v2';
 
-// WHEN each section can honestly be asked.
+// The heading of MMW's printed survey, shown on the form the patient is handed.
+export const SURVEY_TITLE = {
+  en: 'Patient Exit Survey for Grant Reporting & Community Impact',
+  es: 'Encuesta de salida del paciente para informes de subvenciones e impacto comunitario',
+};
+
+// WHEN the survey is asked.
 //
-// The survey is split across the visit. Everything about the patient's
-// circumstances — household, income, insurance, housing, barriers to care — is
-// answerable the moment they register, while they are sitting and waiting
-// anyway. Everything about the visit itself can only be answered afterwards:
-// nobody can rate care they have not yet received, and asking them to would
-// produce a grant figure that means nothing.
+// Every question is asked at check-out, in one sitting (Dr. Trinh's punch list
+// of 2026-09-28: "Step 5 — remove entire step", "Checkout — add survey
+// questions"). From v0.0.10 to v0.0.14 the household, income and insurance
+// questions were asked at the end of registration instead; that split was a
+// developer's call, and it is reversed here.
 //
-// Splitting it also makes check-out a twelve-question ask instead of
-// thirty-four, which is the difference between a survey people finish on their
-// way out of the door and one they abandon.
+// 'registration' is kept as a LEGACY stage and asks nothing. Rows filed at
+// registration by v0.0.10–v0.0.14 kiosks — and by an online form still running
+// the old worker until it is re-deployed — keep their registration_status and
+// their answers, and check-out pre-fills those answers for the patient to
+// confirm rather than asking them twice.
 export const STAGES = { REGISTRATION: 'registration', EXIT: 'exit' };
 
 /** Shorthand for the answer sets that repeat across the survey. */
@@ -52,7 +63,7 @@ const PNA = { value: 'pna', en: 'Prefer not to answer', es: 'Prefiero no respond
 export const SECTIONS = [
   {
     key: 'about',
-    stage: 'registration',
+    stage: 'exit',
     en: 'About your visit',
     es: 'Sobre su visita',
     questions: [
@@ -84,7 +95,7 @@ export const SECTIONS = [
   },
   {
     key: 'household',
-    stage: 'registration',
+    stage: 'exit',
     en: 'Your household',
     es: 'Su hogar',
     questions: [
@@ -160,7 +171,7 @@ export const SECTIONS = [
   },
   {
     key: 'work',
-    stage: 'registration',
+    stage: 'exit',
     en: 'Work and income',
     es: 'Trabajo e ingresos',
     questions: [
@@ -234,7 +245,7 @@ export const SECTIONS = [
   },
   {
     key: 'coverage',
-    stage: 'registration',
+    stage: 'exit',
     en: 'Insurance and access to care',
     es: 'Seguro y acceso a la atención',
     questions: [
@@ -479,7 +490,8 @@ export const SECTIONS = [
   },
 ];
 
-/** The sections asked at each point in the visit. */
+/** The sections asked at each point in the visit. Registration asks none
+    since v0.0.15; the export stays so a stage is never an unknown name. */
 export const REGISTRATION_SECTIONS = SECTIONS.filter((s) => s.stage === STAGES.REGISTRATION);
 export const EXIT_SECTIONS = SECTIONS.filter((s) => s.stage === STAGES.EXIT);
 

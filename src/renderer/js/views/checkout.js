@@ -5,6 +5,7 @@ import { icon } from '../icons.js';
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
 import { openExitSurvey, surveyStatus } from '../components/exitSurvey.js';
+import { QUESTIONS as SURVEY_QUESTIONS } from '../../i18n/exitSurvey.js';
 import { scanBox } from '../components/wristband.js';
 
 const fmtWhen = (ts) => { if (!ts) return '—'; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
@@ -178,7 +179,10 @@ export function renderCheckout(ctx, params = {}) {
                   class: 'btn btn--block ' + (surveyDone ? 'btn--ghost' : 'btn--primary'),
                   onClick: () => takeSurvey(p),
                 }, [icon('clipboard', { size: 16 }), surveyDone ? 'Review or change answers' : 'Hand tablet to patient']),
-                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, ['12 questions about today\u2019s visit. The household questions were answered at registration. The patient can decline inside.']),
+                // The count comes from the survey itself, so this line cannot
+                // go stale again the way "12 questions" did when the survey
+                // moved back to check-out in one piece.
+                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, [`${SURVEY_QUESTIONS.length} questions for MMW\u2019s grant reporting. Anything the patient already answered at registration is filled in for them to check. The patient can decline inside.`]),
               ]),
               // Optional artefacts, grouped and de-emphasised so they read as
               // secondary to the single primary action below.

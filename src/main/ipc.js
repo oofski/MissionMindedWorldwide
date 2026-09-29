@@ -60,8 +60,11 @@ const PERMS = {
   'triage:save': ['admin', 'doctor', 'triage'],
   // The exit survey is taken at the desk as the patient leaves, so the
   // check-out role is the one that needs it. Admins and the clinical roles
-  // can too, since a patient sometimes answers it at the chair.
-  'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
+  // can too, since a patient sometimes answers it at the chair. The front-desk
+  // 'registration' role had it only for the household half registration used
+  // to ask; since v0.0.15 registration asks no survey question (the kiosk's
+  // legacy path saves inside db.createPatient, not over this channel).
+  'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
   'patients:route': ['admin', 'doctor', 'triage', 'emt'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],

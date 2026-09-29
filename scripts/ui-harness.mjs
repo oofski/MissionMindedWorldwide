@@ -68,7 +68,7 @@ const PERMS = {
   'vitalsSave': ['admin', 'doctor', 'triage', 'emt'], 'patientsRoute': ['admin', 'doctor', 'triage', 'emt'], 'consentSetTeeth': ['admin', 'doctor'], 'consentAdd': ['admin', 'doctor'],
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
-  'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist', 'registration'],
+  'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
   'inventoryList': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryGet': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'inventoryMove': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -1602,6 +1602,9 @@ async function main() {
     for (let i = 0; i < 4; i++) await tick();
     const svOverlay = document.querySelector('.survey-overlay');
     log(!!svOverlay, 'MMW survey: ticking a patient who has not been surveyed opens the survey first');
+    log(!!svOverlay && svOverlay.querySelectorAll('.survey-q').length === 34
+      && /^0 of 34 answered$/.test((svOverlay.querySelector('.survey-progress-text') || {}).textContent || ''),
+      'MMW survey: the tick opens the whole survey — 34 questions, none answered yet');
     log(!!svOverlay && /Prefer not to answer|rather not/i.test(svOverlay.textContent),
       'MMW survey: the patient can decline from inside the survey');
     // Decline it, which is a recorded answer, and the flow continues to dismissal.
@@ -4320,72 +4323,210 @@ async function main() {
       'meds: the online form suggests from the list while still accepting anything typed');
   }
 
-  /* ===== The survey, split across the visit =================================
-     The demographic half is asked at the end of registration and the experience
-     half at check-out. They are one row, filled in two sittings hours apart by
-     two different people, so the second must MERGE — a check-out that replaced
-     the blob would silently erase everything the patient told registration
-     about their household and income. */
+  /* ===== The survey, at check-out — and the records from when it was split ===
+     v0.0.15 asks all 34 questions at check-out, in one sitting ("Step 5 —
+     remove entire step"; "Checkout — add survey questions"). From v0.0.10 to
+     v0.0.14 the household half was asked at registration, and patients
+     registered then — or through an online form still on the old worker —
+     arrive at check-out with those answers already on their row. They must be
+     shown filled in for the patient to confirm: not asked twice, not kept
+     behind the patient's back, and not wiped by a Finish. A decline clears
+     everything the patient can see, and says so first. */
   {
     currentUser = signInAdmin();
-    const two = db.createPatient(currentUser, {
-      first_name: 'Two', last_name: 'Sittings', demographics: {}, medical_history: {},
-      dental_history: { visit_type: 'cleaning' },
-      survey: { answers: { household_size: '4', income: '0_15k', food_insecurity: 'yes' } },
-    });
-    let sv2 = db.getExitSurvey(two.id);
-    log(sv2.registration_status === 'completed' && !sv2.exit_status,
-      'survey split: registration records its half and leaves the other open');
-    db.saveExitSurvey(currentUser, two.id, { stage: 'exit', answers: { rate_care: '5', recommend: '5' } });
-    sv2 = db.getExitSurvey(two.id);
-    log(sv2.answers.household_size === '4' && sv2.answers.income === '0_15k',
-      'survey split: check-out does NOT erase what registration collected');
-    log(sv2.answers.rate_care === '5' && sv2.exit_status === 'completed',
-      'survey split: the check-out answers join the same record');
-
-    // Declining at check-out must take only the check-out half with it.
-    db.saveExitSurvey(currentUser, two.id, { stage: 'exit', declined: true });
-    sv2 = db.getExitSurvey(two.id);
-    log(sv2.answers.household_size === '4' && sv2.answers.rate_care === undefined,
-      'survey split: declining at check-out clears only the check-out answers');
-    log(sv2.registration_status === 'completed' && sv2.exit_status === 'declined',
-      'survey split: each half records its own outcome');
-
-    // A patient can decline at registration and still answer at check-out.
-    const decl = db.createPatient(currentUser, {
-      first_name: 'Declined', last_name: 'Early', demographics: {}, medical_history: {},
-      dental_history: { visit_type: 'cleaning' }, survey: { declined: true },
-    });
-    db.saveExitSurvey(currentUser, decl.id, { stage: 'exit', answers: { rate_care: '4' } });
-    const sv3 = db.getExitSurvey(decl.id);
-    log(sv3.registration_status === 'declined' && sv3.exit_status === 'completed' && sv3.answers.rate_care === '4',
-      'survey split: declining the household questions does not stop the visit questions being answered');
-
-    // The stage map in the data layer must match the sections in the renderer.
     const sx = await import('../src/renderer/i18n/exitSurvey.js');
+    const { openExitSurvey, surveyStatus } = await import('../src/renderer/js/components/exitSurvey.js');
+    const settle = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
+    const overlayNow = () => document.querySelector('.survey-overlay');
+    const qNode = (key) => overlayNow().querySelector(`#q-${key}`);
+    const pickSel = (key, v) => {
+      const s = qNode(key).querySelector('select');
+      s.value = v; s.dispatchEvent(new window.Event('change', { bubbles: true }));
+    };
+    const chipKeys = (key) => Array.from(qNode(key).querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
+    const tapChip = (key, v) => qNode(key).querySelector(`[data-key="${v}"]`).click();
+    const progressText = () => overlayNow().querySelector('.survey-progress-text').textContent;
+    const evBefore = (db.listEvents().find((e) => e.active) || {}).id;
+
+    // Where each question is asked: all of them at check-out.
+    log(sx.questionsForStage('registration').length === 0 && sx.questionsForStage('exit').length === 34
+      && sx.QUESTIONS.length === 34,
+      'survey: all 34 questions are asked at check-out, and none at registration');
+    log(sx.REGISTRATION_SECTIONS.length === 0 && sx.EXIT_SECTIONS.length === sx.SECTIONS.length,
+      'survey: every section belongs to check-out');
     for (const stage of ['registration', 'exit']) {
       const ui = sx.questionsForStage(stage).map((q) => q.key).sort();
       const dbq = db.STAGE_QUESTIONS[stage].slice().sort();
       log(JSON.stringify(ui) === JSON.stringify(dbq),
-        `survey split: the form and the data layer agree on which questions are asked at ${stage}`);
+        `survey: the form and the data layer agree on which questions are asked at ${stage}`);
     }
-    log(sx.questionsForStage('registration').length === 22 && sx.questionsForStage('exit').length === 12,
-      'survey split: 22 questions at registration, 12 at check-out, 34 in total');
-    // By key, not by wording: "What services do you or your household need in
-    // the future?" mentions a household but is a forward-looking question that
-    // belongs at check-out.
-    const DEMOGRAPHIC = ['household_size', 'children_under_18', 'income', 'employment', 'education',
-      'living_situation', 'health_insurance', 'dental_insurance', 'vision_insurance', 'assistance'];
-    const exitKeys = sx.questionsForStage('exit').map((q) => q.key);
-    log(DEMOGRAPHIC.every((k) => !exitKeys.includes(k)),
-      'survey split: no household, income or insurance question is left at check-out');
-    // And the reverse: nothing that needs the visit to have happened is asked
-    // during registration, which is the whole reason for splitting it.
-    const POST_VISIT = ['rate_care', 'rate_staff', 'rate_wait', 'explained_care', 'comfortable_questions',
-      'will_improve_health', 'reduced_financial_burden'];
-    const regKeys = sx.questionsForStage('registration').map((q) => q.key);
-    log(POST_VISIT.every((k) => !regKeys.includes(k)),
-      'survey split: registration never asks about care the patient has not received yet');
+    log(sx.SURVEY_VERSION === 'mmw-exit-v2',
+      'survey: rows asked in one sitting are marked v2, so they can be told from split-era rows');
+
+    // A patient registered by a v0.0.10–v0.0.14 kiosk: the household half is on
+    // the row, check-out is still to come. (createPatient's survey branch is
+    // the inert legacy path that rebuilds such a row.)
+    const ev = db.createEvent(currentUser, { name: 'Survey Tally' });
+    db.setActiveEvent(currentUser, ev.id);
+    const legacyPt = (first, answers) => db.createPatient(currentUser, {
+      first_name: first, last_name: 'Splitera', demographics: {}, medical_history: {},
+      dental_history: { visit_type: 'cleaning' }, survey: { answers },
+    });
+    const two = legacyPt('Two', { household_size: '4', income: '0_15k', food_insecurity: 'yes', assistance: ['snap', 'wic'] });
+    let sv2 = db.getExitSurvey(two.id);
+    log(sv2.registration_status === 'completed' && !sv2.exit_status && sv2.answers.household_size === '4',
+      'survey (legacy): a registration row from the split-survey builds is still accepted');
+    log(surveyStatus(sv2).key === 'none' && surveyStatus(sv2).label === 'Not yet taken · 4 answered at registration',
+      'survey (legacy): check-out still asks that patient, and the desk sees what is already answered');
+
+    const pend = openExitSurvey(db.getPatient(two.id), { lang: 'en', existing: sv2, stage: 'exit' });
+    await settle();
+    const ov = overlayNow();
+    log(!!ov && ov.querySelectorAll('.survey-q').length === 34, 'survey: the check-out form shows all 34 questions');
+    log(!!ov && ov.querySelector('h2').textContent === 'Patient Exit Survey for Grant Reporting & Community Impact',
+      'survey: the form carries the title of MMW\'s printed survey');
+    const singles = sx.QUESTIONS.filter((q) => q.type === 'single');
+    const multis = sx.QUESTIONS.filter((q) => q.type === 'multi');
+    log(singles.length === 31 && singles.every((q) => {
+      const s = qNode(q.key).querySelector('select');
+      return s && s.options[0].value === '' && s.options[0].textContent === '—' && s.options.length === q.options.length + 1;
+    }), 'survey: every one-answer question is a dropdown, blank ("—") until answered');
+    log(multis.length === 3 && multis.every((q) => !qNode(q.key).querySelector('select')
+      && qNode(q.key).querySelectorAll('.chip-select').length === q.options.length),
+      'survey: every select-all-that-apply question is a set of chips');
+    log(!ov.querySelector('input[type="text"], input:not([type]), textarea'),
+      'survey: nothing is typed — every answer is a closed choice');
+    log(qNode('household_size').querySelector('select').value === '4' && qNode('income').querySelector('select').value === '0_15k'
+      && JSON.stringify(chipKeys('assistance')) === '["snap","wic"]',
+      'survey (legacy): the answers given at registration are filled in on the check-out form');
+    log(progressText() === '4 of 34 answered', 'survey (legacy): progress counts the filled-in answers, out of 34');
+    log(!!ov.querySelector('.survey-prefilled'), 'survey (legacy): the patient is told some answers are filled in, to check them');
+
+    // "None" / "Prefer not to answer" replace a select-all list.
+    tapChip('assistance', 'none');
+    log(JSON.stringify(chipKeys('assistance')) === '["none"]', 'survey: "No assistance" replaces the ticks rather than joining them');
+    tapChip('assistance', 'medicaid');
+    log(JSON.stringify(chipKeys('assistance')) === '["medicaid"]', 'survey: ticking a real answer takes "No assistance" off again');
+    // Change one answer, take one off, and switch language mid-way.
+    pickSel('rate_care', '5');
+    pickSel('income', '');
+    log(progressText() === '4 of 34 answered', 'survey: a dropdown put back to "—" is unanswered again');
+    const langBtn = Array.from(ov.querySelectorAll('.survey-head-actions button')).find((b) => /English/.test(b.textContent));
+    langBtn.click();
+    await settle();
+    log(ov.querySelector('h2').textContent === sx.SURVEY_TITLE.es && qNode('rate_care').querySelector('select').value === '5'
+      && /4 de 34 respondidas/.test(progressText()),
+      'survey: switching to Spanish translates the title and keeps every answer');
+    clickText('Terminar', ov);
+    await settle(10);
+    await pend;
+    sv2 = db.getExitSurvey(two.id);
+    log(sv2.exit_status === 'completed' && sv2.answers.household_size === '4' && sv2.answers.food_insecurity === 'yes'
+      && sv2.answers.rate_care === '5' && JSON.stringify(sv2.answers.assistance) === '["medicaid"]',
+      'survey: Finish stores what was on the form — the confirmed registration answers and the new ones');
+    log(sv2.answers.income === undefined,
+      'survey: an answer the patient took off the pre-filled form is removed, not kept behind their back');
+    log(sv2.version === 'mmw-exit-v2' && sv2.language === 'es' && sv2.registration_status === 'completed',
+      'survey: the row records v2, the language it was answered in, and keeps its registration history');
+    log(surveyStatus(sv2).label === 'Completed · 4 of 34 answered', 'survey: the desk sees "n of 34" once it is taken');
+
+    // Declining with answers on the form warns first, then clears everything.
+    const dec = legacyPt('Dee', { household_size: '2', employment: 'retired' });
+    const pendD = openExitSurvey(db.getPatient(dec.id), { existing: db.getExitSurvey(dec.id) });
+    await settle();
+    const declineD = Array.from(overlayNow().querySelectorAll('button')).find((b) => /rather not/i.test(b.textContent));
+    const warnCard = () => Array.from(document.querySelectorAll('.modal-card')).find((m) => /Skip the survey\?/.test(m.textContent));
+    declineD.click();
+    await settle();
+    log(!!warnCard() && /already filled in/.test(warnCard().textContent),
+      'survey: declining with answers on the form warns that every one of them will be removed');
+    Array.from(warnCard().querySelectorAll('button')).find((b) => /Keep answering/.test(b.textContent)).click();
+    await settle();
+    log(!!overlayNow() && !db.getExitSurvey(dec.id).exit_status,
+      'survey: "Keep answering" goes back to the form and records nothing');
+    declineD.click();
+    await settle();
+    Array.from(warnCard().querySelectorAll('button')).find((b) => /Yes, skip/.test(b.textContent)).click();
+    await settle(10);
+    await pendD;
+    const dsv = db.getExitSurvey(dec.id);
+    log(dsv.exit_status === 'declined' && dsv.declined === true && Object.keys(dsv.answers).length === 0,
+      'survey: a check-out decline clears every answer, the pre-filled registration ones included');
+    log(dsv.registration_status === 'completed' && !overlayNow(),
+      'survey: the earlier registration outcome stays on the row as history, and the form closes');
+
+    // The data layer: 'registration' is a legacy stage that only ever adds.
+    // (In a clinic of its own, so the totals checked below stay exact.)
+    db.setActiveEvent(currentUser, db.createEvent(currentUser, { name: 'Survey Scratch' }).id);
+    const late = db.createPatient(currentUser, { first_name: 'Late', last_name: 'Row', demographics: {}, medical_history: {}, dental_history: {} });
+    db.saveExitSurvey(currentUser, late.id, { stage: 'exit', answers: { rate_care: '4' } });
+    db.saveExitSurvey(currentUser, late.id, { stage: 'registration', answers: { income: 'pna' } });
+    const lsv = db.getExitSurvey(late.id);
+    log(lsv.answers.rate_care === '4' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
+      && lsv.registration_status === 'completed' && lsv.declined === false,
+      'survey (legacy): a registration row synced in after check-out adds to the record and erases nothing');
+    db.saveExitSurvey(currentUser, late.id, { stage: 'registration', declined: true });
+    log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).answers.rate_care === '4',
+      'survey (legacy): a registration "skip" from an old station neither clears answers nor marks check-out declined');
+    log(db.saveExitSurvey(currentUser, late.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2',
+      'survey: a save that names no version is recorded as v2');
+
+    // A v0.0.14 row: household half at registration, then declined at check-out
+    // (which, then, cleared only the twelve visit questions). Its answers were
+    // given, and now count; the decline still counts as a decline.
+    db.setActiveEvent(currentUser, ev.id);
+    const v14 = legacyPt('Vee', { household_size: '3', living_situation: 'rent' });
+    const raw = rawDb();
+    raw.prepare("UPDATE exit_surveys SET exit_status = 'declined', declined = 1 WHERE patient_id = ?").run(v14.id);
+    raw.close();
+    const sumT = db.buildEventSummary(ev.id);
+    log(sumT.survey.declined === 2 && sumT.survey.responses === 1,
+      'survey summary: check-out declines and completions are counted separately');
+    log((sumT.survey.answers.household_size || {})['3'] === 1 && (sumT.survey.answers.living_situation || {}).rent === 1,
+      'survey summary: household answers given at registration on an older build count even though check-out was declined');
+    log(sumT.survey.registration.completed === 3 && sumT.survey.exit.completed === 1 && sumT.survey.exit.declined === 2,
+      'survey summary: the per-stage outcomes still add up for split-era rows');
+
+    // Reports: the "At registration" line only when there is a real count.
+    const rexS = require('../src/main/reportExport.js');
+    const respRows = (sum) => (rexS.reportSections(sum, 'X').find((x) => x.title === 'Survey responses') || { rows: [] }).rows;
+    const evNow = db.createEvent(currentUser, { name: 'Survey Now' });
+    db.setActiveEvent(currentUser, evNow.id);
+    const nowP = db.createPatient(currentUser, { first_name: 'Nora', last_name: 'Now', demographics: {}, medical_history: {}, dental_history: {} });
+    db.saveExitSurvey(currentUser, nowP.id, { stage: 'exit', answers: { rate_care: '5', household_size: '1' } });
+    db.createPatient(currentUser, { first_name: 'Nick', last_name: 'Now', demographics: {}, medical_history: {}, dental_history: {} });
+    const sumN = db.buildEventSummary(evNow.id);
+    log(sumN.survey.registration.completed === 0 && sumN.survey.registration.not_asked === 2
+      && respRows(sumN).length === 1 && respRows(sumN)[0][0] === 'At check-out',
+      'report export: a clinic run since v0.0.15 has no "At registration" row (nobody there was meant to be asked)');
+    const regRow = respRows(sumT).find((r) => /^At registration/.test(r[0]));
+    log(!!regRow && regRow[0] === 'At registration (before v0.0.15)' && regRow[1] === 3 && regRow[3] === '—',
+      'report export: split-era records keep their registration row, labelled as such, with no "not asked" figure');
+    const merged = db.mergeSummaries([sumN, sumT]);
+    log(merged.survey.registration.completed === 3 && respRows(merged).some((r) => /^At registration/.test(r[0])),
+      'report export: a merged report with split-era records still shows their registration outcome');
+
+    const storeR = (await import('../src/renderer/js/store.js')).store; storeR.setUser(currentUser);
+    const repS = (await import('../src/renderer/js/views/reports.js')).renderReports({ navigate: () => {}, toast: () => {}, store: storeR, setDetail: () => {} });
+    document.body.append(repS);
+    await settle(10);
+    const showScope = async (id) => {
+      const sel = Array.from(repS.querySelectorAll('select')).find((s) => Array.from(s.options).some((o) => o.value === 'all'));
+      sel.value = String(id);
+      sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settle(10);
+      return repS.textContent;
+    };
+    const nowText = await showScope(evNow.id);
+    log(/At check-out:/.test(nowText) && !/At registration/.test(nowText),
+      'Reports: a clinic run since v0.0.15 shows only the check-out line');
+    const oldText = await showScope(ev.id);
+    const regLine = Array.from(repS.querySelectorAll('.awareness')).find((p) => /^At registration/.test(p.textContent));
+    log(/At check-out:/.test(oldText) && !!regLine
+      && regLine.textContent === 'At registration (before v0.0.15): 3 answered · 0 declined',
+      'Reports: split-era records keep their registration line, with no "not asked" figure');
+    repS.remove();
+    if (evBefore) db.setActiveEvent(currentUser, evBefore);
   }
 
   /* ===== C1 + C4 — age, race, and how the waiver was signed ==================

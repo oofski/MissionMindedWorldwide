@@ -191,11 +191,18 @@ function reportSections(summary, scopeLabel, labels) {
   if (sv && (sv.registration || sv.exit)) {
     const reg = sv.registration || {};
     const ex = sv.exit || {};
+    // Since v0.0.15 the whole survey is asked at check-out. The registration
+    // row appears only for records (or kept reports) from v0.0.10–v0.0.14, when
+    // the household half was asked there — the Reports tab uses the same rule —
+    // so an export never states "N not asked at registration" as a finding
+    // about a question nobody was meant to ask. Its "Not asked" is left blank
+    // for the same reason.
+    const regCount = (Number(reg.completed) || 0) + (Number(reg.declined) || 0);
     sections.push({
       title: 'Survey responses',
       columns: ['Asked', 'Answered', 'Declined', 'Not asked'],
       rows: [
-        ['At registration', reg.completed || 0, reg.declined || 0, reg.not_asked || 0],
+        ...(regCount > 0 ? [['At registration (before v0.0.15)', reg.completed || 0, reg.declined || 0, '—']] : []),
         ['At check-out', ex.completed || 0, ex.declined || 0, ex.not_asked || 0],
       ],
     });
