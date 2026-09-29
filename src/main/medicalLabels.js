@@ -202,13 +202,12 @@ function isHistoryV2(mh) {
   return m.history_version === HISTORY_VERSION || Object.keys(asObject(m.condition_answers)).length > 0;
 }
 
-// Mirrors medicalHistory.js firstMissingMedical. Nothing in the main process
-// calls it yet: it (and isHistoryV2) is exported for the v0.0.15 edit-through-
-// the-flow save (db.updatePatientSection), which must refuse an incomplete
-// history arriving from an editor by the kiosk's own rule — and the harness
-// runs it against the renderer's copy now, so the two cannot drift before then.
-// (createPatient does not enforce it: a record may legitimately be created
-// with an empty history — a desk walk-in, a test.)
+// Mirrors medicalHistory.js firstMissingMedical. The v0.0.15 edit-through-the-
+// flow save (db.updatePatientSection) refuses an incomplete history arriving
+// from a station's editor by it — the kiosk's own rule — and the harness runs
+// it against the renderer's copy so the two cannot drift. (createPatient does
+// not enforce it: a record may legitimately be created with an empty history —
+// a desk walk-in, a test.)
 function firstMissingMedical(mh) {
   const m = mh || {};
   const yn = (v) => v === 'yes' || v === 'no';
@@ -229,6 +228,87 @@ function firstMissingMedical(mh) {
     if (picked.includes('other') && !text(m.allergies_other)) return 'allergies_other';
   }
   return null;
+}
+
+// The question each firstMissingMedical id stands for, in the kiosk's English
+// wording (strings.js intake.*; the harness pins them), so a history the data
+// layer refuses names the same question the form would have named.
+const MEDICAL_QUESTION_LABELS = {
+  under_treatment: 'Are you currently under a doctor’s care?',
+  medications: 'Current medications',
+  medications_other: 'Other medication (type the name)',
+  major_surgery: 'Major surgery within the past 6 months?',
+  surgery_sites: 'If so, where?',
+  tobacco: 'Do you smoke?',
+  allergy_status: 'Do you have an allergy or serious reaction to any medication?',
+  allergies: 'Medication allergies',
+  allergies_other: 'Other allergy (specify)',
+};
+function medicalQuestionLabel(id) {
+  const s = String(id || '');
+  return s.startsWith('condition:') ? conditionLabel(s.slice(10)) : (MEDICAL_QUESTION_LABELS[s] || s);
+}
+
+// Mirrors medicalHistory.js normalizeMedical. The v0.0.15 edit-through-the-flow
+// save (db.updatePatientSection) runs a merged history through it, so the
+// arrays the blood-thinner rules and the report counts read (conditions,
+// allergies, the *_none flags) can never disagree with the answers they are
+// derived from, whichever station — or build — sent the edit.
+function normalizeMedical(input) {
+  const m = { ...(input || {}) };
+
+  if (ALLERGY_STATUSES.includes(m.allergy_status)) {
+    if (m.allergy_status === 'yes') {
+      m.allergies = uniq(asArray(m.allergies).filter((k) => typeof k === 'string' && k && k !== 'none'));
+      m.allergies_other = m.allergies.includes('other') ? text(m.allergies_other) : '';
+      delete m.allergies_none;
+    } else if (m.allergy_status === 'nkda') {
+      m.allergies = ['none'];
+      m.allergies_other = '';
+      m.allergies_none = true;
+    } else {
+      m.allergies = [];
+      m.allergies_other = '';
+      delete m.allergies_none;
+    }
+  }
+
+  const answers = asObject(m.condition_answers);
+  if (Object.keys(answers).length) {
+    m.condition_answers = { ...answers };
+    const yes = catalogOrder(Object.keys(answers).filter((k) => answers[k] === 'yes'), CONDITION_ORDER);
+    const other = text(m.conditions_other);
+    m.conditions_other = other;
+    const allNo = INTAKE_CONDITIONS.every((k) => answers[k] === 'no' || answers[k] === 'na');
+    if (yes.length || other) m.conditions = [...yes, ...(other ? ['other'] : [])];
+    else m.conditions = allNo ? ['none'] : [];
+    if (m.conditions.length === 1 && m.conditions[0] === 'none') m.conditions_none = true;
+    else delete m.conditions_none;
+  }
+
+  if (m.medications_none === true) {
+    m.medications = [];
+  } else {
+    delete m.medications_none;
+    const seen = new Set();
+    m.medications = asArray(m.medications)
+      .map((r) => (typeof r === 'string' ? { name: r } : r))
+      .filter((r) => r && text(r.name))
+      .map((r) => ({ ...r, key: r.key || 'other', name: text(r.name), dose: r.dose || '', reason: r.reason || '' }))
+      .filter((r) => {
+        if (r.key === 'other') return true;
+        if (seen.has(r.key)) return false;
+        seen.add(r.key);
+        return true;
+      });
+  }
+
+  if (m.major_surgery !== undefined) {
+    m.surgery_sites = m.major_surgery === 'yes' ? uniq(asArray(m.surgery_sites).filter((k) => typeof k === 'string' && k)) : [];
+  }
+
+  if (Object.keys(answers).length && ALLERGY_STATUSES.includes(m.allergy_status)) m.history_version = HISTORY_VERSION;
+  return m;
 }
 
 // Mirrors medicalHistory.js medicalDisplay(mh, 'en').
@@ -327,7 +407,7 @@ function dentalDisplay(dh) {
 module.exports = {
   CONDITION_LABELS, FLAG_CONDITIONS, INTAKE_CONDITIONS, ALLERGY_LABELS, MED_CHECKLIST_LABELS,
   SURGERY_SITE_LABELS, DENTAL_Q_LABELS, DENTAL_LEGACY_LABELS, ALLERGY_STATUS_LABELS,
-  HISTORY_VERSION,
+  HISTORY_VERSION, MEDICAL_QUESTION_LABELS,
   conditionLabel, allergyLabel, surgerySiteLabel, answerLabel, isHistoryV2,
-  firstMissingMedical, medicalDisplay, clinicalFlags, dentalDisplay,
+  firstMissingMedical, medicalQuestionLabel, normalizeMedical, medicalDisplay, clinicalFlags, dentalDisplay,
 };

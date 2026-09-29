@@ -32,6 +32,8 @@ export const api = {
 
   createPatient: (p) => call('patientsCreate', p),
   updatePatient: (p) => call('patientsUpdate', p),
+  // v0.0.15: one section of the intake answers, as CHANGES (null removes a key).
+  updatePatientSection: (id, section, values, opts) => call('patientsUpdateSection', { id, section, values, ...(opts || {}) }),
   deletePatient: (id) => call('patientsDelete', id),
   getPatient: (id) => call('patientsGet', id),
   listPatients: (opts) => call('patientsList', opts),
@@ -47,6 +49,8 @@ export const api = {
 
   saveExitSurvey: (patientId, data) => call('surveySave', { patientId, data }),
   saveTreatment: (patientId, data, finalize) => call('treatmentSave', { patientId, data, finalize }),
+  unlockRecord: (patientId, reason) => call('treatmentUnlock', { patientId, reason }),
+  lockRecord: (patientId) => call('treatmentLock', { patientId }),
   saveVitals: (patientId, data) => call('vitalsSave', { patientId, data }),
   routePatient: (patientId, route) => call('patientsRoute', { patientId, route }),
   setConsentTeeth: (consentId, tooth_numbers) => call('consentSetTeeth', { consentId, tooth_numbers }),

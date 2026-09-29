@@ -47,7 +47,13 @@ const PERMS = {
   'patients:create': ['admin', 'doctor', 'triage', 'emt', 'registration'],
   'patients:newVisit': ['admin', 'doctor', 'triage', 'emt', 'registration'],
   'patients:update': ['admin', 'triage', 'doctor'],
-  'patients:get': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
+  // v0.0.15: view and correct the patient's own answers at every station. Open
+  // to every staff role here; which SECTION a role may change is checked in
+  // the handler (db.SECTION_ROLES): the patient's details for all seven, the
+  // medical and dental history for the clinical roles.
+  'patients:updateSection': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
+  // registration opens the record from Arrivals to view and correct it.
+  'patients:get': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'patients:list': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'patients:searchAll': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'patients:history': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
@@ -65,6 +71,10 @@ const PERMS = {
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
   'patients:route': ['admin', 'doctor', 'triage', 'emt'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],
+  // Unlocking a signed-off record (reason required) and locking one are the
+  // administrator's, like every other override of the flow.
+  'treatment:unlock': ['admin'],
+  'treatment:lock': ['admin'],
   'consent:setTeeth': ['admin', 'doctor'],
   'consent:add': ['admin', 'doctor'],
   'xray:add': ['admin', 'doctor', 'triage', 'emt'],
@@ -352,6 +362,12 @@ function register(getMainWindow) {
     }
   });
   handle('patients:update', ({ id, ...data }) => db.updatePatient(currentUser, id, data));
+  handle('patients:updateSection', ({ id, section, values, reviewedOnly } = {}) => {
+    const roles = db.SECTION_ROLES[section];
+    if (!roles) throw new Error('Unknown section.');
+    if (!roles.includes(currentUser.role)) throw new Error('Your role does not have permission for this action.');
+    return db.updatePatientSection(currentUser, id, section, values, { reviewedOnly: !!reviewedOnly });
+  });
   handle('patients:get', (id) => db.getPatient(id));
   // MMW: resolve a scanned wristband. A handheld scanner types the digits and
   // presses Enter, so the code arrives with stray whitespace/CR — normalising
@@ -387,6 +403,8 @@ function register(getMainWindow) {
   // data layer. Same roles, so no new channel was needed.
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
+  handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));
+  handle('treatment:lock', ({ patientId } = {}) => db.lockRecord(currentUser, patientId));
 
   /* ---- v1.0.6: vitals, consent teeth, dismissal, per-patient audit ---- */
   handle('vitals:save', ({ patientId, data }) => db.saveVitals(currentUser, patientId, data));
