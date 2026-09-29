@@ -1239,6 +1239,12 @@ function startVisitFromExisting(actor, sourceId) {
   if (medical.condition_answers && typeof medical.condition_answers === 'object') {
     medical.condition_answers = Object.assign({}, medical.condition_answers);
     delete medical.condition_answers.pregnant;
+    // "None" was derived from EVERY condition being answered No, and one of
+    // them is now unanswered, so the history no longer says reviewed-none.
+    if (Array.isArray(medical.conditions) && medical.conditions.length === 1 && medical.conditions[0] === 'none') {
+      medical.conditions = [];
+      delete medical.conditions_none;
+    }
   }
   // The derived list must not keep saying "pregnant" once the answer is gone.
   if (Array.isArray(medical.conditions) && medical.conditions.includes('pregnant')) {

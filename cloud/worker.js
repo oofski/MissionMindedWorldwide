@@ -565,8 +565,10 @@ function buildPreregPatient(b, cities) {
   // in its listed spelling, "Other" as the typed name (canonicalised if it is
   // really a listed town), or — with no list — whatever was typed.
   const cityList = Array.isArray(cities) ? cities : [];
-  const cityTyped = (cityList.length && b.city === 'other' ? s(b.city_other, 80) : s(b.city, 80)).replace(/\s+/g, ' ');
-  const city = cityList.length && b.city === 'other' && !cityTyped ? '' : (matchCity(cityTyped, cityList) || cityTyped);
+  // "other" is always the dropdown's Other, never a town — even if the admin
+  // cleared the list while the page was open, the typed name is what counts.
+  const cityTyped = (b.city === 'other' ? s(b.city_other, 80) : s(b.city, 80)).replace(/\s+/g, ' ');
+  const city = matchCity(cityTyped, cityList) || cityTyped;
 
   return {
     first_name: first,

@@ -931,6 +931,11 @@ async function main() {
     check('a typed town that is really a listed one is stored in the listed spelling', cityOf('Listed') === 'Sandy');
     await cityPost({ first_name: 'Direct', last_name: 'Cased', city: 'BORING' });
     check('a differently-cased listed town posted straight to the endpoint is canonicalised', cityOf('Cased') === 'Boring');
+    // The admin cleared the list while a patient had the page open: "Other"
+    // with a typed town still stores the town, never the word "other".
+    const staleOther = await post({ ...base, first_name: 'Stale', last_name: 'Page', city: 'other', city_other: 'Gresham' });
+    check('"Other" posted to an event whose list was since cleared stores the typed town',
+      staleOther.status === 200 && (demoOf('Page') || {}).city === 'Gresham');
     const blankOther = await cityPost({ first_name: 'Blank', last_name: 'Other', city: 'other', city_other: '' });
     check('"Other" with nothing typed is refused as a missing city', blankOther.status === 400 && /city/i.test(blankOther.data.error));
   }

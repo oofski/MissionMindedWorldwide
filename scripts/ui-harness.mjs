@@ -2898,6 +2898,11 @@ async function main() {
       && am.surgery_sites === undefined && am.history_version === undefined && am.condition_answers.diabetes === 'yes'
       && !mhx.clinicalFlags(am).includes('Pregnant'),
     'return visit: pregnancy and last visit\'s major surgery are asked again; the rest of the history carries over');
+    const allNoBack = db.createPatient(currentUser, { first_name: 'All', last_name: 'Noes', demographics: {},
+      medical_history: mhx.normalizeMedical({ ...V2_MH, condition_answers: { ...ANS } }), dental_history: {} });
+    const allNoAgain = db.startVisitFromExisting(currentUser, allNoBack.id).medical_history;
+    log(db.getPatient(allNoBack.id).medical_history.conditions_none === true && same(allNoAgain.conditions, []) && !allNoAgain.conditions_none,
+      'return visit: with the pregnancy answer gone, the history no longer claims every condition was reviewed as None');
     log(st.DENTAL_QUESTIONS.every((q) => ad[q.key] === undefined) && ad.prior_dentist === 'about_1_year',
       'return visit: today\'s toothache questions start blank; when they last saw a dentist carries over');
 
