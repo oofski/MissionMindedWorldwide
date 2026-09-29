@@ -8,6 +8,7 @@ import { statusPill } from './dashboard.js';
 import { incompleteBanner, historyAnswer } from '../components/patientHistory.js';
 import { bloodThinnerText, bpStatus } from '../medFlags.js';
 import { sortedByName } from '../patientSort.js';
+import { hasReferralOut } from '../../i18n/dentalLists.js';
 
 // Reconciled vitals + blood-thinner shown ON-SCREEN in the record, the same way
 // the EMT/dentist screens and the PDF do — so the record can't silently disagree
@@ -378,6 +379,7 @@ function treatmentSummary(p) {
   // The teeth tapped on the chart and the quadrant note are not a cleaning —
   // every dentist save stores teeth: [], which used to read as one here.
   if (Object.entries(tx.cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail')) parts.push('cleaning');
+  if (hasReferralOut(tx.referral_out)) parts.push('referred');
   return parts.join(', ') || 'See provider';
 }
 

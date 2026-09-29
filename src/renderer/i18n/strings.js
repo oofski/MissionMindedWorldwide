@@ -331,13 +331,13 @@ const en = {
   },
   roles: { admin: 'Administrator', doctor: 'Dentist', triage: 'Front Desk (legacy)', emt: 'EMT / Nurse', checkout: 'Check-Out', hygienist: 'Hygienist', registration: 'Registration' },
   nav: {
-    dashboard: 'Dashboard', checkin: 'Check-In', triage: 'Triage', provider: 'Dentist',
+    dashboard: 'Dashboard', checkin: 'Check-In', triage: 'Triage', provider: 'Dental Triage',
     records: 'Records', reports: 'Reports', admin: 'Admin', logout: 'Sign out',
     emt: 'Vitals', checkout: 'Check-Out', hygienist: 'Cleanings',
   },
   dash: {
     title: 'Clinic Dashboard', event: 'Active event', noEvent: 'No active event',
-    total: 'Patients today', waiting: 'Waiting for vitals', triaged: 'Ready for treatment',
+    total: 'Patients today', waiting: 'Waiting for vitals', triaged: 'Waiting for provider',
     inTreatment: 'In treatment', completed: 'Completed', startCheckin: 'Start patient check-in',
     quick: 'Quick actions', recent: 'Recent patients', viewQueue: 'Open vitals station',
     backupPrompt: 'Remember to back up to USB before leaving the event.',
@@ -451,7 +451,7 @@ const es = {
   },
   roles: { admin: 'Administrador', doctor: 'Dentista', triage: 'Recepción (anterior)', emt: 'Enfermero/a (EMT)', checkout: 'Salida', hygienist: 'Higienista', registration: 'Registro' },
   nav: {
-    dashboard: 'Panel', checkin: 'Registro', triage: 'Triaje', provider: 'Dentista',
+    dashboard: 'Panel', checkin: 'Registro', triage: 'Triaje', provider: 'Triaje dental',
     records: 'Registros', reports: 'Reportes', admin: 'Admin', logout: 'Salir',
     emt: 'Signos vitales', checkout: 'Salida', hygienist: 'Limpiezas',
   },

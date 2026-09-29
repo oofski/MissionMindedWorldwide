@@ -16,6 +16,7 @@
  */
 
 const { buildWorkbook } = require('./xlsx');
+const { STATUS_LABELS } = require('./dentalLabels');
 
 /* ---------- labels, applied here so the stored summary stays language-neutral ---------- */
 
@@ -32,8 +33,9 @@ const RACE = {
   prefer_not: 'Prefer not to answer',
 };
 const STATUS = {
-  checked_in: 'Checked in', triaged: 'Cleared', in_treatment: 'In treatment',
-  completed: 'Treatment complete', dismissed: 'Checked out',
+  // The one status map every screen and export shares (src/main/dentalLabels.js),
+  // so this report can never call a stage something the Reports tab does not.
+  ...STATUS_LABELS,
 };
 const relabel = (obj, map) => Object.fromEntries(
   Object.entries(obj || {}).map(([k, v]) => [k === 'Not recorded' ? k : ((map && map[k]) || k), v]),
@@ -139,6 +141,9 @@ function reportSections(summary, scopeLabel, labels) {
   sections.push(ranked('Most common conditions', relabel(s.conditions, L.conditions), total));
   sections.push(ranked('Where patients were in the clinic', relabel(s.by_status, STATUS), total));
 
+  // X-rays TAKEN is the count typed at Dental Triage; the images uploaded are
+  // a separate figure. A summary kept before v0.0.15 has only the images, and
+  // that is what it always meant by "taken".
   sections.push({
     title: 'Procedures and imaging',
     columns: ['Procedure', 'Count'],
@@ -146,7 +151,9 @@ function reportSections(summary, scopeLabel, labels) {
       ['Fillings', s.fillings || 0],
       ['Extractions', s.extractions || 0],
       ['Cleanings', s.cleanings || 0],
-      ['X-rays taken', s.xrays || 0],
+      ['X-rays taken', s.xrays_taken != null ? s.xrays_taken : (s.xrays || 0)],
+      ['X-ray images uploaded', s.xrays || 0],
+      ['Referred elsewhere for care', s.referrals || 0],
     ],
   });
 

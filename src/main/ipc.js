@@ -381,8 +381,9 @@ function register(getMainWindow) {
   handle('inventory:move', ({ data }) => db.recordInventoryMove(currentUser, data));
   handle('inventory:delete', ({ id }) => db.deleteInventoryItem(currentUser, id));
   handle('inventory:chairUsage', ({ eventId } = {}) => db.inventoryChairUsage(eventId));
-  // finalize may be false, 'complete' (mark done, no lock), or 'lock'/true — pass
-  // it through so v1.2.1's "complete without lock" mode reaches the data layer.
+  // finalize may be false, 'waiting' (v0.0.15: move to Treatment Waiting),
+  // 'complete' (mark done, no lock), or 'lock'/true — pass it through so each
+  // mode reaches the data layer. Same roles, so no new channel was needed.
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
 

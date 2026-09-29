@@ -1,6 +1,7 @@
 import { el } from '../dom.js';
 import { icon } from '../icons.js';
 import { conditions, allergies, visitTypeLabel, priorDentistLabel } from '../i18n.js';
+import { statusLabel } from '../../i18n/dentalLists.js';
 
 // A history yes/no as the clinician should read it. 'na' is the pregnancy
 // question's third answer — it must not surface as the raw code, because
@@ -129,7 +130,8 @@ export function patientHistoryCards(p, priorVisits = []) {
           el('td', {}, [new Date(v.created_at).toLocaleDateString()]),
           el('td', {}, [v.event_name]),
           el('td', {}, [v.summary]),
-          el('td', {}, [v.status]),
+          // Labelled, never the stored code ("treatment_waiting").
+          el('td', {}, [statusLabel(v.status)]),
         ]))),
       ])])));
   }

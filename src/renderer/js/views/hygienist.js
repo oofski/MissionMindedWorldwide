@@ -35,9 +35,11 @@ export function renderHygienist(ctx, params = {}) {
     const patients = await api.listPatients({});
     const live = patients.filter((p) => p.status !== 'dismissed');
     // B1/B2 QUEUE GATE: a patient only belongs in the cleaning queue once the EMT
-    // has signed them off into a clinical queue (status 'triaged'/'in_treatment')
-    // AND they were routed to the hygienist. Checked-in patients stay with the EMT.
-    const forCleaning = sortedByName(live.filter((p) => routedToHygienist(p) && ['triaged', 'in_treatment'].includes(p.status)));
+    // has signed them off into a clinical queue (status 'triaged'/'in_treatment',
+    // or 'treatment_waiting' — examined at Dental Triage and waiting for a
+    // chair, which a 'both' patient can be while still due a cleaning) AND they
+    // were routed to the hygienist. Checked-in patients stay with the EMT.
+    const forCleaning = sortedByName(live.filter((p) => routedToHygienist(p) && ['triaged', 'treatment_waiting', 'in_treatment'].includes(p.status)));
     const rows = forCleaning.map((p) => el('tr', { style: 'cursor:pointer', onClick: () => detail(p.id) }, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`])]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
@@ -124,8 +126,9 @@ export function renderHygienist(ctx, params = {}) {
 
     // Build a full treatment payload that PRESERVES the doctor's fillings/
     // extractions/anesthetic and only rewrites the cleaning + sign-off fields.
-    // Restorative and Services are carried through too: leaving them out used
-    // to wipe the dentist's denture and pulpotomy entries on every save here.
+    // Restorative, Services and the dentist's Referral are carried through too:
+    // leaving them out used to wipe the dentist's denture and pulpotomy entries
+    // on every save here.
     function buildPayload() {
       return {
         fillings: tx.fillings || [],
@@ -133,6 +136,7 @@ export function renderHygienist(ctx, params = {}) {
         anesthetic: tx.anesthetic || [],
         restorative: tx.restorative || {},
         services: tx.services || {},
+        referral_out: tx.referral_out || null,
         other_procedures: tx.other_procedures || null,
         cleaning: { ...cleanState, teeth: [...teeth], quad_detail: quadDetail.value.trim() },
         clinical_notes: notes.value.trim() || tx.clinical_notes || null,
@@ -164,19 +168,20 @@ export function renderHygienist(ctx, params = {}) {
       } catch (e) { toast(e.message, 'error'); }
     }
 
-    // B3: hand a patient off to the dentist when they actually need restorative
-    // work (extraction/filling). Confirms, routes, then refreshes back to the queue
-    // (the patient leaves the cleaning list once routed to the dentist).
+    // B3: hand a patient off to Dental Triage when they actually need
+    // restorative work (extraction/filling). Confirms, routes, then refreshes back
+    // to the queue (the patient leaves the cleaning list once routed there). The
+    // route key stays 'dentist'; only the station's name changed.
     async function transferToDentist() {
       const ok = await modal({
-        title: 'Transfer to dentist?',
-        body: 'Send this patient to the dentist for restorative work (extraction/filling). They will leave the cleaning queue. Continue?',
-        confirmText: 'Transfer to dentist', cancelText: 'Cancel',
+        title: 'Transfer to Dental Triage?',
+        body: 'Send this patient to Dental Triage for restorative work (extraction/filling). They will leave the cleaning queue. Continue?',
+        confirmText: 'Transfer to Dental Triage', cancelText: 'Cancel',
       });
       if (!ok) return;
       try {
         await api.routePatient(id, 'dentist');
-        toast('Patient transferred to the dentist', 'success');
+        toast('Patient transferred to Dental Triage', 'success');
         queue();
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -196,7 +201,7 @@ export function renderHygienist(ctx, params = {}) {
           el('p', { class: 'view-sub' }, [`${p.age != null ? p.age + ' yrs · ' : ''}${p.gender || ''}`]),
         ]),
         el('div', { class: 'inline-row', style: 'align-items:center;gap:8px' }, [
-          locked ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to the dentist for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to dentist']),
+          locked ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to Dental Triage for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to Dental Triage']),
           statusPill(p.status),
         ]),
       ]),

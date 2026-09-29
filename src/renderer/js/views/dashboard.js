@@ -3,20 +3,32 @@ import { t } from '../i18n.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { icon } from '../icons.js';
+import { STATUS_LABELS } from '../../i18n/dentalLists.js';
 
 // The clinic pipeline as visual columns — where every patient physically is,
 // live. Computed from each patient's status + route + whether vitals are in.
+// 'dentist' is the Dental Triage station (the stored route key never changed).
+// After Dental Triage a patient waits for a treatment chair and is then in
+// treatment; both have their own column so the floor can see the queue for
+// chairs, which is the number a fifteen-chair clinic runs on.
 const STAGES = [
   { key: 'checkin', label: 'Checked in', color: 'var(--info)' },
   { key: 'vitals', label: 'Vitals', color: 'var(--accent)' },
-  { key: 'ready', label: 'Ready for treatment', color: 'var(--accent)' },
+  { key: 'ready', label: STATUS_LABELS.triaged, color: 'var(--accent)' },
   { key: 'hygienist', label: 'Hygienist', color: 'var(--warning)' },
-  { key: 'dentist', label: 'Dentist', color: 'var(--warning)' },
+  { key: 'dentist', label: 'Dental Triage', color: 'var(--warning)' },
+  { key: 'waiting', label: STATUS_LABELS.treatment_waiting, color: 'var(--info)' },
+  { key: 'treatment', label: STATUS_LABELS.in_treatment, color: 'var(--warning)' },
   { key: 'done', label: 'Checked out', color: 'var(--success)' },
 ];
 function stageOf(p) {
   if (p.status === 'completed' || p.status === 'dismissed') return 'done';
-  if (p.status === 'in_treatment') return p.route === 'hygienist' ? 'hygienist' : 'dentist';
+  if (p.status === 'treatment_waiting') return p.route === 'hygienist' ? 'hygienist' : 'waiting';
+  if (p.status === 'in_treatment') {
+    if (p.route === 'hygienist') return 'hygienist';
+    // Taken from Treatment Waiting into a chair, or still being examined.
+    return p.treatment_waiting_at ? 'treatment' : 'dentist';
+  }
   if (p.status === 'triaged') return 'ready';
   return p.has_vitals ? 'vitals' : 'checkin'; // checked_in
 }
@@ -48,6 +60,9 @@ function clockStart(p) {
 // Best-available timestamp for when the patient entered their CURRENT stage.
 function stageEnteredAt(p) {
   if (p.status === 'dismissed') return p.dismissed_at || p.routed_at || p.vitals_at || p.created_at;
+  // Waiting for a chair, or taken into one from that wait: the clock for this
+  // stage starts when Dental Triage handed them on.
+  if (p.status === 'treatment_waiting' || (p.status === 'in_treatment' && p.treatment_waiting_at)) return p.treatment_waiting_at || p.routed_at || p.vitals_at || p.created_at;
   if (p.status === 'completed' || p.status === 'in_treatment' || p.status === 'triaged') return p.routed_at || p.vitals_at || p.created_at;
   if (p.preregistered && !p.has_vitals) return null; // pre-reg not arrived — clock not started
   return p.has_vitals ? (p.vitals_at || p.created_at) : p.created_at; // checked_in
@@ -66,7 +81,7 @@ export function renderDashboard(ctx) {
     const can = (...r) => store.can(...r);
     function navFor(kind) {
       if (kind === 'vitals') return can('admin', 'emt', 'triage') ? 'emt' : null;
-      if (kind === 'ready' || kind === 'treatment') {
+      if (kind === 'ready' || kind === 'waiting' || kind === 'treatment') {
         if (can('admin', 'doctor')) return 'provider';
         if (can('hygienist')) return 'hygienist';
         if (can('emt', 'triage')) return 'emt';
@@ -89,6 +104,8 @@ export function renderDashboard(ctx) {
       { label: t('dash.total'), value: stats.total, ic: 'users', kind: 'all' },
       { label: t('dash.waiting'), value: stats.waiting_triage, ic: 'syringe', warn: stats.waiting_triage > 0, kind: 'vitals' },
       { label: t('dash.triaged'), value: stats.triaged, ic: 'clipboard', kind: 'ready' },
+      // A stats payload from before v0.0.15 has no such count; show 0, not NaN.
+      { label: STATUS_LABELS.treatment_waiting, value: stats.treatment_waiting || 0, ic: 'calendar', kind: 'waiting' },
       { label: t('dash.inTreatment'), value: stats.in_treatment, ic: 'tooth', kind: 'treatment' },
     ];
 
@@ -100,7 +117,8 @@ export function renderDashboard(ctx) {
     const journeySteps = [
       { name: 'Registered', n: stats.total, kind: 'all' },
       { name: 'Clearance', n: stats.waiting_triage, kind: 'vitals' },
-      { name: 'Ready', n: stats.triaged, kind: 'ready' },
+      { name: STATUS_LABELS.triaged, n: stats.triaged, kind: 'ready' },
+      { name: STATUS_LABELS.treatment_waiting, n: stats.treatment_waiting || 0, kind: 'waiting' },
       { name: 'Treatment', n: stats.in_treatment, kind: 'treatment' },
       { name: 'Checked out', n: checkedOut, kind: 'done' },
     ];
@@ -109,10 +127,13 @@ export function renderDashboard(ctx) {
     const lastActive = journeySteps.reduce((acc, st, i) => (st.n > 0 ? i : acc), 0);
     const fillPct = journeySteps.length > 1 ? (lastActive / (journeySteps.length - 1)) * 100 : 0;
 
+    // The track runs from the centre of the first step to the centre of the
+    // last, so its inset depends on how many steps there are.
+    const edge = 50 / journeySteps.length;
     const journey = el('div', { class: 'journey' }, [
       el('div', { class: 'journey-title' }, ['Patient journey']),
-      el('ol', { class: 'steps' }, [
-        el('div', { class: 'steps-fill', style: `width:${(fillPct * 0.8).toFixed(1)}%` }),
+      el('ol', { class: 'steps', style: `--steps-edge:${edge.toFixed(2)}%` }, [
+        el('div', { class: 'steps-fill', style: `width:${(fillPct * (1 - 2 * edge / 100)).toFixed(1)}%` }),
         ...journeySteps.map((st, i) => {
           const cls = 'step'
             + (i < lastActive ? ' step--done' : '')
@@ -172,7 +193,9 @@ export function renderDashboard(ctx) {
         if (canEmt) go('emt');
         else if (canRecords) go('records');
         else ctx.toast('This patient is waiting for vitals at the EMT station.', 'info');
-      } else if (p.status === 'triaged' || p.status === 'in_treatment') {
+      } else if (p.status === 'triaged' || p.status === 'treatment_waiting' || p.status === 'in_treatment') {
+        // Still with a provider — including waiting for a treatment chair,
+        // which must never open Check-Out.
         if (store.can('admin', 'doctor')) go('provider');
         else if (store.can('admin', 'hygienist')) go('hygienist');
         else if (canEmt) go('emt');
@@ -328,14 +351,16 @@ export function renderDashboard(ctx) {
   return root;
 }
 
+// Labels come from the one status map every screen and export shares.
 export function statusPill(status) {
-  const map = {
-    checked_in: ['Checked in', 'pill--info'],
-    triaged: ['Ready for treatment', 'pill--info'],
-    in_treatment: ['In treatment', 'pill--warning'],
-    completed: ['Completed', 'pill--success'],
-    dismissed: ['Checked out', 'pill--neutral'],
-  };
-  const [label, cls] = map[status] || [status, 'pill--neutral'];
+  const cls = {
+    checked_in: 'pill--info',
+    triaged: 'pill--info',
+    treatment_waiting: 'pill--purple',
+    in_treatment: 'pill--warning',
+    completed: 'pill--success',
+    dismissed: 'pill--neutral',
+  }[status] || 'pill--neutral';
+  const label = STATUS_LABELS[status] || status;
   return el('span', { class: `pill ${cls}` }, [el('span', { class: 'pill-dot' }), label]);
 }

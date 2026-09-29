@@ -808,7 +808,11 @@ async function main() {
     const dash = (await import('../src/renderer/js/views/dashboard.js')).renderDashboard(ctx14);
     document.body.append(dash); await tick(); await tick();
     const txt = dash.textContent;
-    log(['Checked in', 'Vitals', 'Ready for treatment', 'Hygienist', 'Dentist', 'Checked out'].every((s) => txt.includes(s)), 'v1.5.14: dashboard shows the live stage board with all six columns');
+    // v0.0.15: the dentist's station is Dental Triage, 'triaged' reads "Waiting
+    // for provider", and the queue for a treatment chair has its own columns.
+    const boardCols = Array.from(dash.querySelectorAll('.crm-col-label')).map((n) => n.textContent);
+    log(JSON.stringify(boardCols) === JSON.stringify(['Checked in', 'Vitals', 'Waiting for provider', 'Hygienist', 'Dental Triage', 'Treatment waiting', 'In treatment', 'Checked out']),
+      'v1.5.14: dashboard shows the live stage board with every stage as a column, Dental Triage and Treatment waiting included');
     log(/Aa, Al/.test(txt) && /Bb, Bo/.test(txt) && /Cc, Cy/.test(txt), 'v1.5.14: patients appear as cards on the board');
     log(/Start patient check-in/i.test(txt) && /Live/.test(txt), 'v1.5.14: check-in moved to the header and the board is marked Live');
     log(!/Quick actions/i.test(txt) && !/Back up to USB/i.test(txt), 'v1.5.14: the old Quick Actions grid and dashboard USB backup are gone');
@@ -1777,7 +1781,7 @@ async function main() {
     const views = [
       ['emt.js', 'renderEmt', 'Vitals'],
       ['hygienist.js', 'renderHygienist', 'Cleanings'],
-      ['provider.js', 'renderProvider', 'Dentist'],
+      ['provider.js', 'renderProvider', 'Dental Triage'],
       ['checkout.js', 'renderCheckout', 'Check-Out'],
       ['records.js', 'renderRecords', 'Records'],
     ];
@@ -2650,9 +2654,10 @@ async function main() {
     log(allergyKeys.has('novocain') && st.ALLERGIES.find((a) => a.key === 'novocain').intake === false,
       'allergies: a retired option is kept for display so an old record still shows it');
 
-    // The chairside agent picker offers all five, not the two it used to.
+    // The chairside agent picker offers all five, not the two it used to —
+    // and offers them from the clinic list, skipping only retired agents.
     const provSrc = readSrc('../src/renderer/js/views/provider.js');
-    log(/ANES_AGENTS = \[\.\.\.ANESTHETICS\.map/.test(provSrc),
+    log(/ANESTHETICS\.filter\(\(a\) => !a\.retired \|\| a\.key === current\)\.map/.test(provSrc),
       'drugs: the chairside anaesthetic picker is driven by the clinic list, not its own copy');
 
     // The Worker keeps its own copies; drift there is silent.

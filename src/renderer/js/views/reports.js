@@ -4,13 +4,16 @@ import { SECTIONS, QUESTION_BY_KEY, QUESTIONS } from '../../i18n/exitSurvey.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
+import { STATUS_LABELS } from '../../i18n/dentalLists.js';
 
+// Labels from the one status map every screen and export shares.
 const STATUS_META = {
-  checked_in: ['Checked in', 'var(--info)'],
-  triaged: ['Ready for treatment', 'var(--accent)'],
-  in_treatment: ['In treatment', 'var(--warning)'],
-  completed: ['Completed', 'var(--success)'],
-  dismissed: ['Checked out', 'var(--text-subtle)'],
+  checked_in: [STATUS_LABELS.checked_in, 'var(--info)'],
+  triaged: [STATUS_LABELS.triaged, 'var(--accent)'],
+  treatment_waiting: [STATUS_LABELS.treatment_waiting, 'var(--navy)'],
+  in_treatment: [STATUS_LABELS.in_treatment, 'var(--warning)'],
+  completed: [STATUS_LABELS.completed, 'var(--success)'],
+  dismissed: [STATUS_LABELS.dismissed, 'var(--text-subtle)'],
 };
 const fmtDay = (d) => { const dt = new Date(d + 'T00:00:00'); return isNaN(dt) ? d : dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
 
@@ -171,6 +174,10 @@ export function renderReports(ctx) {
     const checkedOut = sm.checked_out || 0;
     const fillings = sm.fillings || 0, extractions = sm.extractions || 0;
     const cleanings = sm.cleanings || 0, xrays = sm.xrays || 0;
+    // X-rays TAKEN (typed at Dental Triage) is a different number from the
+    // images uploaded; a summary from before v0.0.15 has only the latter.
+    const xraysTaken = sm.xrays_taken != null ? sm.xrays_taken : xrays;
+    const referrals = sm.referrals || 0;
     const withXray = sm.patients_with_xray || 0, flagged = sm.flagged || 0;
     const completePct = total ? Math.round((finished / total) * 100) : 0;
     const inProgress = Math.max(0, total - finished);
@@ -223,7 +230,8 @@ export function renderReports(ctx) {
       el('div', { class: 'kpi-grid' }, [
         kpi('users', total, 'Patients seen', { accent: true }),
         kpi('checkCircle', finished, 'Visits finished', { sub: total ? `${completePct}% of ${total} · ${checkedOut} checked out` : null }),
-        kpi('xray', xrays, 'X-rays uploaded', { sub: withXray ? `${withXray} patient(s)` : null }),
+        kpi('xray', xraysTaken, 'X-rays taken'),
+        kpi('upload', xrays, 'X-rays uploaded', { sub: withXray ? `${withXray} patient(s)` : null }),
         kpi('tooth', extractions, 'Extractions'),
         kpi('pen', fillings, 'Fillings'),
         kpi('scan', cleanings, 'Cleanings'),
@@ -285,7 +293,7 @@ export function renderReports(ctx) {
       el('div', { class: 'dash-grid' }, [
         el('div', { class: 'card' }, [
           el('div', { class: 'card-title' }, [icon('tooth', { size: 15 }), 'Procedures & imaging']),
-          barList({ Fillings: fillings, Extractions: extractions, Cleanings: cleanings, 'X-rays': xrays }),
+          barList({ Fillings: fillings, Extractions: extractions, Cleanings: cleanings, 'X-rays taken': xraysTaken, Referrals: referrals }),
         ]),
         el('div', { class: 'card' }, [
           el('div', { class: 'card-title' }, [icon('clipboard', { size: 15 }), 'Most common conditions']),
@@ -447,7 +455,9 @@ function demoGroup(title, counts, order, opts = {}) {
 
 // Segmented stacked bar + legend with counts.
 function statusBar(byStatus, total) {
-  const order = ['checked_in', 'triaged', 'in_treatment', 'completed', 'dismissed'];
+  // Every status, in visit order. A key missing here would silently drop out
+  // of the bar, which would then no longer add up to the patients seen.
+  const order = ['checked_in', 'triaged', 'treatment_waiting', 'in_treatment', 'completed', 'dismissed'];
   const present = order.filter((k) => byStatus[k]);
   const bar = el('div', { class: 'status-bar' }, present.map((k) => {
     const pct = total ? (byStatus[k] / total) * 100 : 0;

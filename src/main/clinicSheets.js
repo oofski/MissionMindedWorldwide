@@ -54,6 +54,11 @@ function ageFrom(dob) {
   return Math.floor((Date.now() - d.getTime()) / (365.25 * 24 * 3600 * 1000));
 }
 
+// The Dental Triage lists and the printing rules the PDF shares (surfaces,
+// anaesthetic agent and site, restorative, referral, status) — one copy, so the
+// spreadsheet and the printed record cannot disagree.
+const DL = require('./dentalLabels');
+
 function clinicSheets(bundle) {
   const b = bundle || {};
   const patients = b.patients || [];
@@ -71,8 +76,8 @@ function clinicSheets(bundle) {
   });
 
   const STATUS = {
-    checked_in: 'Checked in', triaged: 'Ready for treatment',
-    in_treatment: 'In treatment', completed: 'Completed', dismissed: 'Checked out',
+    // The shared status map (src/main/dentalLabels.js).
+    ...DL.STATUS_LABELS,
   };
 
   const patientRows = patients.map((p) => {
@@ -95,7 +100,8 @@ function clinicSheets(bundle) {
       yn(m.under_treatment), yn(m.hospitalized), yn(m.tobacco), yn(m.pregnancy),
       tr.bp_systolic != null && tr.bp_diastolic != null ? `${tr.bp_systolic}/${tr.bp_diastolic}` : '',
       tr.heart_rate == null ? '' : tr.heart_rate,
-      tr.route === 'dentist' ? 'Dentist' : tr.route === 'hygienist' ? 'Hygienist' : '',
+      // 'dentist' is the Dental Triage station; the stored key never changed.
+      tr.route === 'dentist' ? 'Dental Triage' : tr.route === 'hygienist' ? 'Hygienist' : tr.route === 'both' ? 'Dental Triage + Hygienist' : '',
       STATUS[p.status] || p.status,
       p.created_at, p.arrived_at, p.dismissed_at,
     ];
@@ -103,17 +109,39 @@ function clinicSheets(bundle) {
 
   const treatmentRows = [];
   patients.forEach((p) => {
-    const t = txBy.get(p.id);
-    if (!t) return;
+    const tr = triageBy.get(p.id) || {};
+    // Someone x-rayed at Dental Triage and not yet treated still belongs here:
+    // the count taken is a Dental Triage figure, recorded before any treatment.
+    if (!txBy.has(p.id) && tr.xrays_taken == null) return;
+    const t = txBy.get(p.id) || {};
     const fillings = j(t.fillings, []), extractions = j(t.extractions, []), cleaning = j(t.cleaning, {});
-    const anes = j(t.anesthetic, []);
+    const anes = DL.anesRows(j(t.anesthetic, []));
+    const ref = j(t.referral_out, null);
+    const images = (xraysBy.get(p.id) || []).length;
     treatmentRows.push([
       p.last_name, p.first_name,
       extractions.length, extractions.map((e) => e.tooth).filter(Boolean).join(', '),
-      fillings.length, fillings.map((f) => [f.tooth, (f.surfaces || []).join(',')].filter(Boolean).join(' ')).filter(Boolean).join(', '),
+      // "14 MO"; a filling recorded before v0.0.15 reads "14 2-surface". A
+      // legacy string of surfaces used to throw here and stop the export.
+      fillings.length, fillings.map((f) => [f.tooth, DL.formatSurfaces(f.surfaces)].filter(Boolean).join(' ')).filter(Boolean).join(', '),
       // 'teeth' and 'quad_detail' are notes on a cleaning, not one.
-      Object.entries(cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail') ? 'Yes' : '',
-      anes.map((x) => [x.agent, x.carps && x.carps + ' carp(s)', x.tooth && 'tooth ' + x.tooth].filter(Boolean).join(' ')).join('; '),
+      DL.cleaningDone(cleaning).length ? 'Yes' : '',
+      // Agent by name (never "mepivacaine"), and the injection site, which the
+      // spreadsheet did not carry at all before.
+      anes.map((x) => [
+        DL.anesAgentLabel(x) + (x.carps ? ` × ${x.carps} carp(s)` : ''),
+        x.tooth && 'tooth ' + x.tooth,
+        DL.anesSiteText(x),
+      ].filter(Boolean).join(', ')).join('; '),
+      DL.restorativeItems(j(t.restorative, {})).join('; '),
+      DL.servicesItems(j(t.services, {})).join('; '),
+      DL.hasReferralOut(ref) ? DL.referralDestinations(ref) : '',
+      ref && ref.urgency ? DL.referralUrgencyLabel(ref.urgency) : '',
+      ref ? [ref.tooth && '#' + ref.tooth, ref.reason].filter(Boolean).join(' — ') : '',
+      // Typed at Dental Triage; a visit without the count (every one before
+      // v0.0.15) reads its images, as the printed record and the report do.
+      tr.xrays_taken == null ? images : tr.xrays_taken,
+      images,
       t.other_procedures, t.clinical_notes, t.provider_name, t.completed_at,
       t.locked ? 'Signed off' : '',
     ]);
@@ -150,8 +178,9 @@ function clinicSheets(bundle) {
     {
       name: 'Treatment',
       columns: ['Last name', 'First name', 'Extractions', 'Teeth extracted', 'Fillings',
-        'Teeth filled', 'Cleaning', 'Anaesthetic', 'Other procedures', 'Clinical notes',
-        'Provider', 'Completed at', 'Signed off'],
+        'Teeth filled', 'Cleaning', 'Anaesthetic', 'Restorative', 'Services (recorded before v0.0.15)',
+        'Referred to', 'Referral urgency', 'Referral details', 'X-rays taken', 'X-rays uploaded',
+        'Other procedures', 'Clinical notes', 'Provider', 'Completed at', 'Signed off'],
       rows: treatmentRows,
     },
     {
@@ -184,7 +213,11 @@ function summarySheets(summary) {
         ['Clinic', s.event_name], ['Location', s.event_location], ['Start date', s.event_start],
         ['Patients seen', s.patients_seen], ['Visits completed', s.visits_completed],
         ['Extractions', s.extractions], ['Fillings', s.fillings],
-        ['Cleanings', s.cleanings], ['X-rays taken', s.xrays],
+        // Taken (typed at Dental Triage) and uploaded are different figures; a
+        // summary from before v0.0.15 has only the images, which is what it
+        // meant by "taken" then.
+        ['Cleanings', s.cleanings], ['X-rays taken', s.xrays_taken != null ? s.xrays_taken : s.xrays],
+        ['X-rays uploaded', s.xrays], ['Referred elsewhere for care', s.referrals || 0],
         ['Report generated', s.generated_at],
       ],
     },
