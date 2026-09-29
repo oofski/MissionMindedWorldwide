@@ -1707,7 +1707,7 @@ function importPatientFromPortable(actor, portable) {
     (portable.consents || []).forEach((c) => addConsent(pid, c));
   }
   // Triage, treatment, vitals, x-rays from the portable file.
-  if (portable.triage) saveTriage(actor, pid, portable.triage);
+  if (portable.triage) saveTriage(actor, pid, portable.triage, { replay: true });
   if (portable.treatment) {
     // Preserve the treatment's completion state on import: a locked record stays
     // locked, a completed-but-unlocked record stays completed (v1.2.1 "Mark visit
@@ -1733,6 +1733,20 @@ function importPatientFromPortable(actor, portable) {
   if (ptr.treatment_waiting_at) {
     db.prepare('UPDATE triage SET treatment_waiting_at=?, treatment_waiting_by=NULL, treatment_waiting_by_name=? WHERE patient_id=?')
       .run(ptr.treatment_waiting_at, portable.treatment_waiting_by_name || ptr.treatment_waiting_by_name || null, pid);
+  } else {
+    // No stamp in the file. A file from this version that says so (the key is
+    // there, empty) had the patient examined at Dental Triage without being
+    // parked, or sent back to it; a patient back before the examination
+    // ('triaged', or at the front desk) was never parked, whichever version
+    // wrote the file. Either way a stamp left here would later file them in
+    // the In treatment list instead of Dental Triage's. A file from an older
+    // laptop, which knows nothing of the stage, leaves a stamp this laptop
+    // holds for a patient past the examination alone.
+    const st = (db.prepare('SELECT status FROM patients WHERE id = ?').get(pid) || {}).status;
+    const saysNone = Object.prototype.hasOwnProperty.call(ptr, 'treatment_waiting_at');
+    if (st !== 'treatment_waiting' && (saysNone || st === 'triaged' || st === 'checked_in')) {
+      db.prepare(`UPDATE triage SET ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(pid);
+    }
   }
   (portable.xrays || []).forEach((x) => { if (x.image_png) db.prepare('INSERT INTO xrays (patient_id, station, image_png, note, tooth, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run(pid, x.station || null, x.image_png, x.note || null, x.tooth || null, x.created_at || now(), now()); });
   recountXrays(pid);
@@ -2138,7 +2152,10 @@ function sanitizeSurveyAnswers(raw) {
   return out;
 }
 
-function saveTriage(actor, patientId, data) {
+// opts.replay: a USB import replaying another laptop's record, which states the
+// patient's stage as that laptop has it (see importPatientFromPortable). Never
+// set over IPC, which passes three arguments.
+function saveTriage(actor, patientId, data, opts = {}) {
   const existing = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
   // Validated before anything is written, so a refused count leaves the rest
@@ -2187,8 +2204,12 @@ function saveTriage(actor, patientId, data) {
   if (hasXraysTaken) db.prepare('UPDATE triage SET xrays_taken = ? WHERE patient_id = ?').run(xraysTaken, patientId);
   if (d.status === 'ready') {
     // Never pulls a patient back out of Treatment Waiting: only moving them on
-    // (treatment) or an admin move may do that.
-    db.prepare("UPDATE patients SET status = ?, updated_at = ? WHERE id = ? AND status != 'treatment_waiting'").run('triaged', now(), patientId);
+    // (treatment) or an admin move may do that. A USB import is the exception:
+    // a file whose patient an admin sent back to Dental Triage says so, and
+    // the guard used to leave the local copy parked for a chair while its
+    // triage row said 'ready'.
+    if (opts.replay) db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('triaged', now(), patientId);
+    else db.prepare("UPDATE patients SET status = ?, updated_at = ? WHERE id = ? AND status != 'treatment_waiting'").run('triaged', now(), patientId);
   }
   audit(actor, 'triage', 'patient', patientId, d.status || 'saved');
   return getPatient(patientId);
@@ -2306,8 +2327,20 @@ function saveTreatment(actor, patientId, data, finalize) {
 // from "in progress at triage" (both are status in_treatment).
 function markTreatmentWaiting(actor, patientId) {
   const at = now();
-  if (!db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId)) {
+  const tr = db.prepare('SELECT id, route FROM triage WHERE patient_id = ?').get(patientId);
+  if (!tr) {
     db.prepare("INSERT INTO triage (patient_id, status) VALUES (?, 'treatment_waiting')").run(patientId);
+  } else if (tr.route === 'hygienist') {
+    // Treatment Waiting is Dental Triage's queue for a chair, whichever way the
+    // patient gets there. A patient the dentist opened from the hygienist's
+    // list and parked for a chair used to keep route 'hygienist': the provider
+    // screen and the board then filed them with the hygienist while the
+    // Treatment waiting count included them, so no chair queue showed them.
+    // They are re-routed as an admin move to Treatment waiting routes them;
+    // 'both' already reaches Dental Triage and stays as it is.
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, at, patientId);
+    audit(actor, 'route', 'patient', patientId, 'dentist');
   }
   // The name is stored alongside the id at the moment of the move, so a later
   // sync can never pair this stamp with a stale name from an earlier one.
@@ -2319,7 +2352,8 @@ function markTreatmentWaiting(actor, patientId) {
 
 // The outbound Referral card, as stored. Whitelisted and trimmed so the blob a
 // report or the after-care sheet reads is always the same shape; nothing at all
-// recorded is NULL, which is how "no referral" reads everywhere.
+// recorded is NULL, which is how "no referral" reads everywhere, and details
+// with no destination are refused (hasReferralOut in dentalLabels is the rule).
 const REFERRAL_URGENCIES = ['routine', 'soon', 'urgent'];
 function cleanReferralOut(v) {
   const r = typeof v === 'string' ? safeJson(v, null) : v;
@@ -2334,7 +2368,13 @@ function cleanReferralOut(v) {
     tooth: str(r.tooth, 40),
     reason: str(r.reason, 1000),
   };
-  if (!out.to.length && !out.to_other && !out.urgency && !out.tooth && !out.reason) return null;
+  if (!out.to.length && !out.to_other) {
+    // A referral is where the patient is sent. An urgency, tooth or reason with
+    // nowhere to send them is refused here as on the screen, rather than kept
+    // where no count, list or printed record would ever show it.
+    if (out.urgency || out.tooth || out.reason) throw new Error('Required: Refer to — tick where the patient is being referred.');
+    return null;
+  }
   return JSON.stringify(out);
 }
 
@@ -3507,9 +3547,17 @@ function applyRemoteRows(remoteRows) {
     // outranks every edit made elsewhere since the sender's, so a colleague's
     // later, genuine edit was refused here on the next pull and lost in the
     // cloud, and the older laptop's content won everywhere.
-    const merged = db.prepare(`SELECT * FROM ${table} WHERE uid = ?`).get(env.uid);
+    // Only a row that could have been merged is read back and re-hashed: one
+    // with a column not written from what arrived, or an existing row whose
+    // name the sender left empty, which buildData may fill from the local id
+    // (a new row has no local id to fill it from). Every other row IS what
+    // arrived, which rowSig already describes — re-reading and re-hashing them
+    // all (x-ray images included) doubled the cost of a full pull.
+    const mayDiffer = cols.length !== SYNC_COLS[entity].length
+      || (!!existing && SYNC_COLS[entity].some((c) => NAME_SOURCE[c] && data[c] == null));
+    const merged = mayDiffer && env.updated_at ? db.prepare(`SELECT * FROM ${table} WHERE uid = ?`).get(env.uid) : null;
     const mergedSig = merged ? sig(buildData(entity, merged)) : rowSig;
-    if (mergedSig !== rowSig && env.updated_at) {
+    if (mergedSig !== rowSig) {
       db.prepare(`UPDATE ${table} SET updated_at = ?, content_rev = ? WHERE id = ?`).run(justAbove(env.updated_at), mergedSig, merged.id);
     }
     applied++;

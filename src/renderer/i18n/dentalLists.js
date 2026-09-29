@@ -49,6 +49,17 @@ export function surfaceList(value) {
 }
 
 /**
+ * A stored list of teeth (a cleaning's teeth above all) as tooth ids. Older
+ * records hold it as a string ("1,2"), which broke Dental Triage's chart and
+ * was split into characters — the comma a "tooth" — by the hygienist's.
+ */
+export function toothList(value) {
+  if (value == null || value === '') return [];
+  const raw = Array.isArray(value) ? value : String(value).split(/[\s,;/]+/);
+  return Array.from(new Set(raw.map((v) => String(v == null ? '' : v).trim()).filter(Boolean)));
+}
+
+/**
  * Surfaces as a clinician writes them: letters joined in canonical order ("MO"),
  * a legacy count as "2-surface", anything else verbatim so nothing recorded is
  * ever hidden.

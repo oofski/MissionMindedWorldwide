@@ -12,7 +12,7 @@ import { bloodThinnerStatus, bloodThinnerText, bpStatus } from '../medFlags.js';
 import { scanBox } from '../components/wristband.js';
 import { chipGrid } from '../forms.js';
 import {
-  SURFACES, LEGACY_SURFACE_COUNTS, surfaceList, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY,
+  SURFACES, LEGACY_SURFACE_COUNTS, surfaceList, toothList, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY,
 } from '../../i18n/dentalLists.js';
 
 const QUADRANTS = [['UR', 'UR'], ['UL', 'UL'], ['LR', 'LR'], ['LL', 'LL']];
@@ -264,17 +264,24 @@ export function renderProvider(ctx, params = {}) {
       let ant = !!f.ant, post = !!f.post;
       const antBtn = toggleChip('Ant', ant, (on) => { ant = on; }, locked);
       const postBtn = toggleChip('Post', post, (on) => { post = on; }, locked);
+      // Whatever else an older build stored on the row — a single `position`
+      // the printed record still reads when Ant/Post are unset, above all — is
+      // saved back untouched rather than dropped by the next save.
+      const keptF = legacyKeys(f, ['tooth', 'surfaces', 'ant', 'post', 'note']);
+      const positionChip = f.position != null && String(f.position).trim()
+        ? el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${f.position}" — kept as recorded` }, [String(f.position)])
+        : null;
       const noteChip = el('span', { class: 'tx-note' + (f.note ? '' : ' hidden') }, [f.note || '']);
       const row = el('div', { class: 'filling-row', style: 'grid-template-columns:160px auto auto auto' }, [
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Surfaces']), surfWrap]),
-        el('div', { class: 'antpost' }, [antBtn, postBtn]),
+        el('div', { class: 'antpost' }, [antBtn, postBtn, positionChip]),
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = f.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptF, tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       fillingRows.append(row);
     }
@@ -286,19 +293,27 @@ export function renderProvider(ctx, params = {}) {
     function addExtraction(x = {}, auto = false) {
       const toothF = toothField(x.tooth, () => refreshMarks());
       const tooth = toothF.input;
-      const types = new Set(x.types || []);
+      // An early build stored one type as `type`; it is the same choice, so it
+      // is shown ticked and saved in `types` — the printed record already reads
+      // it by name, and a re-save used to write it away as no type at all. A
+      // key this build does not list is kept, shown as recorded.
+      const types = new Set(Array.isArray(x.types) ? x.types : (x.type ? [x.type] : []));
       const typeChips = EXTRACTION_TYPES.map(([k, label]) =>
         toggleChip(label, types.has(k), (on) => { if (on) types.add(k); else types.delete(k); }, locked));
+      const unknownTypes = [...types].filter((k) => !EXTRACTION_TYPES.some(([key]) => key === k))
+        .map((k) => el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${k}" — kept as recorded` }, [`(recorded) ${k}`]));
+      const keptX = legacyKeys(x, ['tooth', 'types', 'type', 'note']);
       const noteChip = el('span', { class: 'tx-note' + (x.note ? '' : ' hidden') }, [x.note || '']);
       const row = el('div', { class: 'ext-row' }, [
         el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         ...typeChips,
+        ...unknownTypes,
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = x.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptX, tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       extractRows.append(row);
     }
@@ -309,7 +324,8 @@ export function renderProvider(ctx, params = {}) {
 
     /* ---------- Cleaning ---------- */
     const cleanState = { ...(tx.cleaning || {}) };
-    if (!cleanState.teeth) cleanState.teeth = [];
+    // An older record's teeth as a string ("1,2") stopped this screen drawing.
+    cleanState.teeth = toothList(cleanState.teeth);
     const quadDetail = el('input', { class: 'input input--sm', placeholder: 'Quadrant(s) e.g. UR, LL', value: cleanState.quad_detail || '', style: cleanState.quad_deep_scaling ? '' : 'display:none' });
     const cleanTeeth = el('div', { class: 'odo-selected-list', style: 'margin-top:8px' });
     function renderCleanTeeth() {
@@ -975,6 +991,13 @@ export function renderProvider(ctx, params = {}) {
         if (firstChip) firstChip.focus();
         return;
       }
+      // "Other" is a destination only once it is named: ticked alone and left
+      // blank it counted as a referral and printed as "Referred to: Other".
+      if (refDest.includes('other') && !refOther.value.trim()) {
+        toast(t('common.required') + ': Other destination', 'error');
+        refOther.focus();
+        return;
+      }
       const payload = collectTreatment();
       // Every treatment note has to say who performed it — a record that leaves
       // this station unattributed is not a clinical record. Required whenever the
@@ -1262,6 +1285,13 @@ function toggleChip(label, on, cb, disabled) {
   else b.addEventListener('click', () => { const now = !b.classList.contains('chip-btn--on'); b.classList.toggle('chip-btn--on', now); cb(now); });
   return b;
 }
+// The keys of a stored row this screen does not edit, to be saved back as they
+// were (a shape an older or newer build wrote), minus the ones it rebuilds.
+function legacyKeys(row, rebuilt) {
+  const out = {};
+  Object.keys(row || {}).forEach((k) => { if (!rebuilt.includes(k) && row[k] !== undefined) out[k] = row[k]; });
+  return out;
+}
 function iconBtn(name, onClick) { return el('button', { class: 'btn btn--ghost btn--sm btn--icon', type: 'button', onClick }, [icon(name, { size: 15 })]); }
 function ghostBtn(name, label, onClick) { return el('button', { class: 'btn btn--ghost btn--sm', onClick }, [icon(name, { size: 15 }), label]); }
 function softBtn(name, label, onClick) { return el('button', { class: 'btn btn--soft btn--sm', type: 'button', onClick }, [icon(name, { size: 15 }), label]); }
@@ -1283,7 +1313,7 @@ function initialTeeth(tx, tr) {
   const data = {};
   (tx.fillings || []).forEach((f) => { if (f.tooth) data[f.tooth] = { tx: 'filling', note: f.note || '' }; });
   (tx.extractions || []).forEach((x) => { if (x.tooth && !x.other) data[x.tooth] = { tx: 'extraction', note: x.note || '' }; });
-  ((tx.cleaning && tx.cleaning.teeth) || []).forEach((id) => { if (!data[id]) data[id] = { tx: 'cleaning', note: '' }; });
+  toothList(tx.cleaning && tx.cleaning.teeth).forEach((id) => { if (!data[id]) data[id] = { tx: 'cleaning', note: '' }; });
   (tr.teeth || []).forEach((id) => { if (!data[id]) data[id] = { tx: null, note: (tr.teeth_notes && tr.teeth_notes[id]) || '' }; });
   Object.entries(tr.teeth_notes || {}).forEach(([id, note]) => { if (data[id] && !data[id].note) data[id].note = note; });
   return data;

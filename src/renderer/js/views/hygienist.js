@@ -10,6 +10,7 @@ import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
 import { scanBox } from '../components/wristband.js';
 import { sortedByName } from '../patientSort.js';
+import { toothList } from '../../i18n/dentalLists.js';
 
 // Cleaning options a hygienist performs (mirrors the provider's cleaning set).
 const CLEANING_OPTS = [
@@ -84,7 +85,9 @@ export function renderHygienist(ctx, params = {}) {
 
     // Cleaning state — preserved from any prior save; teeth tracked as a Set.
     const cleanState = { ...(tx.cleaning || {}) };
-    const teeth = new Set(cleanState.teeth || []);
+    // An older record's teeth as a string ("1,2") used to become a set of
+    // characters here, and was saved back with the comma as a tooth.
+    const teeth = new Set(toothList(cleanState.teeth));
 
     const odo = Odontogram({
       mode: 'adult',

@@ -116,7 +116,11 @@ function clinicSheets(bundle) {
     const t = txBy.get(p.id) || {};
     const fillings = j(t.fillings, []), extractions = j(t.extractions, []), cleaning = j(t.cleaning, {});
     const anes = DL.anesRows(j(t.anesthetic, []));
-    const ref = j(t.referral_out, null);
+    // Only a referral that sends the patient somewhere is one (the rule the
+    // printed record and every count use); details stored without a
+    // destination fill none of its three columns.
+    const refRaw = j(t.referral_out, null);
+    const ref = DL.hasReferralOut(refRaw) ? refRaw : null;
     const images = (xraysBy.get(p.id) || []).length;
     treatmentRows.push([
       p.last_name, p.first_name,
@@ -135,7 +139,7 @@ function clinicSheets(bundle) {
       ].filter(Boolean).join(', ')).join('; '),
       DL.restorativeItems(j(t.restorative, {})).join('; '),
       DL.servicesItems(j(t.services, {})).join('; '),
-      DL.hasReferralOut(ref) ? DL.referralDestinations(ref) : '',
+      ref ? DL.referralDestinations(ref) : '',
       ref && ref.urgency ? DL.referralUrgencyLabel(ref.urgency) : '',
       ref ? [ref.tooth && '#' + ref.tooth, ref.reason].filter(Boolean).join(' — ') : '',
       // Typed at Dental Triage; a visit without the count (every one before
