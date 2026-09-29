@@ -4703,6 +4703,17 @@ async function main() {
     const rt = db.getPatient(rtP.id);
     const rtSync = db.collectSyncRows(5000).rows.find((r) => r.entity === 'triage' && r.data && r.data.route === 'hygienist' && r.data.routed_by_name === 'C triage');
     log(rt.routed_by_name === 'C triage' && !!rtSync, 'routing: a re-route names the person who re-routed, locally and on every station');
+    // The same for who completed the visit: a name synced from another laptop
+    // must not keep standing once someone here completes it, or re-opens it.
+    const cbP = mkC('Cora', 'Completer', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), cbP.id, { provider_name: 'Dr C' }, 'complete');
+    { const r = rawDb(); try { r.prepare("UPDATE treatments SET completed_by=NULL, completed_by_name='Dr Elsewhere' WHERE patient_id=?").run(cbP.id); } finally { r.close(); } }
+    await as('doctor');
+    await window.api.treatmentSave({ patientId: cbP.id, data: { provider_name: 'Dr C' }, finalize: false });
+    const cbOpen = db.getPatient(cbP.id).completed_by_name;
+    await window.api.treatmentSave({ patientId: cbP.id, data: { provider_name: 'Dr C' }, finalize: 'complete' });
+    log(cbOpen === null && db.getPatient(cbP.id).completed_by_name === 'C doctor',
+      'completion: completing a visit names who completed it, and re-opening it clears a name another laptop synced');
 
     /* ---- a returning patient's older history ---- */
     const retP = mkC('Rhea', 'Returning', { medical: { conditions: ['none'], conditions_none: true, pregnancy: 'no', allergies: ['none'], allergies_none: true, medications_none: true } });

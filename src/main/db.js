@@ -2687,12 +2687,16 @@ function saveTreatment(actor, patientId, data, finalize) {
   const curStatus = (db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId) || {}).status;
   const amending = !!(existing && !existing.locked && existing.unlocked_at && (curStatus === 'completed' || curStatus === 'dismissed'));
   const keepCompletion = amending && !complete && !waiting;
+  // Who completed the visit is written by name with the id, as every other
+  // *_by_name is: left alone, a name that arrived by sync from another laptop
+  // kept naming that person after someone here completed (or re-opened) it.
+  const completedByName = complete ? ((actor && actor.full_name) || null) : (keepCompletion ? existing.completed_by_name : null);
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
          restorative=?, services=?, referral_out=?,
          other_procedures=?, clinical_notes=?, provider_name=?, provider_signature=?,
-         locked=?, completed_by=?, completed_at=?
+         locked=?, completed_by=?, completed_at=?, completed_by_name=?
        WHERE patient_id=?`
     ).run(
       JSON.stringify(d.fillings || []),
@@ -2709,21 +2713,22 @@ function saveTreatment(actor, patientId, data, finalize) {
       lock ? 1 : 0,
       complete ? (actor ? actor.id : null) : (keepCompletion ? existing.completed_by : null),
       complete ? now() : (keepCompletion ? existing.completed_at : null),
+      completedByName,
       patientId
     );
   } else {
     db.prepare(
       `INSERT INTO treatments (patient_id, fillings, extractions, cleaning, anesthetic,
           restorative, services, referral_out,
-          other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at, completed_by_name)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       patientId, JSON.stringify(d.fillings || []), JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}), JSON.stringify(d.anesthetic || []),
       restorative, services, referralOut,
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
-      complete ? (actor ? actor.id : null) : null, complete ? now() : null
+      complete ? (actor ? actor.id : null) : null, complete ? now() : null, completedByName
     );
   }
   if (lock) stampLock(actor, patientId, 'lock');
