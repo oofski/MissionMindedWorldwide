@@ -218,19 +218,22 @@ export function renderCheckout(ctx, params = {}) {
   //
   // The list of sections is fetched after the card is drawn and a failure only
   // says so, so a slow or refused lookup can never blank the check-out screen.
-  function aftercareBlock(p) {
+  // Shared by the Actions card and the dismiss confirmation, so the one-tap
+  // tick in the queue shows the desk the same instructions the record does.
+  function aftercareParts(p) {
     const lang = p.language || 'en';
     const langName = (code) => ((languageList().find((l) => l.code === code) || {}).label || code);
     const chips = el('div', { class: 'chip-row aftercare-chips' }, [el('span', { class: 'view-sub' }, ['Checking what was done…'])]);
-    const note = el('p', { class: 'view-sub', style: 'margin-top:2px' });
+    const note = el('p', { class: 'view-sub aftercare-note', style: 'margin-top:2px' });
+    const printBtn = el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => printAftercare(p, lang) }, [icon('print', { size: 16 }), 'Print after-care']);
     // Offered only when the sheet would otherwise print in another language —
     // for a patient whose language has no version yet it prints in English
     // anyway, and a second button doing the same would only confuse.
-    const englishBtn = el('button', { class: 'btn btn--ghost btn--block', style: lang === 'en' ? 'display:none' : null, onClick: () => printAftercare(p, 'en') }, [icon('print', { size: 16 }), 'Print in English']);
+    const englishBtn = el('button', { class: 'btn btn--ghost btn--block', type: 'button', style: lang === 'en' ? 'display:none' : null, onClick: () => printAftercare(p, 'en') }, [icon('print', { size: 16 }), 'Print in English']);
     api.aftercareGet(p.id, lang).then((ac) => {
       chips.replaceChildren(...ac.sections.map((x) => el('span', { class: 'pill pill--info', dataset: { key: x.key } }, [x.title_en])));
       note.textContent = [
-        ac.keys.length ? '' : 'No procedure is recorded for this visit, so the sheet carries only the general advice.',
+        stageNote(p, ac),
         ac.fellBack ? `Prints in English: there is no ${langName(ac.requested)} version yet.` : ac.lang !== 'en' ? `Prints in ${langName(ac.lang)}, the patient’s language.` : '',
         ac.status === 'draft' ? `Draft wording (${ac.version}) until MMW’s own templates replace it.` : '',
       ].filter(Boolean).join(' ');
@@ -238,13 +241,32 @@ export function renderCheckout(ctx, params = {}) {
     }).catch(() => {
       chips.replaceChildren(el('span', { class: 'view-sub' }, ['Could not list the instructions here — Preview shows the sheet.']));
     });
+    return { lang, chips, note, printBtn, englishBtn };
+  }
+
+  // Why the list is what it is. A patient examined at Dental Triage and parked
+  // for a chair has a chart of PLANNED work, which the sheet leaves out; a
+  // patient still at a chair has what is charted so far.
+  function stageNote(p, ac) {
+    if (ac.stage === 'not_treated') {
+      if (p.status === 'treatment_waiting') return 'Examined at Dental Triage and still waiting for a treatment chair — the treatment is not done yet, so only the general advice will print.';
+      if (p.status === 'dismissed') return 'Checked out while still waiting for a treatment chair — nothing charted was done, so the sheet carries only the general advice.';
+      return 'Not yet at a treatment chair, so only the general advice will print.';
+    }
+    if (!ac.keys.length) return 'No procedure is recorded for this visit, so the sheet carries only the general advice.';
+    if (ac.stage === 'in_progress') return 'Visit still in progress: these are the procedures charted so far — check with the dentist that they were done before printing.';
+    return '';
+  }
+
+  function aftercareBlock(p) {
+    const a = aftercareParts(p);
     return el('div', { class: 'action-stack' }, [
       el('span', { class: 'field-label' }, ['After-care instructions']),
-      chips,
-      note,
-      el('button', { class: 'btn btn--ghost btn--block', onClick: () => printAftercare(p, lang) }, [icon('print', { size: 16 }), 'Print after-care']),
-      englishBtn,
-      el('button', { class: 'btn btn--ghost btn--block', onClick: () => previewAftercare(p, lang) }, [icon('eye', { size: 16 }), 'Preview']),
+      a.chips,
+      a.note,
+      a.printBtn,
+      a.englishBtn,
+      el('button', { class: 'btn btn--ghost btn--block', onClick: () => previewAftercare(p, a.lang) }, [icon('eye', { size: 16 }), 'Preview']),
     ]);
   }
 
@@ -276,8 +298,24 @@ export function renderCheckout(ctx, params = {}) {
     return saved;
   }
 
+  // The last moment before the patient leaves — and, from the one-tap tick in
+  // the queue, the only one: that path never opens the record. So the
+  // confirmation lists the after-care that applies and offers to print it,
+  // without waiting on it: confirming dismisses whether or not anything was
+  // printed. Built from text nodes, never markup, since it carries the name.
   async function dismiss(p) {
-    const ok = await modal({ title: 'Dismiss patient?', body: `Confirm that ${p.first_name} ${p.last_name}'s treatment and notes are complete, and dismiss them.`, confirmText: 'Verify & dismiss', cancelText: 'Cancel' });
+    const a = aftercareParts(p);
+    const body = el('div', { class: 'dismiss-confirm' }, [
+      el('p', {}, [`Confirm that ${p.first_name} ${p.last_name}’s treatment and notes are complete, and dismiss them.`]),
+      el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
+        el('span', { class: 'field-label' }, ['After-care instructions (optional)']),
+        a.chips,
+        a.note,
+        a.printBtn,
+        a.englishBtn,
+      ]),
+    ]);
+    const ok = await modal({ title: 'Dismiss patient?', body, confirmText: 'Verify & dismiss', cancelText: 'Cancel' });
     if (!ok) return;
     try { await api.dismissPatient(p.id); toast('Patient dismissed', 'success'); queue(); } catch (e) { toast(e.message, 'error'); }
   }

@@ -187,22 +187,27 @@ function reportSections(summary, scopeLabel, labels) {
   }
 
   // The exit survey, which is what a grant return is actually written from.
+  // A report kept by v0.0.8–v0.0.9 has only the headline trio and the answers,
+  // no per-stage blocks; its survey was the check-out survey, so the trio IS
+  // the check-out row — the Reports tab reads it the same way. Gating on the
+  // stage blocks dropped that report's survey, answers included, from the file.
   const sv = s.survey;
-  if (sv && (sv.registration || sv.exit)) {
+  if (sv) {
     const reg = sv.registration || {};
-    const ex = sv.exit || {};
+    const ex = sv.exit || { completed: Number(sv.responses) || 0, declined: Number(sv.declined) || 0, not_asked: Number(sv.not_asked) || 0 };
     // Since v0.0.15 the whole survey is asked at check-out. The registration
     // row appears only for records (or kept reports) from v0.0.10–v0.0.14, when
     // the household half was asked there — the Reports tab uses the same rule —
     // so an export never states "N not asked at registration" as a finding
     // about a question nobody was meant to ask. Its "Not asked" is left blank
-    // for the same reason.
+    // for the same reason, and its label says its first figure may count blank
+    // forms: those builds marked every registration completed, answered or not.
     const regCount = (Number(reg.completed) || 0) + (Number(reg.declined) || 0);
     sections.push({
       title: 'Survey responses',
       columns: ['Asked', 'Answered', 'Declined', 'Not asked'],
       rows: [
-        ...(regCount > 0 ? [['At registration (before v0.0.15)', reg.completed || 0, reg.declined || 0, '—']] : []),
+        ...(regCount > 0 ? [['At registration (before v0.0.15; may include blank forms)', reg.completed || 0, reg.declined || 0, '—']] : []),
         ['At check-out', ex.completed || 0, ex.declined || 0, ex.not_asked || 0],
       ],
     });

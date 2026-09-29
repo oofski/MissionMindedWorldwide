@@ -10,9 +10,10 @@
  *   - 'summary'   : the Patient Summary — the visit as the patient takes it home
  *   - 'aftercare' : the after-care instructions alone, one page, in the
  *                   patient's language (src/main/aftercare.js)
- * 'summary' and 'full' end with the after-care page too, once there is care to
- * describe (see aftercare.aftercareSections, appendToRecord). An unknown format
- * prints the Progress Note, as it always has.
+ * 'summary' and 'full' end with the after-care page too, once the patient has
+ * been at a treatment chair and there is care to describe (see
+ * aftercare.careStage and appendToRecord): a Dental Triage chart is a plan, not
+ * care done. An unknown format prints the Progress Note, as it always has.
  */
 
 const { BrowserWindow } = require('electron');
@@ -315,20 +316,23 @@ function progressNoteBody(p, lang) {
         ${t.provider_signature ? `<div class="sig"><img src="${imgSrc(t.provider_signature)}"/></div>` : '<span class="muted">No signature</span>'}
       </div>
     </div>
-    ${aftercareGivenLine(p, lang)}`;
+    ${aftercareSheetLine(p, lang)}`;
 }
 
 // One line in the clinical note naming the after-care sheet that goes with this
 // visit: its sections, the template version and the language. The sheet is
 // derived from the procedures recorded, so the note says which text applied —
-// a reprint months later is traceable to the same words. Printed under the same
-// rule as the after-care page itself (not before any care was recorded).
-function aftercareGivenLine(p, lang) {
+// a reprint months later is traceable to the same words. It names the sheet
+// that APPLIES, not one that was handed over: printing is optional and nothing
+// records it, so a clinical record must not claim it was "given". Printed only
+// once the visit is treated — a note printed mid-treatment, or for a patient
+// who left before the chair, has no sheet to name yet.
+function aftercareSheetLine(p, lang) {
   const ac = aftercare.aftercareSections(p, lang);
-  if (!ac.appendToRecord) return '';
+  if (ac.stage !== 'treated') return '';
   const titles = ac.sections.map((x) => x.title_en).join('; ');
   const langName = aftercare.LANGUAGE_NAMES[ac.lang] || ac.lang;
-  return `<div class="box"><span class="label">After-care given: </span>${esc(titles)} <span class="muted">(${esc(ac.version)}, ${esc(langName)})</span></div>`;
+  return `<div class="box"><span class="label">After-care sheet for this visit: </span>${esc(titles)} <span class="muted">(${esc(ac.version)}, ${esc(langName)})</span></div>`;
 }
 
 // The after-care page: the patient's own sheet, in their language, with nothing

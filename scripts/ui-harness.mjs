@@ -128,7 +128,8 @@ window.api = {
   patientsIncomplete: okWrap(() => db.listIncompletePatients(), 'patientsIncomplete'),
   patientsCleanupIncomplete: okWrap(() => db.deleteIncompletePatients(currentUser), 'patientsCleanupIncomplete'),
   triageSave: okWrap(({ patientId, data }) => db.saveTriage(currentUser, patientId, data), 'triageSave'),
-  surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data), 'surveySave'),
+  // Mirrors ipc.js: the channel always saves the check-out stage.
+  surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, { ...(data || {}), stage: 'exit' }), 'surveySave'),
   aftercareGet: okWrap(({ patientId, lang }) => require('../src/main/aftercare.js').aftercareSections(db.getPatient(patientId), lang), 'aftercareGet'),
   inventoryList: okWrap(({ eventId } = {}) => db.listInventory({ eventId }), 'inventoryList'),
   inventoryGet: okWrap(({ id }) => db.getInventoryItem(id), 'inventoryGet'),
@@ -4466,12 +4467,53 @@ async function main() {
     const lsv = db.getExitSurvey(late.id);
     log(lsv.answers.rate_care === '4' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
       && lsv.registration_status === 'completed' && lsv.declined === false,
-      'survey (legacy): a registration row synced in after check-out adds to the record and erases nothing');
+      'survey (legacy): a registration-stage save (db.createPatient\'s legacy path) after check-out adds to the record and erases nothing');
     db.saveExitSurvey(currentUser, late.id, { stage: 'registration', declined: true });
     log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).answers.rate_care === '4',
-      'survey (legacy): a registration "skip" from an old station neither clears answers nor marks check-out declined');
+      'survey (legacy): a registration-stage "skip" neither clears answers nor marks check-out declined');
     log(db.saveExitSurvey(currentUser, late.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2',
       'survey: a save that names no version is recorded as v2');
+
+    // Over the survey:save channel every save is the check-out stage, which
+    // REPLACES the answers: no survey role can send the merge-only
+    // 'registration' stage and slip answers onto a row.
+    const viaChannel = await window.api.surveySave({ patientId: late.id, data: { stage: 'registration', answers: { rate_care: '2' } } });
+    log(viaChannel.ok && JSON.stringify(db.getExitSurvey(late.id).answers) === '{"rate_care":"2"}',
+      'survey: a save over the channel is always the check-out stage, even when it names "registration"');
+    log(/handle\('survey:save', \(\{ patientId, data \}\) => db\.saveExitSurvey\(currentUser, patientId, \{ \.\.\.\(data \|\| \{\}\), stage: 'exit' \}\)\)/
+      .test(fs.readFileSync(new URL('../src/main/ipc.js', import.meta.url), 'utf8')),
+      'survey: ipc.js forces the check-out stage on survey:save');
+    // And the data layer adds nothing to a row the patient declined: a decline
+    // withdraws every answer, and answers are tallied on declined rows.
+    const declP = db.createPatient(currentUser, { first_name: 'Dora', last_name: 'Declined', demographics: {}, medical_history: {}, dental_history: {} });
+    db.saveExitSurvey(currentUser, declP.id, { stage: 'exit', declined: true });
+    db.saveExitSurvey(currentUser, declP.id, { stage: 'registration', answers: { income: '0_15k', household_size: '6_or_more' } });
+    const declSv = db.getExitSurvey(declP.id);
+    const declSum = db.buildEventSummary(db.getActiveEvent().id);
+    log(declSv.exit_status === 'declined' && declSv.declined === true && Object.keys(declSv.answers).length === 0
+      && !(declSum.survey.answers.income || {})['0_15k'] && !(declSum.survey.answers.household_size || {})['6_or_more'],
+      'survey: a registration-stage save adds no answers to a row declined at check-out, so none reach the grant totals');
+
+    // Split-era rows from an old kiosk or the old online form arrive by SYNC,
+    // which is last-writer-wins on the whole row — never saveExitSurvey's merge.
+    // An older registration-only copy arriving after check-out is refused
+    // whole, so the check-out answers survive. (The push that runs before
+    // every pull is what stamps the local row; collectSyncRows stands in.)
+    const syncP = db.createPatient(currentUser, { first_name: 'Sy', last_name: 'Ncrow', demographics: {}, medical_history: {}, dental_history: {} });
+    db.saveExitSurvey(currentUser, syncP.id, { stage: 'exit', answers: { rate_care: '5', household_size: '2' } });
+    db.collectSyncRows(5000);
+    const rs = rawDb();
+    const svUid = rs.prepare('SELECT uid FROM exit_surveys WHERE patient_id = ?').get(syncP.id).uid;
+    const spUid = rs.prepare('SELECT uid FROM patients WHERE id = ?').get(syncP.id).uid;
+    rs.close();
+    const oldReg = db.applyRemoteRows([{ entity: 'survey', uid: svUid, patient_uid: spUid, event_uid: null, deleted: 0,
+      updated_at: '2000-01-01T00:00:00.000Z@prereg-s',
+      data: { version: 'mmw-exit-v1', language: 'en', answers: JSON.stringify({ income: '0_15k' }), declined: 0, completed_at: null,
+        completed_by_name: null, created_at: '2000-01-01T00:00:00.000Z', registration_status: 'completed', exit_status: null } }]);
+    const ssv = db.getExitSurvey(syncP.id);
+    log(!!svUid && oldReg.applied === 0 && oldReg.skipped === 1 && ssv.exit_status === 'completed' && ssv.answers.rate_care === '5'
+      && ssv.answers.household_size === '2' && ssv.answers.income === undefined,
+      'survey (legacy): an older registration row arriving by sync is refused whole (last writer wins) — the check-out answers survive');
 
     // A v0.0.14 row: household half at registration, then declined at check-out
     // (which, then, cleared only the twelve visit questions). Its answers were
@@ -4502,8 +4544,16 @@ async function main() {
       && respRows(sumN).length === 1 && respRows(sumN)[0][0] === 'At check-out',
       'report export: a clinic run since v0.0.15 has no "At registration" row (nobody there was meant to be asked)');
     const regRow = respRows(sumT).find((r) => /^At registration/.test(r[0]));
-    log(!!regRow && regRow[0] === 'At registration (before v0.0.15)' && regRow[1] === 3 && regRow[3] === '—',
-      'report export: split-era records keep their registration row, labelled as such, with no "not asked" figure');
+    log(!!regRow && regRow[0] === 'At registration (before v0.0.15; may include blank forms)' && regRow[1] === 3 && regRow[3] === '—',
+      'report export: split-era records keep their registration row, labelled as such (and as possibly counting blank forms), with no "not asked" figure');
+    // A report kept by v0.0.8–v0.0.9: the headline trio and the answers, no
+    // per-stage blocks. Its survey is the check-out survey, and it is exported.
+    const preSplit = { patients_seen: 4, survey: { responses: 2, declined: 1, not_asked: 1, answers: { rate_care: { 5: 2 } } } };
+    const preSecs = rexS.reportSections(preSplit, 'X');
+    const preResp = (preSecs.find((x) => x.title === 'Survey responses') || { rows: [] }).rows;
+    const preAns = (preSecs.find((x) => x.title === 'Survey answers') || { rows: [] }).rows;
+    log(preResp.length === 1 && JSON.stringify(preResp[0]) === '["At check-out",2,1,1]' && preAns.length === 1 && preAns[0][2] === 2,
+      'report export: a report kept before the survey was split still exports its survey — responses and answers');
     const merged = db.mergeSummaries([sumN, sumT]);
     log(merged.survey.registration.completed === 3 && respRows(merged).some((r) => /^At registration/.test(r[0])),
       'report export: a merged report with split-era records still shows their registration outcome');
@@ -4525,8 +4575,9 @@ async function main() {
     const oldText = await showScope(ev.id);
     const regLine = Array.from(repS.querySelectorAll('.awareness')).find((p) => /^At registration/.test(p.textContent));
     log(/At check-out:/.test(oldText) && !!regLine
-      && regLine.textContent === 'At registration (before v0.0.15): 3 answered · 0 declined',
-      'Reports: split-era records keep their registration line, with no "not asked" figure');
+      && regLine.textContent.startsWith('At registration (before v0.0.15): 3 completed · 0 declined')
+      && /may include blank forms/.test(regLine.textContent) && !/\d+ answered/.test(regLine.textContent),
+      'Reports: split-era records keep their registration line, with no "not asked" figure — and it is not called "answered", since those builds filed blank forms as completed');
     repS.remove();
     if (evBefore) db.setActiveEvent(currentUser, evBefore);
   }
@@ -4578,6 +4629,14 @@ async function main() {
       'after-care: the sheet prints the same MMW number as the About box, the consent and the online form');
     log(['en', 'es', 'ru', 'bzj', 'nya'].every((l) => String((catalog[l] && catalog[l].consent && catalog[l].consent.emergency) || '').includes(PHONE)),
       'the consent\'s emergency line gives MMW\'s number in all five languages');
+    // The number is a message line, and the after-care sheet sends a true
+    // emergency to the ER: the consent must not send one to voicemail.
+    const emLines = ['en', 'es', 'ru', 'bzj', 'nya'].map((l) => String(catalog[l].consent.emergency || ''));
+    log(emLines.every((x) => !/after-hours|fuera de horario|afta owaz|kunja kwa nthawi|вне рабочих часов/i.test(x))
+      && /leave a message/.test(emLines[0]) && /Emergency Room/.test(emLines[0])
+      && /deje un mensaje/.test(emLines[1]) && /sala de emergencias/.test(emLines[1])
+      && emLines.every((x) => x.split(/[.!]\s/).length >= 2),
+      'the consent calls the number a message line for problems after the visit, and sends breathing or swallowing trouble to the ER, in every language');
     const walk = (dir) => fsA.readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
       .flatMap((d) => (d.isDirectory() ? walk(`${dir}${d.name}/`) : /\.(js|mjs|html|css)$/.test(d.name) ? [`${dir}${d.name}`] : []));
     const stale = [...walk('../src/'), ...walk('../cloud/')].filter((f) => /541[-. ]?556[-. ]?5902/.test(readSrcA(f)));
@@ -4604,8 +4663,14 @@ async function main() {
       && same(keysOf({ cleaning: { scaling: true } }), ['deep_cleaning'])
       && same(keysOf({ cleaning: { quad_deep_scaling: true, adult_prophy: true, quad_detail: 'UR' } }), ['deep_cleaning'])
       && same(keysOf({ cleaning: { adult_prophy: true, adult_fluoride: true, sealant: true } }), ['cleaning', 'fluoride', 'sealant'])
-      && same(keysOf({ cleaning: { fluoride: true } }), ['cleaning', 'fluoride']),
+      && same(keysOf({ cleaning: { fluoride: true } }), ['fluoride']),
       'after-care: cleaning, deep cleaning, fluoride and sealants each get their own care — early "scaling" and "fluoride" keys included');
+    log(same(keysOf({ cleaning: { sealant: true } }), ['sealant']) && same(keysOf({ cleaning: { adult_fluoride: true } }), ['fluoride'])
+      && same(keysOf({ cleaning: { ohi: true } }), []) && same(keysOf({ cleaning: { sealant: true, ohi: true, teeth: ['3', '14'] } }), ['sealant'])
+      && !ac.aftercareSections(P({ cleaning: { sealant: true } }), 'en').sections.some((s) => /gums may be a little sore/.test(s.items.join(' '))),
+      'after-care: sealants, a fluoride varnish or hygiene instruction on their own are not a cleaning — no "after your cleaning" advice');
+    log(same(keysOf({ cleaning: { child_prophy: true } }), ['cleaning']),
+      'after-care: a cleaning option this build does not know (a newer station\'s) still gets the cleaning care');
     log(same(keysOf({ anesthetic: [{ agent: 'lidocaine', carps: '2', tooth: '30' }] }), ['anesthetic'])
       && same(keysOf({ anesthetic: { articaine: { carps: '1' } } }), ['anesthetic'])
       && same(keysOf({ anesthetic: [] }), []),
@@ -4638,8 +4703,10 @@ async function main() {
       k === 'simple' ? ['extraction'] : ['extraction', 'extraction_surgical'])),
       'after-care: every extraction type on the dentist\'s screen is classified — anything beyond "Simple" gets the surgical care');
     const cleanOpts = [...new Set([...optKeys(provSrc, 'CLEANING_OPTS'), ...optKeys(readSrcA('../src/renderer/js/views/hygienist.js'), 'CLEANING_OPTS')])];
-    log(cleanOpts.length >= 6 && cleanOpts.every((k) => keysOf({ cleaning: { [k]: true } }).length > 0),
-      'after-care: every cleaning option on the dentist\'s and hygienist\'s screens gets cleaning care');
+    log(cleanOpts.length >= 6 && cleanOpts.every((k) => Object.prototype.hasOwnProperty.call(ac.CLEANING_SECTIONS, k))
+      && cleanOpts.every((k) => same(keysOf({ cleaning: { [k]: true } }), ac.CLEANING_SECTIONS[k] ? [ac.CLEANING_SECTIONS[k]] : []))
+      && cleanOpts.filter((k) => !ac.CLEANING_SECTIONS[k]).join() === 'ohi',
+      'after-care: every cleaning option on the dentist\'s and hygienist\'s screens is mapped to its own care — only hygiene instruction to none');
     log(ac.LONG_ACTING_ANESTHETICS.every((k) => stD.ANESTHETICS.some((a) => a.key === k)),
       'after-care: the long-acting agents are keys of the clinic\'s anaesthetic list');
     log(same(keysOf({ extractions: '[{"tooth":"3"}]', cleaning: '{"adult_prophy":true}' }), ['extraction', 'cleaning'])
@@ -4667,6 +4734,17 @@ async function main() {
       && same(keysOf({ referral_out: null }), [])
       && same(keysOf({ referral_out: { to: ['physician'], urgency: 'constructor' } }), ['referral']),
       'after-care: blank referral details are left out; a referral with no destination is no referral; an unknown urgency adds nothing');
+    const refOtherOnly = secItems({ referral_out: { to: ['other'], to_other: '', urgency: 'routine' } }, 'referral');
+    const refUnknown = secItems({ referral_out: { to: ['chiropractor', 'toString'] } }, 'referral');
+    const refMixed = secItems({ referral_out: { to: ['oral_surgeon', 'chiropractor'] } }, 'referral');
+    log(!/see: Other|Other\./.test(refOtherOnly) && /ask the dental team which provider to see/.test(refOtherOnly)
+      && !/chiropractor|toString|see:/.test(refUnknown) && /ask the dental team/.test(refUnknown)
+      && /see: Oral surgeon\./.test(refMixed) && !/chiropractor/.test(refMixed) && /ask the dental team/.test(refMixed)
+      && !/ask the dental team/.test(secItems({ referral_out: { to: ['oral_surgeon'] } }, 'referral'))
+      && /pregunte al equipo dental/.test(secItems({ referral_out: { to: ['other'] } }, 'referral', 'es')),
+      'after-care: a referral never prints "Other" or a raw key — the patient is told to ask where to go instead');
+    log(/Emergency Room/.test(secItems({ referral_out: { to: ['oral_surgeon'], urgency: 'Urgent' } }, 'referral')),
+      'after-care: an urgency stored as "Urgent" still carries the urgent warning');
     log(same(keysOf({}), []) && ac.aftercareSections(P({}), 'en').sections.map((s) => s.key).join() === 'general',
       'after-care: with nothing performed, the sheet carries only the general advice');
 
@@ -4687,9 +4765,9 @@ async function main() {
     log(/After a tooth extraction/.test(plainA(pdfA.buildHtml(extP, 'full'))),
       'after-care: the full record ends with the same page');
     const progH = plainA(pdfA.buildHtml(extP, 'progress'));
-    log(/After-care given: After a tooth extraction; Numbness; If you have a problem \(mmw-aftercare-v1-draft, English\)/.test(progH)
-      && !/After-Care Instructions/.test(progH),
-      'after-care: the progress note records which sheet applied (sections, version, language) without printing it');
+    log(/After-care sheet for this visit: After a tooth extraction; Numbness; If you have a problem \(mmw-aftercare-v1-draft, English\)/.test(progH)
+      && !/After-Care Instructions/.test(progH) && !/After-care given/.test(progH),
+      'after-care: the progress note names the sheet that applies (sections, version, language) without printing it — and never claims it was given');
 
     // Language.
     const esH = plainA(pdfA.buildHtml({ ...extP, language: 'es' }, 'aftercare'));
@@ -4706,7 +4784,7 @@ async function main() {
 
     // When the page is left off: nothing to describe yet.
     const bare = (t, status) => P(t, { status });
-    log(!/After-Care Instructions|After-care given/.test(pdfA.buildHtml(bare(null, 'checked_in'), 'full'))
+    log(!/After-Care Instructions|After-care sheet for this visit/.test(pdfA.buildHtml(bare(null, 'checked_in'), 'full'))
       && !/After-Care Instructions/.test(pdfA.buildHtml(bare(null, 'triaged'), 'summary')),
       'after-care: a record printed before any treatment (the check-in USB, the Vitals queue summary) has no after-care page');
     log(!/After-Care Instructions/.test(pdfA.buildHtml(bare({ clinical_notes: 'x' }, 'in_treatment'), 'summary'))
@@ -4720,7 +4798,55 @@ async function main() {
       { first_name: '<b>Eve</b>' }), 'aftercare');
     log(!/<script>|<img src=x|<b>Eve/.test(xss) && /&lt;script&gt;/.test(xss),
       'after-care: typed referral text and the patient\'s name are escaped, never run as markup');
-    log(pdfA.buildHtml(extP, 'summary').indexOf('<div class="val">na</div>') === -1, 'after-care: no raw code reaches the page');
+    // No stored code reaches the patient's page: a fixture that stores codes
+    // everywhere the sheet reads one.
+    const codeP = P({
+      referral_out: { to: ['oral_surgeon', 'physician', 'mmw_next_clinic'], urgency: 'soon', tooth: '3', reason: '' },
+      restorative: { denture: { on: true, kind: 'full', action: 'reline' }, core_buildup: { on: true, tooth: '19' }, recement: { on: true, tooth: '8' } },
+      anesthetic: [{ agent: 'bupivacaine', carps: '1', site: 'ian' }, { agent: 'lidocaine_epi', carps: '1' }],
+      extractions: [{ tooth: '1', types: ['impact_bony', 'root_tip'] }],
+      cleaning: { quad_deep_scaling: true, adult_fluoride: true, sealant: true, ohi: true, quad_detail: 'UR' },
+      services: { pulpotomy: '1', irm: '1' },
+    });
+    const pageOf = (html) => plainA((html.match(/<div class="aftercare"[\s\S]*$/) || [''])[0]);
+    const codeTexts = [pageOf(pdfA.buildHtml(codeP, 'aftercare')), pageOf(pdfA.buildHtml(codeP, 'summary')), pageOf(pdfA.buildHtml({ ...codeP, language: 'es' }, 'aftercare'))];
+    log(codeTexts.every((x) => x.length > 1000 && !/[A-Za-z]_[A-Za-z]/.test(x) && !/\b(impact|ian|irm|IRM)\b/.test(x))
+      && /Oral surgeon, Physician \/ primary care, Next MMW clinic/.test(codeTexts[0]) && /Cirujano oral, Médico \/ atención primaria/.test(codeTexts[2])
+      && /After a reline/.test(codeTexts[0]) && /up to 12 hours/.test(codeTexts[0]),
+      'after-care: no stored code reaches the sheet — destinations, urgency, denture action, agents and cleaning keys are read, never printed raw');
+
+    // Status is part of the rule. Tagging a tooth at Dental Triage writes an
+    // extraction or filling row, and "Move Patient to Treatment Waiting" saves
+    // it: until the patient has been at a chair, the row is the PLAN.
+    const chartT = { extractions: [{ tooth: '30', types: ['surgical'] }], fillings: [{ tooth: '3' }], anesthetic: [{ agent: 'bupivacaine', carps: '1' }], provider_name: 'Dr. T' };
+    const waitingP = P(chartT, { status: 'treatment_waiting', triage: { status: 'treatment_waiting' } });
+    const acW = ac.aftercareSections(waitingP, 'en');
+    log(acW.stage === 'not_treated' && same(acW.keys, []) && acW.sections.map((s) => s.key).join() === 'general' && acW.appendToRecord === false,
+      'after-care: a patient examined at Dental Triage and waiting for a chair gets no procedure care — the chart is planned work');
+    const wSum = plainA(pdfA.buildHtml(waitingP, 'summary')), wProg = plainA(pdfA.buildHtml(waitingP, 'progress'));
+    const wSheet = pageOf(pdfA.buildHtml(waitingP, 'aftercare'));
+    log(!/After-Care Instructions|After a tooth extraction/.test(wSum) && !/After-care sheet for this visit|After-care given/.test(wProg)
+      && /If you have a problem/.test(wSheet) && !/extraction|filling|Numbness/i.test(wSheet),
+      'after-care: while waiting for a chair, the summary has no after-care page, the progress note names no sheet, and the sheet carries only the general advice');
+    const leftP = P(chartT, { status: 'dismissed', triage: { status: 'treatment_waiting' } });
+    log(ac.aftercareSections(leftP, 'en').stage === 'not_treated' && same(ac.aftercareSections(leftP, 'en').keys, [])
+      && !/After-Care Instructions|After-care sheet for this visit/.test(plainA(pdfA.buildHtml(leftP, 'full'))),
+      'after-care: a patient checked out while still waiting for a chair is not sent home with care for the planned surgery — their record carries no after-care page');
+    log(['checked_in', 'triaged'].every((st) => { const a = ac.aftercareSections(P(chartT, { status: st }), 'en'); return same(a.keys, []) && !a.appendToRecord; }),
+      'after-care: nor before Dental Triage — a chart kept when an admin sends a patient back is still only a plan');
+    const doneKeys = ['extraction', 'extraction_surgical', 'anesthetic', 'filling'];
+    log(same(ac.aftercareSections(P({ ...chartT, completed_at: '2026-10-18T10:00:00Z' }, { status: 'treatment_waiting', triage: { status: 'treatment_waiting' } }), 'en').keys, doneKeys),
+      'after-care: a visit already marked complete keeps its care when an admin sends the patient back to wait for more');
+    log(same(ac.aftercareSections(P(chartT, { status: 'dismissed', triage: { status: 'in_treatment' } }), 'en').keys, doneKeys)
+      && same(ac.aftercareSections(P(chartT, { status: 'dismissed', triage: null }), 'en').keys, doneKeys),
+      'after-care: a patient checked out after being taken into treatment (or from before Treatment Waiting existed) gets the care recorded');
+    const inTx = P(chartT, { status: 'in_treatment', triage: { status: 'in_treatment' } });
+    const acI = ac.aftercareSections(inTx, 'en');
+    log(acI.stage === 'in_progress' && same(acI.keys, doneKeys) && acI.appendToRecord
+      && !/After-care sheet for this visit/.test(plainA(pdfA.buildHtml(inTx, 'progress'))),
+      'after-care: mid-treatment the sheet lists what is charted so far, but the progress note names no sheet until the visit is treated');
+    log(ac.careStage(P(chartT, { status: 'some_new_status' })) === 'in_progress' && ac.careStage(P(null)) === 'none',
+      'after-care: a status this build does not know reads the row as it stands; no treatment row is no stage');
 
     // The plumbing: the channel exists end to end and is not open to everyone.
     const ipcSrc = readSrcA('../src/main/ipc.js');
@@ -4757,6 +4883,11 @@ async function main() {
     log(/After a tooth extraction/.test(coA.textContent) && /Prints in Spanish/.test(coA.textContent) && /Draft wording/.test(coA.textContent),
       'check-out: the desk sees the sections in English, which language it prints in, and that the wording is a draft');
     const btnA = (re) => Array.from(coA.querySelectorAll('button')).find((b) => re.test(b.textContent));
+    // Asked on the fresh screen, before anything is printed or previewed — a
+    // dismissal held until a print would fail here.
+    const dismissBtn0 = btnA(/Verify & dismiss patient/);
+    log(calls.length === 0 && !!dismissBtn0 && !dismissBtn0.disabled,
+      'check-out: printing after-care is optional — dismissal is open before anything is printed or previewed');
     btnA(/^Print after-care$/).click();
     await tick();
     btnA(/^Print in English$/).click();
@@ -4765,14 +4896,14 @@ async function main() {
       'check-out: "Print after-care" prints the sheet in the patient\'s language, "Print in English" in English');
     btnA(/^Preview$/).click();
     for (let i = 0; i < 4; i++) await tick();
-    const prevCard = Array.from(document.querySelectorAll('.modal-card')).find((m) => /After-care instructions/.test(m.textContent));
+    const prevCard = Array.from(document.querySelectorAll('.modal-card')).find((m) => (m.querySelector('.modal-title') || {}).textContent === 'After-care instructions');
     log(calls.some((c) => c[0] === 'preview' && c[1].format === 'aftercare' && c[1].lang === 'es') && !!prevCard && !!prevCard.querySelector('iframe.pdf-frame'),
       'check-out: Preview shows the sheet in a window before anything is printed');
     if (prevCard) Array.from(prevCard.querySelectorAll('button')).pop().click();
     await tick();
     const dismissBtn = btnA(/Verify & dismiss patient/);
     log(!!dismissBtn && !dismissBtn.disabled,
-      'check-out: printing after-care is optional — dismissal is not held for it');
+      'check-out: and printing changes nothing about dismissal');
     log(/Visit summary \+ after-care PDF/.test(coA.textContent), 'check-out: the summary button says the after-care comes with it');
     coA.remove();
     window.api.pdfPrint = origPrint; window.api.pdfPreview = origPreview;
@@ -4792,6 +4923,91 @@ async function main() {
     log(!engB || engB.style.display === 'none', 'check-out: an English-speaking patient is not offered "Print in English"');
     coB.remove();
     window.api.aftercareGet = origGet;
+
+    // The real flow: examined at Dental Triage and parked for a chair, then
+    // opened at check-out (a band scan opens anyone). The planned extraction is
+    // not on the sheet, and the desk is told why.
+    const ctxA = { navigate: () => {}, toast: () => {}, store: storeA2, setDetail: () => {} };
+    const newPt = (first, last, language) => {
+      const pt = db.createPatient(currentUser, {
+        first_name: first, last_name: last, language, demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
+        consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }],
+      });
+      db.saveVitals(currentUser, pt.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '72' });
+      db.routePatient(currentUser, pt.id, 'dentist');
+      return pt;
+    };
+    const chartW = { extractions: [{ tooth: '30', types: ['surgical'] }], provider_name: 'Dr. T' };
+    const pW = newPt('Walt', 'Espera', 'en');
+    db.saveTreatment(currentUser, pW.id, chartW, 'waiting');
+    log(db.getPatient(pW.id).status === 'treatment_waiting' && same(ac.aftercareSections(db.getPatient(pW.id), 'en').keys, []),
+      'after-care: "Move Patient to Treatment Waiting" leaves the sheet with the general advice only');
+    const coW = (await import('../src/renderer/js/views/checkout.js')).renderCheckout(ctxA, { id: pW.id });
+    document.body.append(coW);
+    for (let i = 0; i < 10; i++) await tick();
+    log(same(Array.from(coW.querySelectorAll('.aftercare-chips [data-key]')).map((x) => x.dataset.key), ['general'])
+      && /treatment is not done yet, so only the general advice will print/.test(coW.textContent) && !/After a tooth extraction/.test(coW.textContent),
+      'check-out: a patient waiting for a chair shows only the general advice, and the desk is told the treatment is not done yet');
+    coW.remove();
+    db.dismissPatient(currentUser, pW.id);
+    const gW = db.getPatient(pW.id);
+    log(gW.status === 'dismissed' && gW.triage.status === 'treatment_waiting' && ac.aftercareSections(gW, 'en').stage === 'not_treated'
+      && !/After a tooth extraction/.test(plainA(pdfA.buildHtml(gW, 'summary'))) && !/After-care sheet for this visit/.test(plainA(pdfA.buildHtml(gW, 'progress'))),
+      'after-care: checked out from Treatment Waiting, the record carries no extraction care and names no sheet');
+
+    // The same chart taken in at the chair, then completed: now it is care done.
+    const pT2 = newPt('Tomas', 'Silla', 'en');
+    db.saveTreatment(currentUser, pT2.id, chartW, 'waiting');
+    db.saveTreatment(currentUser, pT2.id, chartW, false);
+    const inChair = db.getPatient(pT2.id);
+    log(inChair.status === 'in_treatment' && ac.aftercareSections(inChair, 'en').stage === 'in_progress'
+      && same(ac.aftercareSections(inChair, 'en').keys, ['extraction', 'extraction_surgical']),
+      'after-care: taken in at the chair, the charted work is on the sheet');
+    const coI = (await import('../src/renderer/js/views/checkout.js')).renderCheckout(ctxA, { id: pT2.id });
+    document.body.append(coI);
+    for (let i = 0; i < 10; i++) await tick();
+    log(/Visit still in progress: these are the procedures charted so far/.test(coI.textContent),
+      'check-out: for a patient still in treatment, the desk is told the list is what has been charted so far');
+    coI.remove();
+    db.saveTreatment(currentUser, pT2.id, chartW, 'complete');
+    db.dismissPatient(currentUser, pT2.id);
+    const doneT2 = db.getPatient(pT2.id);
+    log(doneT2.status === 'dismissed' && same(ac.aftercareSections(doneT2, 'en').keys, ['extraction', 'extraction_surgical'])
+      && /After-care sheet for this visit: After a tooth extraction/.test(plainA(pdfA.buildHtml(doneT2, 'progress'))),
+      'after-care: completed and checked out, the extraction care is on the sheet and the progress note names it');
+
+    // The one-tap tick in the queue never opens the record, so its dismiss
+    // confirmation carries the after-care: listed, printable, never required.
+    const pQ = newPt('Quinn', '<i>Tick</i>', 'es');
+    db.saveTreatment(currentUser, pQ.id, { extractions: [{ tooth: '19', types: ['simple'] }], provider_name: 'Dr. T' }, 'complete');
+    db.saveExitSurvey(currentUser, pQ.id, { stage: 'exit', declined: true });
+    const callsQ = [];
+    window.api.pdfPrint = async (payload) => { callsQ.push(payload); return origPrint(payload); };
+    const coQ = (await import('../src/renderer/js/views/checkout.js')).renderCheckout(ctxA);
+    document.body.append(coQ);
+    for (let i = 0; i < 10; i++) await tick();
+    const rowQ = Array.from(coQ.querySelectorAll('tr')).find((r) => /Quinn/.test(r.textContent));
+    rowQ.querySelector('.tick-btn').click();
+    for (let i = 0; i < 10; i++) await tick();
+    const cardQ = Array.from(document.querySelectorAll('.modal-card')).find((m) => /Dismiss patient\?/.test(m.textContent) && /Quinn/.test(m.textContent));
+    const qChips = cardQ ? Array.from(cardQ.querySelectorAll('.aftercare-chips [data-key]')).map((x) => x.dataset.key) : [];
+    log(!!cardQ && same(qChips, ['extraction', 'general']) && /Prints in Spanish/.test(cardQ.textContent),
+      'check-out: the one-tap tick\'s dismiss confirmation lists the after-care for what was done');
+    log(!!cardQ && cardQ.textContent.includes('Quinn <i>Tick</i>’s treatment') && !cardQ.querySelector('.modal-body i'),
+      'check-out: the confirmation shows the patient\'s name as text, never as markup');
+    const qPrint = cardQ && Array.from(cardQ.querySelectorAll('button')).find((b) => /^Print after-care$/.test(b.textContent));
+    if (qPrint) qPrint.click();
+    for (let i = 0; i < 4; i++) await tick();
+    log(same(callsQ.map((c) => [c.patientId, c.format, c.lang]), [[pQ.id, 'aftercare', 'es']]) && document.body.contains(cardQ)
+      && db.getPatient(pQ.id).status === 'completed',
+      'check-out: the sheet can be printed from the confirmation, which stays open — printing is not dismissing');
+    const qConfirm = cardQ && Array.from(cardQ.querySelectorAll('button')).find((b) => /^Verify & dismiss$/.test(b.textContent));
+    if (qConfirm) qConfirm.click();
+    for (let i = 0; i < 8; i++) await tick();
+    log(db.getPatient(pQ.id).status === 'dismissed',
+      'check-out: confirming dismisses the patient, printed or not');
+    coQ.remove();
+    window.api.pdfPrint = origPrint;
     if (evPrev) db.setActiveEvent(currentUser, evPrev);
   }
 

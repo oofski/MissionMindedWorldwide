@@ -379,7 +379,12 @@ function register(getMainWindow) {
 
   /* ---- Triage & treatment ---- */
   handle('triage:save', ({ patientId, data }) => db.saveTriage(currentUser, patientId, data));
-  handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, data));
+  // Always the check-out stage. 'registration' is a legacy stage that only
+  // merges answers in; nothing in this build asks it (db.createPatient's
+  // in-process path is the only writer), and split-era rows from an old kiosk
+  // or the old online form arrive by sync, not here. Accepting it over IPC let
+  // any survey role add answers to a row the patient DECLINED at check-out.
+  handle('survey:save', ({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, { ...(data || {}), stage: 'exit' }));
 
   /* ---- Supplies ---- */
   handle('inventory:list', ({ eventId } = {}) => db.listInventory({ eventId }));

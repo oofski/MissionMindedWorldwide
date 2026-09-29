@@ -106,9 +106,14 @@ function surveyCard(sv) {
     // kept reports) from then still carry that outcome — so the line appears
     // only when it has something to say. Its "not asked" is left off: for every
     // patient since v0.0.15 it would count a question nobody was meant to ask.
+    // Nor is its first figure called "answered": those kiosks, and the online
+    // form, marked the registration survey completed for every patient, even
+    // with nothing answered, so it counts forms filed rather than people who
+    // answered — and kept reports froze it that way.
     showRegistrationLine(reg) ? el('p', { class: 'awareness' }, [
       el('strong', {}, ['At registration (before v0.0.15): ']),
-      `${reg.completed} answered · ${reg.declined} declined`,
+      `${reg.completed} completed · ${reg.declined} declined`,
+      el('span', { class: 'muted small' }, [' — may include blank forms: those builds marked every registration completed, even with nothing answered.']),
     ]) : null,
     el('p', { class: 'awareness' }, [
       el('strong', {}, ['At check-out: ']),

@@ -308,6 +308,12 @@ const TEMPLATES = {
         en: ['This is urgent: please be seen as soon as possible. If you have swelling that is spreading, a fever, or trouble breathing or swallowing, go to the Emergency Room.'],
         es: ['Esto es urgente: por favor, busque atención lo antes posible. Si tiene hinchazón que se extiende, fiebre, o dificultad para respirar o tragar, vaya a la sala de emergencias.'],
       },
+      // A destination this sheet cannot name: "Other" ticked with nothing
+      // typed, or a key from a newer station's list.
+      unnamed: {
+        en: ['Before you leave today, ask the dental team which provider to see.'],
+        es: ['Antes de irse hoy, pregunte al equipo dental a qué proveedor debe consultar.'],
+      },
     },
   },
   general: {
@@ -362,6 +368,22 @@ const SURGICAL_TYPES = ['surgical', 'impact_bony', 'impact_soft', 'root_tip'];
 // Cleaning keys that are notes ABOUT a cleaning, not a cleaning — the rule the
 // report counters (db.didCleaning) and the printed record share.
 const CLEANING_NOTES = ['teeth', 'quad_detail'];
+// Each option on the cleaning card (provider.js and hygienist.js CLEANING_OPTS,
+// plus the early keys 'scaling' and 'fluoride') and the section it calls for.
+// A sealant or a fluoride varnish on its own is not a cleaning, and a child who
+// had only sealants must not be told their gums may bleed after one. Oral
+// hygiene instruction is advice given, not a procedure with after-care. A key
+// this build does not know — an option added on a newer station — is read as a
+// cleaning, so a patient is never left with nothing for it. The harness pins
+// every option on both screens to this map.
+const CLEANING_SECTIONS = {
+  adult_prophy: 'cleaning',
+  quad_deep_scaling: 'deep_cleaning', gross_debridement: 'deep_cleaning', scaling: 'deep_cleaning',
+  adult_fluoride: 'fluoride', fluoride: 'fluoride',
+  sealant: 'sealant',
+  ohi: null,
+};
+const cleaningSection = (k) => (Object.prototype.hasOwnProperty.call(CLEANING_SECTIONS, k) ? CLEANING_SECTIONS[k] : 'cleaning');
 
 /**
  * What was performed, from the treatment row. Legacy-tolerant: an anaesthetic
@@ -424,20 +446,23 @@ function classify(t) {
     on('denture', text(restorative.denture.action).toLowerCase());
   }
 
-  const done = Object.entries(cleaning).filter(([k, v]) => v && !CLEANING_NOTES.includes(k)).map(([k]) => k);
-  const deep = ['quad_deep_scaling', 'gross_debridement', 'scaling'].some((k) => done.includes(k));
-  if (deep) on('deep_cleaning');
+  const cleanKinds = new Set((cleaning && typeof cleaning === 'object' ? Object.entries(cleaning) : [])
+    .filter(([k, v]) => v && !CLEANING_NOTES.includes(k)).map(([k]) => cleaningSection(k)).filter(Boolean));
+  if (cleanKinds.has('deep_cleaning')) on('deep_cleaning');
   // A deep cleaning's own advice covers a cleaning; printing both would repeat it.
-  else if (done.length) on('cleaning');
-  if (done.includes('adult_fluoride') || done.includes('fluoride')) on('fluoride');
-  if (done.includes('sealant')) on('sealant');
+  else if (cleanKinds.has('cleaning')) on('cleaning');
+  if (cleanKinds.has('fluoride')) on('fluoride');
+  if (cleanKinds.has('sealant')) on('sealant');
 
   // The outbound clinical referral (treatments.referral_out) — only when it
   // sends the patient somewhere, the rule every other reader of it uses.
   const r = referral && typeof referral === 'object' ? referral : null;
   const to = r ? (Array.isArray(r.to) ? r.to : []) : [];
   if (r && (to.length || text(r.to_other))) {
-    on('referral', text(r.urgency));
+    // Urgency is matched as the screen stores it (lower case); a row that
+    // arrived as 'Urgent' must still carry the Emergency Room line.
+    on('referral', text(r.urgency).toLowerCase());
+    if (!referralNamed(r).complete) on('referral', 'unnamed');
     out.values.referral = r;
   }
 
@@ -450,10 +475,29 @@ function aftercareKeys(t) {
   return classify(t).keys;
 }
 
-// Referral destinations and urgency in the patient's language, from the same
-// list the dentist picks from (src/main/dentalLabels.js mirrors it).
+// The destinations this sheet can name, in the patient's language, from the
+// same list the dentist picks from (src/main/dentalLabels.js mirrors it), and
+// "Other" only once something was typed for it. A patient's sheet never says
+// "see: Other." or prints a raw key — one from a newer station's list, or a
+// damaged value — so those are left out, and `complete` is false so the sheet
+// adds the line telling the patient to ask where to go.
+function referralNamed(r, lang = 'en') {
+  const to = Array.isArray(r.to) ? r.to : [];
+  const names = [];
+  let complete = true;
+  for (const k of to) {
+    if (k === 'other') continue;
+    const hit = DL.DENTAL_REFERRAL_TO.find((x) => x.key === k);
+    if (hit) names.push(hit[lang] || hit.en); else complete = false;
+  }
+  const other = text(r.to_other);
+  if (other) names.push(other);
+  else if (to.includes('other')) complete = false;
+  return { names, complete };
+}
+
 function referralValues(r, lang) {
-  return { to: DL.referralDestinations(r, lang), tooth: text(r.tooth), reason: text(r.reason) };
+  return { to: referralNamed(r, lang).names.join(', '), tooth: text(r.tooth), reason: text(r.reason) };
 }
 
 function fill(line, values) {
@@ -466,27 +510,77 @@ function fill(line, values) {
   return empty ? null : s;
 }
 
+// Statuses in which the patient has not yet been at a treatment chair: waiting
+// for Vitals or for Dental Triage, or examined at Dental Triage and parked in
+// Treatment Waiting. A treatment row can already exist then, but it is the
+// dentist's CHART, not care done — tagging a tooth on the odontogram writes the
+// extraction or filling row, and "Move Patient to Treatment Waiting" saves it.
+const NOT_YET_TREATED = ['checked_in', 'triaged', 'treatment_waiting'];
+
+/**
+ * Where the visit stands, as far as after-care is concerned — the status is
+ * part of the rule, because the treatment row alone cannot tell planned care
+ * from care done:
+ *   'treated'      the visit was marked complete (now or before an admin moved
+ *                  the patient on), or the patient was checked out after being
+ *                  taken into treatment: the row is what was done
+ *   'in_progress'  at a chair now (in_treatment): the row is being written as
+ *                  the work is done, and is what has been charted so far
+ *   'not_treated'  not yet at a chair (NOT_YET_TREATED), or checked out while
+ *                  still in Treatment Waiting — the patient left before the
+ *                  chair, and nothing on the row was done
+ *   'none'         no treatment row at all
+ * A status this build does not know (a newer station's) is read as in
+ * progress. One limit, on the safe side: a cleaning the hygienist saved for a
+ * patient still waiting for a chair is not printed until they are treated —
+ * the row cannot tell it from a cleaning Dental Triage only charted.
+ */
+function careStage(p) {
+  const patient = p || {};
+  const t = patient.treatment;
+  if (!t) return 'none';
+  const st = text(patient.status);
+  // A visit once marked complete keeps its record of what was done, even when
+  // an administrator has since moved the patient back for more.
+  if (st === 'completed' || text(t.completed_at)) return 'treated';
+  // Check-out never touches the triage row, so a patient checked out while
+  // parked for a chair still reads 'treatment_waiting' there; taking them into
+  // treatment moves it on to 'in_treatment'.
+  if (st === 'dismissed') return patient.triage && patient.triage.status === 'treatment_waiting' ? 'not_treated' : 'treated';
+  if (NOT_YET_TREATED.includes(st)) return 'not_treated';
+  // In treatment — and a status this build does not know, which is read the
+  // same way: the row as it stands, so care that was done is never withheld.
+  return 'in_progress';
+}
+
 /**
  * The after-care for one patient, in one language:
- *   { version, status, lang, requested, fellBack, keys, sections, appendToRecord, contact }
+ *   { version, status, lang, requested, fellBack, stage, keys, sections,
+ *     appendToRecord, contact }
  * sections = [{ key, title, title_en, items, status }], 'general' last.
  *
  * `lang` defaults to the patient's own. A language with no templates falls
  * back to English (fellBack) — and the page says so.
  *
- * appendToRecord is the rule for the visit summary and full record: only when
- * there is a treatment row and either something was performed or the visit is
- * over. It keeps the page off a record printed before treatment (the check-in
- * USB, the summary from the Vitals queue), where it could only be empty or
- * wrong. The standalone after-care sheet always prints, with at least the
- * 'general' section.
+ * `stage` is careStage(p). Before treatment ('not_treated') the procedure
+ * sections are left out whatever the row holds, so a patient who leaves while
+ * waiting for a chair is never sent home with instructions for surgery that
+ * did not happen; only the general advice prints.
+ *
+ * appendToRecord is the rule for the visit summary and full record: once the
+ * visit is treated, or mid-treatment when something is already recorded —
+ * never before treatment. It keeps the page off a record printed before the
+ * chair (the check-in USB, the summary from the Vitals queue or from Dental
+ * Triage), where it could only be empty or wrong. The standalone after-care
+ * sheet always prints, with at least the 'general' section.
  */
 function aftercareSections(p, lang) {
   const patient = p || {};
   const requested = text(lang || patient.language || 'en').toLowerCase() || 'en';
   const L = LANGS.includes(requested) ? requested : 'en';
   const t = patient.treatment || null;
-  const c = classify(t);
+  const stage = careStage(patient);
+  const c = stage === 'not_treated' ? classify(null) : classify(t);
   const values = c.values.referral ? referralValues(c.values.referral, L) : {};
   const sections = [...c.keys, 'general'].map((key) => {
     const tpl = TEMPLATES[key];
@@ -509,14 +603,16 @@ function aftercareSections(p, lang) {
     lang: L,
     requested,
     fellBack: L !== requested,
+    stage,
     keys: c.keys,
     sections,
-    appendToRecord: !!t && (c.keys.length > 0 || patient.status === 'completed' || patient.status === 'dismissed'),
+    appendToRecord: stage === 'treated' || (stage === 'in_progress' && c.keys.length > 0),
     contact: { ...CONTACT },
   };
 }
 
 module.exports = {
   AFTERCARE_VERSION, CONTACT, LONG_ACTING_ANESTHETICS, LANGS, TEMPLATES, PAGE_TEXT, LANGUAGE_NAMES,
-  classify, aftercareKeys, aftercareSections,
+  CLEANING_SECTIONS, NOT_YET_TREATED,
+  classify, aftercareKeys, aftercareSections, careStage,
 };

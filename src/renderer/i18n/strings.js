@@ -559,7 +559,11 @@ const en = {
     ],
     postOpTitle: 'Post-Operative Instructions',
     postOp: 'Bite firmly on gauze for 30–45 minutes. Do not rinse, spit, smoke, or use a straw for 24 hours. Eat soft foods and avoid the surgical area. Mild swelling and bleeding are normal. Take medications as directed.',
-    emergency: 'For after-hours emergencies call (951) 317-4968.',
+    // (951) 317-4968 is MMW's message line, not an emergency service (the
+    // after-care sheet, src/main/aftercare.js 'general', says the same): a
+    // true emergency goes to the ER. The other four languages follow this
+    // wording and are awaiting MMW's review.
+    emergency: 'For problems after your visit, call (951) 317-4968 and leave a message. If you have difficulty breathing or swallowing, go to the Emergency Room.',
     agree: 'I have read and understand the above, and I consent.',
   },
 };
@@ -649,7 +653,7 @@ const es = {
     ],
     postOpTitle: 'Instrucciones Postoperatorias',
     postOp: 'Muerda firmemente la gasa durante 30–45 minutos. No se enjuague, escupa, fume ni use pajilla por 24 horas. Coma alimentos blandos y evite el área quirúrgica. Una hinchazón y sangrado leves son normales. Tome los medicamentos según las indicaciones.',
-    emergency: 'Para emergencias fuera de horario llame al (951) 317-4968.',
+    emergency: 'Si tiene problemas después de su visita, llame al (951) 317-4968 y deje un mensaje. Si tiene dificultad para respirar o tragar, vaya a la sala de emergencias.',
     agree: 'He leído y entiendo lo anterior, y doy mi consentimiento.',
   },
 };
@@ -690,7 +694,7 @@ const bzj = {
     generalIntro: "Pleez reed evri paat. Yu ku tap 'Reed loud' fi yeer it eena yu langwij.",
     agree: 'Ah reed ahn andastan di tap, ahn ah gri.',
     surgeryTitle: 'Oral Serjari / Ekstrakshan Kansent',
-    emergency: 'Fi emerjensi afta owaz kaal (951) 317-4968.',
+    emergency: 'If yu ga prablem afta yu vizit, kaal (951) 317-4968 ahn lef wahn mesij. If yu ga chrobl fi breet or fi swalo, go da di Emerjensi Room.',
   },
 };
 
@@ -729,7 +733,7 @@ const nya = {
     generalIntro: "Chonde werengani gawo lililonse. Mukhoza kukanikiza 'Werengani mokweza' kuti mumve mu chilankhulo chanu.",
     agree: 'Ndawerenga ndipo ndamvetsa zomwe zili pamwamba, ndipo ndavomera.',
     surgeryTitle: 'Chilolezo cha Opaleshoni ya Mkamwa / Kuchotsa Dzino',
-    emergency: 'Pa zadzidzidzi kunja kwa nthawi imbani (951) 317-4968.',
+    emergency: 'Ngati muli ndi vuto mutachoka ku chipatala, imbani (951) 317-4968 ndipo musiye uthenga. Ngati mukuvutika kupuma kapena kumeza, pitani ku chipatala cha odwala mwadzidzidzi (Emergency Room).',
   },
 };
 
@@ -785,7 +789,7 @@ const ru = {
     agree: 'Я прочитал(а) и понимаю изложенное выше и даю согласие.',
     surgeryTitle: 'Согласие на хирургию / удаление зуба',
     surgeryIntro: 'Это дополнительное согласие необходимо, так как сегодня может быть проведено удаление.',
-    emergency: 'При неотложной ситуации вне рабочих часов звоните (951) 317-4968.',
+    emergency: 'При проблемах после визита звоните (951) 317-4968 и оставьте сообщение. Если вам трудно дышать или глотать, обратитесь в отделение неотложной помощи.',
   },
 };
 

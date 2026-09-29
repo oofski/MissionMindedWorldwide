@@ -2097,11 +2097,18 @@ function saveExitSurvey(actor, patientId, data) {
   // exactly what was on the form — which was pre-filled with anything given at
   // registration by an older build, so nothing is lost that the patient did not
   // take off — and a check-out Decline clears every answer, as the patient was
-  // told it would. 'registration' owns none: a registration row still arriving
-  // from an old kiosk or online form only ever adds to the blob.
-  const prior = db.prepare('SELECT answers FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  // told it would. 'registration' owns none and only ever adds to the blob. It
+  // is written only by db.createPatient's in-process legacy path (how a
+  // split-era record is rebuilt): the survey:save channel always saves 'exit',
+  // and a split-era row from an old kiosk or the old online form arrives
+  // through applyRemoteRows, which replaces the whole row last-writer-wins and
+  // never comes through here. Nor does it add anything to a row the patient
+  // declined at check-out — a decline withdraws every answer, and anything
+  // added afterwards would be counted in the grant totals.
+  const prior = db.prepare('SELECT answers, exit_status FROM exit_surveys WHERE patient_id = ?').get(patientId);
   const kept = prior ? safeJson(prior.answers, {}) : {};
-  const fresh = declined ? {} : sanitizeSurveyAnswers(d.answers);
+  const exitDeclined = !!(prior && prior.exit_status === 'declined');
+  const fresh = declined || (stage === 'registration' && exitDeclined) ? {} : sanitizeSurveyAnswers(d.answers);
   const stageKeys = new Set(STAGE_QUESTIONS[stage]);
   const answers = { ...kept };
   for (const k of stageKeys) delete answers[k];
