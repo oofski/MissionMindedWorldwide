@@ -3,6 +3,7 @@ import { t, languageList } from '../i18n.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { icon } from '../icons.js';
+import { eventCities } from '../components/intakeSections.js';
 
 // Cloud-sync live-update subscription. Kept at module scope so repaints of the
 // Cloud tab can drop the previous listener before adding a new one (no stacking).
@@ -369,13 +370,29 @@ export function renderAdmin(ctx, params = {}) {
       el('button', { type: 'button', class: 'chip-btn' + (enabled.has(l.code) ? ' chip-btn--on' : ''),
         onClick: (ev) => { if (enabled.has(l.code)) enabled.delete(l.code); else enabled.add(l.code); ev.currentTarget.classList.toggle('chip-btn--on'); } },
         [`${l.native}`])));
+    // The towns offered in the check-in City dropdown, at the kiosk and on the
+    // online form alike. Patients from anywhere else choose Other and type it.
+    // Left empty, City stays a free-text box — nothing changes until an admin
+    // sets a list.
+    const cities = el('textarea', { class: 'input textarea', rows: 4, placeholder: 'Sandy\nBoring\nEstacada' }, [eventCities(e).join('\n')]);
     const form = el('div', { class: 'form-grid' }, [
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Event name']), name]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Location']), loc]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Start date']), start]),
       el('div', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Language packs offered at check-in']), langChips]),
+      el('label', { class: 'field span-2' }, [
+        el('span', { class: 'field-label' }, ['Cities offered at check-in (one per line)']),
+        cities,
+        el('span', { class: 'field-hint' }, ['Leave empty to let patients type their city. "Other" is always offered.']),
+      ]),
     ]);
-    return { form, get: () => ({ name: name.value.trim(), location: loc.value.trim(), start_date: start.value, languages: Array.from(enabled).join(',') || 'en' }) };
+    return {
+      form,
+      get: () => ({
+        name: name.value.trim(), location: loc.value.trim(), start_date: start.value, languages: Array.from(enabled).join(',') || 'en',
+        cities: cities.value.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
+      }),
+    };
   }
 
   async function newEvent() {

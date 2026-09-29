@@ -279,6 +279,10 @@ function migrate() {
   // still turned on, is the active event everywhere). Before this, "Set active" was
   // a local-only setting, so laptops could sit on different events and split the queue.
   addColumn('events', 'selected_at', 'TEXT');
+  // v0.0.15: the towns this event offers in the check-in City dropdown, as a
+  // JSON array of names. NULL (every existing event) means no list, and City
+  // stays the free-text box it has always been.
+  addColumn('events', 'cities', 'TEXT');
   addColumn('patients', 'dismissed_by_name', 'TEXT');
   // v1.5.24: the front desk confirms the patient is physically here and ready to
   // be seen (consents checked, station assigned). Pre-registered patients can sit
@@ -945,12 +949,33 @@ function listEvents() {
   }));
 }
 
-function createEvent(actor, { name, location, start_date, end_date, languages }) {
+// The City dropdown's list, as it is stored: names trimmed, inner spacing
+// collapsed, empties and "Other" dropped (the form always adds its own Other),
+// duplicates removed ignoring case — "Sandy" and "sandy " are one town, and two
+// of them would be two report buckets again — capped at 100 names of 80
+// characters. Accepts an array or one name per line. NULL when empty, which
+// keeps City a free-text box.
+function sanitizeCities(v) {
+  const raw = Array.isArray(v) ? v : String(v == null ? '' : v).split(/\r?\n/);
+  const seen = new Set();
+  const out = [];
+  for (const c of raw) {
+    const name = String(c == null ? '' : c).replace(/\s+/g, ' ').trim().slice(0, 80);
+    const fold = name.toLowerCase();
+    if (!name || fold === 'other' || seen.has(fold)) continue;
+    seen.add(fold);
+    out.push(name);
+    if (out.length >= 100) break;
+  }
+  return out.length ? JSON.stringify(out) : null;
+}
+
+function createEvent(actor, { name, location, start_date, end_date, languages, cities }) {
   if (!name) throw new Error('Event name is required.');
   const info = db.prepare(
-    `INSERT INTO events (name, location, start_date, end_date, languages, active, created_at)
-     VALUES (?,?,?,?,?,1,?)`
-  ).run(name, location || '', start_date || today(), end_date || '', languages || 'en,es', now());
+    `INSERT INTO events (name, location, start_date, end_date, languages, active, created_at, cities)
+     VALUES (?,?,?,?,?,1,?,?)`
+  ).run(name, location || '', start_date || today(), end_date || '', languages || 'en,es', now(), sanitizeCities(cities));
   audit(actor, 'create', 'event', info.lastInsertRowid, name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(info.lastInsertRowid);
 }
@@ -970,12 +995,15 @@ function setActiveEvent(actor, id) {
   return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
 }
 
-function updateEvent(actor, id, { name, location, start_date, end_date, languages }) {
+function updateEvent(actor, id, { name, location, start_date, end_date, languages, cities }) {
   const e = db.prepare('SELECT * FROM events WHERE id = ?').get(id);
   if (!e) throw new Error('Event not found.');
+  // An update that does not mention cities leaves the list alone; an empty
+  // one clears it (back to the free-text box).
   db.prepare(
-    `UPDATE events SET name=?, location=?, start_date=?, end_date=?, languages=? WHERE id=?`
-  ).run(name ?? e.name, location ?? e.location, start_date ?? e.start_date, end_date ?? e.end_date, languages ?? e.languages, id);
+    `UPDATE events SET name=?, location=?, start_date=?, end_date=?, languages=?, cities=? WHERE id=?`
+  ).run(name ?? e.name, location ?? e.location, start_date ?? e.start_date, end_date ?? e.end_date, languages ?? e.languages,
+    cities === undefined ? e.cities : sanitizeCities(cities), id);
   audit(actor, 'update', 'event', id, name || e.name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
 }
@@ -1168,9 +1196,10 @@ function createPatient(actor, data) {
   // Persist consents
   (d.consents || []).forEach((c) => addConsent(id, c));
 
-  // The demographic half of the survey is answered during registration, before
-  // this row existed, so it arrives with the patient rather than through its own
-  // call. Never fatal: a survey that fails to save must not lose the patient.
+  // Registration asks no survey question since v0.0.15 (the whole survey is
+  // asked at check-out), so the kiosk no longer sends one. Kept as an inert
+  // path: it is how a record from the split-survey era is rebuilt for testing.
+  // Never fatal: a survey that fails to save must not lose the patient.
   if (d.survey && (d.survey.answers || d.survey.declined)) {
     try {
       saveExitSurvey(actor, id, { ...d.survey, stage: 'registration' });
@@ -1182,19 +1211,44 @@ function createPatient(actor, data) {
   return getPatient(id);
 }
 
+// Answers that describe the patient ON THE DAY, not their history. A returning
+// patient's new visit must ask them again rather than inherit last visit's —
+// last spring's toothache, or a pregnancy, is not today's. Mirrors
+// DENTAL_QUESTIONS in src/renderer/i18n/strings.js (the harness pins them).
+const VISIT_SPECIFIC_DENTAL_KEYS = ['pain_cold', 'pain_hot', 'pain_eating', 'toothache_night', 'pain_touch',
+  'grinding_night', 'jaw_pain_waking', 'sores'];
+
 // Returning patient: start a NEW visit (new patient row) in the active event,
 // pre-filled from an existing record so the front desk doesn't re-type. Carries
 // demographics + medical history; the visit-specific bits (reason / what they
-// need / prior signed consents) start fresh so this visit is captured cleanly.
+// need / today's symptoms / prior signed consents) start fresh so this visit is
+// captured cleanly.
 function startVisitFromExisting(actor, sourceId) {
   const src = getPatient(sourceId);
   if (!src) throw new Error('Patient not found.');
   const dental = Object.assign({}, src.dental_history || {});
   delete dental.reason; delete dental.visit_type; delete dental.may_need_extraction;
+  VISIT_SPECIFIC_DENTAL_KEYS.forEach((k) => { delete dental[k]; });
+  // Pregnancy and "major surgery in the past six months" are time-bound, so
+  // they are asked again. history_version goes too: without it the carried
+  // history reads as not yet confirmed for this visit, and the Vitals review
+  // asks for it. Everything else in the history carries over.
+  const medical = Object.assign({}, src.medical_history || {});
+  delete medical.pregnancy; delete medical.major_surgery; delete medical.surgery_sites;
+  delete medical.history_version;
+  if (medical.condition_answers && typeof medical.condition_answers === 'object') {
+    medical.condition_answers = Object.assign({}, medical.condition_answers);
+    delete medical.condition_answers.pregnant;
+  }
+  // The derived list must not keep saying "pregnant" once the answer is gone.
+  if (Array.isArray(medical.conditions) && medical.conditions.includes('pregnant')) {
+    medical.conditions = medical.conditions.filter((k) => k !== 'pregnant');
+    if (!medical.conditions.length) delete medical.conditions_none;
+  }
   return createPatient(actor, {
     first_name: src.first_name, last_name: src.last_name, dob: src.dob, gender: src.gender,
     phone: src.phone, email: src.email, language: src.language,
-    demographics: src.demographics || {}, medical_history: src.medical_history || {},
+    demographics: src.demographics || {}, medical_history: medical,
     dental_history: dental, consents: [],
   });
 }
@@ -2320,10 +2374,11 @@ function importClinicBundle(actor, bundle) {
       eventId = ev.id;
     } else {
       const info = db.prepare(
-        `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at)
-         VALUES (?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at, cities)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
       ).run(b.event.uid || crypto.randomUUID(), b.event.name, b.event.location || '', b.event.start_date || today(),
-        b.event.end_date || '', b.event.languages || 'en,es', 0, b.event.created_at || now(), null);
+        b.event.end_date || '', b.event.languages || 'en,es', 0, b.event.created_at || now(), null,
+        b.event.cities == null ? null : sanitizeCities(safeJson(b.event.cities, b.event.cities)));
       eventId = info.lastInsertRowid;
     }
 
@@ -2444,6 +2499,28 @@ const didCleaning = (t) => {
 // Through the clinic and gone: treatment finished, or checked out and left.
 const isFinishedStatus = (s) => s === 'completed' || s === 'dismissed';
 
+// One town, one bucket. "Sandy, OR", "sandy, OR" and "Sandy , OR" were three
+// rows of the by-city table a grant return is written from; they are folded
+// together ignoring case and spacing, under the spelling most of them used (the
+// first one met on a tie). Mutates and returns the map; keys stay readable
+// "Town, ST" and "Not recorded" is left as it is.
+function foldCityCounts(map) {
+  const groups = new Map();
+  for (const [key, n] of Object.entries(map || {})) {
+    const fold = key === 'Not recorded' ? key : key.replace(/\s+/g, ' ').replace(/\s*,\s*/g, ', ').trim().toLowerCase();
+    if (!groups.has(fold)) groups.set(fold, []);
+    groups.get(fold).push([key, Number(n) || 0]);
+  }
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const winner = members.reduce((best, cur) => (cur[1] > best[1] ? cur : best));
+    const total = members.reduce((sum, [, n]) => sum + n, 0);
+    members.forEach(([key]) => { delete map[key]; });
+    map[winner[0]] = total;
+  }
+  return map;
+}
+
 function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf) {
   const bump = (o, k) => { const key = k || 'Not recorded'; o[key] = (o[key] || 0) + 1; };
   // An impossible age is 'Not recorded', not a band. A date of birth typed after
@@ -2491,11 +2568,14 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     else races.forEach((r) => bump(by_race, r));
     if (races.includes('prefer_not')) race_declined++;
     else if (races.length) race_answered++;
-    bump(by_city, d.city ? (d.city + (d.state ? ', ' + d.state : '')) : 'Not recorded');
+    const cityName = String(d.city || '').replace(/\s+/g, ' ').trim();
+    bump(by_city, cityName ? (cityName + (d.state ? ', ' + d.state : '')) : 'Not recorded');
     bump(by_day, dayOf(p.created_at));
     bump(by_status, p.status);
     bump(visit_types, dh.visit_type);
-    (m.conditions || []).forEach((c) => bump(conditions, c));
+    // 'none' and 'other' are what the form stores for "none of these" and "I
+    // typed something" — not conditions, so never counted as one.
+    (m.conditions || []).forEach((c) => { if (c && c !== 'none' && c !== 'other') bump(conditions, c); });
     const finished = isFinishedStatus(p.status);
     if (finished) completed++;
     if (p.status === 'dismissed') checked_out++;
@@ -2518,6 +2598,7 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     txDay.treatments += f + x + c;
     if (finished) txDay.completed++;
   }
+  foldCityCounts(by_city);
   // The exit survey, as counts only. Every answer is a closed choice, so a
   // tally of them carries nothing that belongs to a person — which is the whole
   // point: these figures are what a grant return is written from, and they have
@@ -2637,6 +2718,9 @@ function mergeSummaries(list) {
     });
   }
   out.days = Object.values(days).sort((a, b) => (a.date < b.date ? -1 : 1));
+  // Kept reports are frozen with whatever spelling they were counted under, so
+  // the fold is applied to the merged totals too, not only to new counts.
+  foldCityCounts(out.by_city);
   out.legacy_parts = legacy;
   return out;
 }
@@ -2752,10 +2836,11 @@ function rebuildSummaryFromBundle(actor, bundle) {
   if (ev) eventId = ev.id;
   else {
     eventId = db.prepare(
-      `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at)
-       VALUES (?,?,?,?,?,?,0,?,NULL)`
+      `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at, cities)
+       VALUES (?,?,?,?,?,?,0,?,NULL,?)`
     ).run(b.event.uid || crypto.randomUUID(), b.event.name, b.event.location || '', b.event.start_date || today(),
-      b.event.end_date || '', b.event.languages || 'en,es', b.event.created_at || now()).lastInsertRowid;
+      b.event.end_date || '', b.event.languages || 'en,es', b.event.created_at || now(),
+      b.event.cities == null ? null : sanitizeCities(safeJson(b.event.cities, b.event.cities))).lastInsertRowid;
   }
   const existing = db.prepare('SELECT id FROM event_reports WHERE event_id = ?').get(eventId);
   if (existing) {
@@ -2865,7 +2950,9 @@ const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', 
 const APPLY_ORDER = ['event', 'user', 'report', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
 // Syncable payload columns per entity (fixed order -> stable content hash).
 const SYNC_COLS = {
-  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at'],
+  // cities: the check-in City list, so every station and the online form offer
+  // the same towns.
+  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at', 'cities'],
   // Staff account. salt+hash travel so the account can sign in on every laptop;
   // event scoping travels via event_uid (the parent), NULL for global admins.
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
