@@ -2537,6 +2537,560 @@ async function main() {
     log(!!rec, 'supplies: a movement can be recorded without leaving the item');
   }
 
+  /* ===== Dental Triage (v0.0.15) ===========================================
+     The dentist's station is renamed Dental Triage and gains a Treatment
+     Waiting stage, a typed count of X-rays taken, an injection-site dropdown,
+     M F L O B surfaces and a Referral card in place of Services. Every one of
+     those rides on stored data that older records, older laptops and older
+     backups do not have, so the checks come in pairs: a record written the new
+     way, and one written the old way, each shown correctly on every screen and
+     in every export — and the old laptop's row never allowed to wipe the new. */
+  {
+    currentUser = signInAdmin();
+    const prevEventId = Number(db.getSetting('active_event_id'));
+    const evB = db.createEvent(currentUser, { name: 'Dental Triage Clinic', location: 'Sandy' });
+    db.setActiveEvent(currentUser, evB.id);
+    const DLr = await import('../src/renderer/i18n/dentalLists.js');
+    const DLm = require('../src/main/dentalLabels.js');
+    const stB = await import('../src/renderer/i18n/strings.js');
+    const i18nB = await import('../src/renderer/js/i18n.js');
+    const pdfB = require('../src/main/pdf.js');
+    const { clinicSheets: sheetsB, summarySheets: summarySheetsB } = require('../src/main/clinicSheets.js');
+    const rexB = require('../src/main/reportExport.js');
+    const readSrcB = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const plain = (html) => html.replace(/<style>[\s\S]*?<\/style>/, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const storeB = (await import('../src/renderer/js/store.js')).store; storeB.setUser(currentUser);
+    let navB = null; const toastsB = [];
+    const ctxB = { navigate: (v) => { navB = v; }, toast: (m) => toastsB.push(m), store: storeB, setDetail: () => {} };
+    const settle = async (n = 12) => { for (let i = 0; i < n; i++) await tick(); };
+    const GEN = [{ type: 'general', signer_name: 'Chair Side', signature_png: 'data:image/png;base64,AAAA' }];
+    const mkB = (first, last, route = 'dentist') => {
+      const p = db.createPatient(currentUser, { first_name: first, last_name: last, dob: '1979-04-04', demographics: {}, medical_history: {}, dental_history: {}, consents: GEN });
+      db.saveVitals(currentUser, p.id, { bp_systolic: '122', bp_diastolic: '80', heart_rate: '72' });
+      db.routePatient(currentUser, p.id, route);
+      return p;
+    };
+    const view = async (file, fn, params = {}) => {
+      const node = (await import(`../src/renderer/js/views/${file}`))[fn](ctxB, params);
+      document.body.append(node);
+      await settle(16);
+      return node;
+    };
+    const btnIn = (node, re) => Array.from(node.querySelectorAll('button')).find((b) => re.test(b.textContent));
+    const cardTitled = (node, title) => Array.from(node.querySelectorAll('.card')).find((c) => {
+      const t = c.querySelector('.card-title');
+      return t && t.textContent.trim().startsWith(title);
+    });
+    const fieldLabelled = (node, label) => Array.from(node.querySelectorAll('label.field')).find((l) => {
+      const s = l.querySelector('.field-label');
+      return s && s.textContent.trim() === label;
+    });
+    const selectedText = (sel) => (sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].textContent : '');
+    const toastTexts = () => Array.from(document.querySelectorAll('#toast-host .toast')).map((x) => x.textContent);
+
+    /* ---- the lists, and their CommonJS mirror ---- */
+    log(DLr.SURFACES.map((s) => s.key).join('') === 'MFLOB',
+      'dental triage: the surface pills are exactly M, F, L, O, B');
+    for (const name of ['SURFACES', 'LEGACY_SURFACE_COUNTS', 'ANES_SITES', 'DENTAL_REFERRAL_TO', 'REFERRAL_URGENCY', 'STATUS_LABELS']) {
+      log(JSON.stringify(DLr[name]) === JSON.stringify(DLm[name]),
+        `dental triage: ${name} in src/main/dentalLabels.js mirrors the renderer list`);
+    }
+    log(JSON.stringify(stB.ANESTHETICS.map((a) => [a.key, a.en, !!a.retired])) === JSON.stringify(DLm.ANESTHETICS.map((a) => [a.key, a.en, !!a.retired])),
+      'dental triage: the printed record and spreadsheet know every anaesthetic in the clinic list, retired ones included');
+    log(DLr.DENTAL_REFERRAL_TO.every((d) => d.en && d.es) && DLr.REFERRAL_URGENCY.every((d) => d.en && d.es),
+      'dental triage: referral destinations and urgency are translated into Spanish for the patient’s own copy');
+    log(new Set(DLr.ANES_SITES.map((s) => s.key)).size === DLr.ANES_SITES.length && DLr.ANES_SITES[DLr.ANES_SITES.length - 1].key === 'other',
+      'dental triage: injection sites have unique keys and end with Other');
+    const surfCases = [[['O', 'M'], 'MO'], ['1,2', '1-surface, 2-surface'], ['MOD', 'MOD'], [['2', 'M'], 'M, 2-surface'], [[], ''], [null, ''], [['b', 'L'], 'LB']];
+    log(surfCases.every(([v, want]) => DLr.formatSurfaces(v) === want && DLm.formatSurfaces(v) === want),
+      'dental triage: surfaces read "MO" in canonical order and a legacy count reads "2-surface", on screen and on paper alike');
+    log(['checked_in', 'triaged', 'treatment_waiting', 'in_treatment', 'completed', 'dismissed'].every((k) => DLr.STATUS_LABELS[k] && DLr.STATUS_LABELS[k] !== k)
+      && DLr.STATUS_LABELS.triaged === 'Waiting for provider' && DLr.STATUS_LABELS.treatment_waiting === 'Treatment waiting',
+      'dental triage: every patient status has one label, "Waiting for provider" and "Treatment waiting" included');
+
+    /* ---- the station's name, not the person's ---- */
+    log(i18nB.t('nav.provider') === 'Dental Triage' && i18nB.t('roles.doctor') === 'Dentist',
+      'dental triage: the station is called Dental Triage, while the staff role is still "Dentist"');
+    i18nB.setLang('es');
+    log(i18nB.t('nav.provider') === 'Triaje dental', 'dental triage: and "Triaje dental" in Spanish');
+    i18nB.setLang('en');
+    let gateMsg = '';
+    const novit = db.createPatient(currentUser, { first_name: 'Vic', last_name: 'Novitals', consents: GEN });
+    try { db.routePatient(currentUser, novit.id, 'dentist'); } catch (e) { gateMsg = e.message; }
+    log(/Dental Triage/.test(gateMsg) && !/dentist/.test(gateMsg), 'dental triage: the vitals gate names the station Dental Triage');
+
+    /* ---- a record written the old way ---- */
+    const leg = mkB('Lena', 'Legacy');
+    // As v0.0.14 wrote it: an "X-ray station #", surface COUNTS (one row as a
+    // string), a typed injection site, an agent key this build does not list,
+    // Services counts and the retired triage checklist's referral tick.
+    db.saveTriage(currentUser, leg.id, { complaint: 'Old pain', xray_count: 0, xray_station: '3', status: 'ready', checklist: { referral: true } });
+    db.addXray(currentUser, leg.id, { station: '3', image_png: 'data:image/jpeg;base64,AAAA', note: 'Legacy_Lena_T14.jpg' });
+    db.addXray(currentUser, leg.id, { station: '3', image_png: 'data:image/jpeg;base64,BBBB', note: 'Legacy_Lena_T3.jpg' });
+    db.saveTreatment(currentUser, leg.id, {
+      fillings: [{ tooth: '14', surfaces: ['2'], post: true }, { tooth: '3', surfaces: '1,2' }],
+      anesthetic: [{ agent: 'mepivacaine', carps: '1', location: '#14 lingual', tooth: '14' }, { agent: 'supplemental', carps: '0.5' }],
+      cleaning: { teeth: [], quad_detail: '' },
+      restorative: { denture: { on: true, kind: 'partial', action: 'new' } },
+      services: { pulpotomy: '1', irm: '', alveoplasty: '2' },
+    });
+
+    const provL = await view('provider.js', 'renderProvider', { id: leg.id });
+    const txtL = provL.textContent;
+    log(!!fieldLabelled(provL, 'Number of X-rays taken') && /Images uploaded/.test(txtL) && !/X-ray station #/.test(txtL),
+      'dental triage: the visit panel asks for the number of X-rays taken, beside the images uploaded');
+    log(/X-ray station \(recorded earlier\)\s*3/.test(txtL),
+      'dental triage: a station number from an older visit is still shown, read-only');
+    const pillsL = Array.from(provL.querySelectorAll('.filling-row')).map((r) => Array.from(r.querySelectorAll('.surf-chip')).map((b) => b.textContent));
+    log(pillsL.length === 2 && pillsL[0].slice(0, 5).join('') === 'MFLOB',
+      'dental triage: a filling offers the pills M F L O B');
+    log(pillsL.length === 2 && pillsL[0].includes('2-surf') && pillsL[1].includes('1-surf') && pillsL[1].includes('2-surf'),
+      'dental triage: an older record’s surface COUNT shows as its own chip — and a count stored as a string no longer breaks the screen');
+    const anesL = Array.from(provL.querySelectorAll('.anes-admin-row'));
+    const [agentL0, siteL0] = anesL.length ? anesL[0].querySelectorAll('select') : [];
+    log(!!siteL0 && siteL0.value === '#14 lingual' && /\(recorded\) #14 lingual/.test(selectedText(siteL0)),
+      'dental triage: a typed injection site from an older record is kept as a "(recorded)" choice, selected');
+    log(!!siteL0 && DLr.ANES_SITES.every((s) => Array.from(siteL0.options).some((o) => o.value === s.key)) && siteL0.options[0].value === '',
+      'dental triage: the injection site is a dropdown of the standard sites, starting blank');
+    log(!!agentL0 && agentL0.value === 'mepivacaine' && anesL.length === 2 && anesL[1].querySelector('select').value === 'supplemental',
+      'dental triage: an agent key this build does not list is shown as recorded rather than turned into "Other"');
+    const refCardL = cardTitled(provL, 'Referral');
+    log(!!refCardL && !cardTitled(provL, 'Services') && !/Record the number performed/.test(txtL),
+      'dental triage: the Services card is replaced by a Referral card');
+    log(!!refCardL && /Services recorded earlier/.test(refCardL.textContent) && /Alveoplasty × 2/.test(refCardL.textContent) && /Pulpotomy × 1/.test(refCardL.textContent),
+      'dental triage: Services counts recorded earlier stay visible, read-only');
+    log(!!refCardL && /earlier triage checklist marked this patient for referral/.test(refCardL.textContent),
+      'dental triage: the retired triage checklist’s referral tick is pointed out rather than lost');
+
+    btnIn(provL, /^Save progress$/).click();
+    await settle();
+    const legA = db.getPatient(leg.id);
+    log(legA.triage.xray_station === '3' && legA.triage.xrays_taken == null,
+      'dental triage: re-saving an older visit keeps its x-ray station and does not invent a count');
+    log(legA.treatment.anesthetic.length === 2 && legA.treatment.anesthetic[0].agent === 'mepivacaine'
+      && legA.treatment.anesthetic[0].location === '#14 lingual' && legA.treatment.anesthetic[1].agent === 'supplemental',
+      'dental triage: re-saving keeps each recorded agent and typed site exactly as they were');
+    log(JSON.stringify(legA.treatment.fillings.map((f) => f.surfaces)) === JSON.stringify([['2'], ['1', '2']]),
+      'dental triage: re-saving keeps an older filling’s surface count');
+    log(legA.treatment.services.pulpotomy === '1' && legA.treatment.services.alveoplasty === '2' && (legA.treatment.restorative.denture || {}).on === true,
+      'dental triage: a save from the new screen keeps Services (no longer collected) and Restorative');
+    log(legA.treatment.referral_out === null, 'dental triage: a save with the Referral card left empty records no referral');
+
+    const legProg = plain(pdfB.buildHtml(legA, 'progress'));
+    const legSum = plain(pdfB.buildHtml(legA, 'summary'));
+    log(/#14 · 2-surface/.test(legProg) && /#3 · 1-surface, 2-surface/.test(legSum),
+      'dental triage: an older filling prints its surface count, on the progress note and the patient summary');
+    log(/Mepivacaine 3%/.test(legProg) && !/\bmepivacaine\b/.test(legProg) && /#14 lingual/.test(legProg) && /Supplemental/.test(legSum),
+      'dental triage: the printed record names the agent (never "mepivacaine") and keeps the site as typed');
+    log(/X-rays taken: 2 · Images uploaded: 2/.test(legProg) && /X-ray station 3 \(recorded earlier\)/.test(legProg),
+      'dental triage: an older visit prints its images as the x-rays taken, and its station as recorded earlier');
+    log(/Denture — partial, new/.test(legSum) && /Pulpotomy × 1/.test(legSum) && /Denture — partial, new/.test(legProg),
+      'dental triage: Restorative and the earlier Services now reach the printed record');
+    log(/Cleaning None/.test(legProg) && /Cleaning None/.test(legSum),
+      'dental triage: the teeth tapped on the chart are not printed as a cleaning');
+    log(/Referral \(triage checklist\)/.test(legProg), 'dental triage: the retired checklist’s referral tick prints by name');
+
+    /* ---- a record written the new way, through the screen ---- */
+    const nw = mkB('Nora', 'Newrec');
+    const provN = await view('provider.js', 'renderProvider', { id: nw.id });
+    const takenIn = fieldLabelled(provN, 'Number of X-rays taken').querySelector('input');
+    setInput(takenIn, '150');
+    btnIn(provN, /Move Patient to Treatment Waiting/).click();
+    await settle();
+    log(db.getPatient(nw.id).status === 'triaged' && toastTexts().some((m) => /whole number from 0 to 99/.test(m)),
+      'dental triage: an impossible X-ray count is refused at the chair, and nothing is saved');
+    let serverRefusal = '';
+    try { db.saveTriage(currentUser, nw.id, { complaint: 'x', xrays_taken: '-1', status: 'ready' }); } catch (e) { serverRefusal = e.message; }
+    log(/whole number/.test(serverRefusal) && db.getPatient(nw.id).triage.complaint !== 'x',
+      'dental triage: the data layer refuses it too, before writing anything');
+    setInput(takenIn, '4');
+    const fillRow = provN.querySelector('.filling-row');
+    setInput(fillRow.querySelector('input'), '30');
+    ['O', 'M'].forEach((k) => Array.from(fillRow.querySelectorAll('.surf-chip')).find((b) => b.textContent === k).click());
+    const anesN = provN.querySelector('.anes-admin-row');
+    const [agentN, siteN] = anesN.querySelectorAll('select');
+    log(agentN.value === stB.ANESTHETICS.find((a) => !a.retired).key && siteN.value === '',
+      'dental triage: a new administration starts on the first agent the clinic stocks, with no site chosen');
+    setInput(anesN.querySelector('input[type="number"]'), '1');
+    setInput(siteN, 'ianb');
+    btnIn(provN, /Add anesthetic/).click();
+    await settle(2);
+    const anesN2 = Array.from(provN.querySelectorAll('.anes-admin-row')).pop();
+    setInput(anesN2.querySelector('input[type="number"]'), '1');
+    const siteN2 = anesN2.querySelectorAll('select')[1];
+    setInput(siteN2, 'other');
+    const otherSite = Array.from(anesN2.querySelectorAll('input')).find((i) => i.placeholder === 'Describe the site');
+    log(!!otherSite && otherSite.style.display !== 'none', 'dental triage: choosing Other asks where');
+    setInput(otherSite, 'Palatal papilla');
+    const refCardN = cardTitled(provN, 'Referral');
+    const refUrg = refCardN.querySelector('select');
+    log(refUrg.options[0].value === '' && refUrg.options[0].textContent === '—' && Array.from(refUrg.options).map((o) => o.value).slice(1).join() === 'routine,soon,urgent',
+      'dental triage: referral urgency is a dropdown that starts blank');
+    Array.from(refCardN.querySelectorAll('.chip-select')).filter((b) => /^(Oral surgeon|Other)$/.test(b.textContent)).forEach((b) => b.click());
+    await settle(1);
+    const refOther = Array.from(refCardN.querySelectorAll('input')).find((i) => i.placeholder === 'Name the clinic or provider');
+    log(!!refOther && refOther.closest('label').style.display !== 'none', 'dental triage: ticking Other asks where the patient is referred');
+    setInput(refOther, 'Dr Lee, Riverside');
+    setInput(refUrg, 'urgent');
+    setInput(Array.from(refCardN.querySelectorAll('input')).find((i) => i.placeholder === 'Tooth #'), '17');
+    setInput(refCardN.querySelector('textarea'), 'Impacted third molar');
+    navB = null;
+    btnIn(provN, /Move Patient to Treatment Waiting/).click();
+    await settle();
+    const nwA = db.getPatient(nw.id);
+    log(nwA.status === 'treatment_waiting' && nwA.triage.status === 'treatment_waiting' && navB === 'provider',
+      'dental triage: "Move Patient to Treatment Waiting" parks the patient for a treatment chair and returns to the queue');
+    log(!!nwA.triage.treatment_waiting_at && nwA.treatment_waiting_by_name === currentUser.full_name && !nwA.treatment.completed_at && !nwA.treatment.locked,
+      'dental triage: the move is stamped with who and when, and neither completes nor locks the visit');
+    log(db.patientAudit(nw.id).some((a) => a.action === 'treatment_waiting'), 'dental triage: the move is in the patient’s audit trail');
+    log(nwA.triage.xrays_taken === 4, 'dental triage: the number of X-rays taken is saved as a number');
+    log(DLr.formatSurfaces(nwA.treatment.fillings[0].surfaces) === 'MO', 'dental triage: surfaces ticked O then M are saved and read as "MO"');
+    const [a0, a1] = nwA.treatment.anesthetic;
+    log(a0 && a0.location === 'ianb' && a0.agent === 'lidocaine' && a1 && a1.location === 'other' && a1.location_other === 'Palatal papilla',
+      'dental triage: the injection site is stored as its list key, with Other’s text beside it');
+    const roN = nwA.treatment.referral_out || {};
+    log(JSON.stringify(roN.to) === JSON.stringify(['oral_surgeon', 'other']) && roN.to_other === 'Dr Lee, Riverside' && roN.urgency === 'urgent' && roN.tooth === '17' && roN.reason === 'Impacted third molar',
+      'dental triage: the referral is stored under referral_out — destinations, other, urgency, tooth and reason');
+    log(!nwA.demographics.referral, 'dental triage: it never touches demographics.referral (how the patient heard about MMW)');
+
+    // Everywhere that names a status.
+    const { statusPill: pillB } = await import('../src/renderer/js/views/dashboard.js');
+    log(pillB('treatment_waiting').textContent === 'Treatment waiting' && pillB('triaged').textContent === 'Waiting for provider',
+      'dental triage: the status pill reads "Treatment waiting", and "Waiting for provider" for triaged');
+    const queueB = await view('provider.js', 'renderProvider');
+    const waitCard = cardTitled(queueB, 'Treatment waiting');
+    const triCard = cardTitled(queueB, 'Dental Triage');
+    log(!!waitCard && /Newrec, Nora/.test(waitCard.textContent) && /waiting \d/.test(waitCard.textContent) && !!triCard && !/Newrec/.test(triCard.textContent) && /Legacy, Lena/.test(triCard.textContent),
+      'dental triage: the queue shows Dental Triage and Treatment waiting as separate lists, with how long each patient has waited');
+    const dashB = await view('dashboard.js', 'renderDashboard');
+    const colB = (label) => Array.from(dashB.querySelectorAll('.crm-col')).find((c) => c.querySelector('.crm-col-label').textContent === label);
+    log(!!colB('Treatment waiting') && /Newrec, Nora/.test(colB('Treatment waiting').textContent) && /Legacy, Lena/.test(colB('Dental Triage').textContent),
+      'dental triage: the live board has a Treatment waiting column holding the patient');
+    log(Array.from(dashB.querySelectorAll('.stat-card')).some((c) => /Treatment waiting/.test(c.textContent) && /\b1\b/.test(c.querySelector('.stat-value').textContent))
+      && db.dashboardStats().treatment_waiting === 1,
+      'dental triage: and a Treatment waiting count at the top');
+    navB = null;
+    Array.from(colB('Treatment waiting').querySelectorAll('.crm-card')).find((c) => /Newrec/.test(c.textContent)).click();
+    log(navB === 'provider', 'dental triage: opening a waiting patient from the board goes to Dental Triage, never to Check-Out');
+    const listedB = db.listPatients({}).find((p) => p.id === nw.id);
+    log(listedB.treatment_waiting_at === nwA.triage.treatment_waiting_at, 'dental triage: the queue rows carry when the wait began');
+
+    // The treating dentist takes the patient in.
+    const provW = await view('provider.js', 'renderProvider', { id: nw.id });
+    log(/Treatment waiting — examined at Dental Triage by Administrator/.test(provW.textContent) && !btnIn(provW, /Move Patient to Treatment Waiting/),
+      'dental triage: a waiting patient’s chart says so, and does not offer the move again');
+    btnIn(provW, /^Save progress$/).click();
+    await settle();
+    log(db.getPatient(nw.id).status === 'in_treatment', 'dental triage: saving a waiting patient’s chart takes them into treatment');
+    const queueB2 = await view('provider.js', 'renderProvider');
+    log(/Newrec, Nora/.test(cardTitled(queueB2, 'In treatment').textContent) && !/Newrec/.test(cardTitled(queueB2, 'Treatment waiting').textContent),
+      'dental triage: and they move to the In treatment list');
+    const dashB2 = await view('dashboard.js', 'renderDashboard');
+    const inTx = Array.from(dashB2.querySelectorAll('.crm-col')).find((c) => c.querySelector('.crm-col-label').textContent === 'In treatment');
+    log(!!inTx && /Newrec, Nora/.test(inTx.textContent), 'dental triage: the board shows them in treatment');
+
+    // Other stations: the EMT's routing, the hygienist, Arrivals, Management.
+    const emtB = await view('emt.js', 'renderEmt', { id: leg.id });
+    log(/sent to Dental Triage/.test(emtB.textContent), 'dental triage: the vitals station says it sent the patient to Dental Triage');
+    const both = mkB('Hal', 'Bothroute', 'both');
+    db.saveTreatment(currentUser, both.id, {
+      fillings: [{ tooth: '8', surfaces: ['F'] }],
+      restorative: { recement: { on: true, tooth: '8' } }, services: { irm: '1' },
+      referral_out: { to: ['endodontist'], urgency: 'soon', reason: 'Root canal' },
+    }, 'waiting');
+    let saveErr = '';
+    try { db.saveTriage(currentUser, both.id, { ...db.getPatient(both.id).triage, status: 'ready' }); } catch (e) { saveErr = e.message; }
+    log(!saveErr && db.getPatient(both.id).status === 'treatment_waiting',
+      'dental triage: a triage save marked ready does not pull a waiting patient back out of the queue for a chair');
+    db.saveTreatment(currentUser, both.id, { ...db.getPatient(both.id).treatment }, 'waiting');
+    db.createUser(currentUser, { username: 'hyg_dt', full_name: 'Hy Gienist', role: 'hygienist', password: 'x' });
+    const hygUser = db.login('hyg_dt', 'x');
+    currentUser = hygUser; storeB.setUser(hygUser);
+    const hygQ = await view('hygienist.js', 'renderHygienist');
+    log(/Bothroute, Hal/.test(hygQ.textContent), 'dental triage: a patient routed to both stays in the cleaning queue while waiting for a chair');
+    const hygD = await view('hygienist.js', 'renderHygienist', { id: both.id });
+    log(!!btnIn(hygD, /Transfer to Dental Triage/), 'dental triage: the hygienist’s transfer button names Dental Triage');
+    Array.from(hygD.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent)).click();
+    btnIn(hygD, /^Save cleaning$/).click();
+    await settle();
+    const bothA = db.getPatient(both.id);
+    log(bothA.treatment.cleaning.adult_prophy === true && (bothA.treatment.restorative.recement || {}).on === true
+      && bothA.treatment.services.irm === '1' && ((bothA.treatment.referral_out || {}).to || [])[0] === 'endodontist',
+      'dental triage: a hygienist’s save keeps the dentist’s Restorative, Services and Referral');
+    log(bothA.status === 'treatment_waiting', 'dental triage: and the patient keeps their place in the queue for a chair');
+    // The data layer itself, for any writer that leaves the keys out (an older
+    // portable file, an older hygienist build).
+    db.saveTreatment({ id: null, role: 'hygienist', full_name: 'Hy Gienist' }, both.id, { fillings: bothA.treatment.fillings, cleaning: { ohi: true } });
+    const bothB = db.getPatient(both.id);
+    log((bothB.treatment.restorative.recement || {}).on === true && bothB.treatment.services.irm === '1' && ((bothB.treatment.referral_out || {}).to || [])[0] === 'endodontist',
+      'dental triage: a treatment save that leaves Restorative, Services or Referral out keeps them as stored');
+    currentUser = signInAdmin(); storeB.setUser(currentUser);
+
+    const arrP = db.createPatient(currentUser, { first_name: 'Ada', last_name: 'Arrivee', dob: '1990-01-01', demographics: {}, medical_history: {}, dental_history: { visit_type: 'filling' }, consents: GEN });
+    void arrP;
+    const arrB = await view('arrivals.js', 'renderArrivals');
+    log(Array.from(arrB.querySelectorAll('option')).some((o) => o.value === 'dentist' && o.textContent === 'Dental Triage'),
+      'dental triage: Arrivals offers Dental Triage as the station');
+    const scanIn = arrB.querySelector('.scan-input');
+    toastsB.length = 0;
+    if (scanIn) {
+      scanIn.value = bothA.patient_code;
+      scanIn.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await settle(8);
+    }
+    log(toastsB.some((m) => /Bothroute/.test(m) && /waiting for a treatment chair/.test(m)),
+      'dental triage: scanning a waiting patient at Arrivals says where they are');
+    const mgB = await view('management.js', 'renderManagement');
+    const mgRow = Array.from(mgB.querySelectorAll('tr')).find((r) => /Legacy, Lena/.test(r.textContent));
+    log(!!mgRow && /Dental Triage/.test(mgRow.querySelector('.pill--teal').textContent) && !!btnIn(mgRow, /^Dental Triage$/) && !!btnIn(mgRow, /^Treatment waiting$/),
+      'dental triage: Management labels the route Dental Triage and can move a patient to Treatment waiting');
+
+    // Admin moves in and out of the stage.
+    let gate = '';
+    try { db.adminMovePatient(currentUser, novit.id, 'treatment_waiting'); } catch (e) { gate = e.message; }
+    log(/vitals/i.test(gate), 'dental triage: an admin cannot move a patient without vitals into Treatment waiting');
+    const mv = mkB('Max', 'Mover');
+    db.adminMovePatient(currentUser, mv.id, 'treatment_waiting');
+    let mvP = db.getPatient(mv.id);
+    log(mvP.status === 'treatment_waiting' && !!mvP.triage.treatment_waiting_at, 'dental triage: an admin can move a patient to Treatment waiting');
+    db.routePatient(currentUser, mv.id, 'hygienist');
+    mvP = db.getPatient(mv.id);
+    log(mvP.status === 'treatment_waiting' && mvP.triage.status === 'treatment_waiting',
+      'dental triage: re-routing a waiting patient keeps them waiting, triage and patient status alike');
+    db.adminMovePatient(currentUser, mv.id, 'dentist');
+    mvP = db.getPatient(mv.id);
+    log(mvP.status === 'triaged' && mvP.triage.route === 'dentist' && mvP.triage.treatment_waiting_at == null,
+      'dental triage: sending a waiting patient back to Dental Triage puts them back in its queue');
+    db.adminMovePatient(currentUser, mv.id, 'treatment_waiting');
+    db.adminMovePatient(currentUser, mv.id, 'emt');
+    mvP = db.getPatient(mv.id);
+    log(mvP.status === 'checked_in' && mvP.triage.treatment_waiting_at == null, 'dental triage: walking a patient back to vitals clears the wait');
+
+    // A USB record carries the stage with it.
+    const port = mkB('Paz', 'Portable');
+    db.saveTreatment(currentUser, port.id, { referral_out: { to: ['physician'] } }, 'waiting');
+    const portable = { ...db.getPatient(port.id), xrays: db.listXrays(port.id) };
+    db.saveTreatment(currentUser, port.id, { fillings: [] });
+    db.importPatientFromPortable(currentUser, portable);
+    const portA = db.getPatient(port.id);
+    log(portA.status === 'treatment_waiting' && portA.triage.treatment_waiting_at === portable.triage.treatment_waiting_at
+      && ((portA.treatment.referral_out || {}).to || [])[0] === 'physician',
+      'dental triage: a USB record of a patient waiting for a chair imports still waiting, with the original stamp');
+
+    // A prior visit's status is labelled, and its teeth list is not a cleaning.
+    const pri1 = mkB('Priya', 'Prior');
+    db.saveTreatment(currentUser, pri1.id, { fillings: [{ tooth: '2', surfaces: ['O'] }], cleaning: { teeth: [], quad_detail: '' } }, 'waiting');
+    const pri2 = db.createPatient(currentUser, { first_name: 'Priya', last_name: 'Prior', dob: '1979-04-04', consents: GEN });
+    const hist = db.patientHistory(pri2.id);
+    log(hist.length >= 1 && hist[0].summary === '1 filling(s)', 'dental triage: a prior visit’s summary no longer calls the teeth list a cleaning');
+    const { patientHistoryCards: phcB } = await import('../src/renderer/js/components/patientHistory.js');
+    const histTxt = phcB(db.getPatient(pri2.id), hist).map((n) => n.textContent).join(' ');
+    log(/Treatment waiting/.test(histTxt) && !/treatment_waiting/.test(histTxt), 'dental triage: a prior visit’s status is shown by name, never as a code');
+
+    /* ---- printed record, spreadsheet, reports ---- */
+    const nwP = db.getPatient(nw.id);
+    const nwProg = plain(pdfB.buildHtml({ ...nwP, status: 'treatment_waiting' }, 'progress'));
+    const nwSum = plain(pdfB.buildHtml(nwP, 'summary'));
+    log(/Status Treatment waiting/.test(nwProg), 'dental triage: the progress note prints the status by name');
+    log(/X-rays taken: 4 · Images uploaded: 0/.test(nwProg) && !/X-ray station/.test(nwProg),
+      'dental triage: the progress note prints the X-rays taken, separately from the images uploaded');
+    log(/#30 · MO/.test(nwProg) && /#30 · MO/.test(nwSum), 'dental triage: a filling prints its surfaces as "MO"');
+    log(/Lidocaine 2% × 1 carp\(s\) · Inferior alveolar nerve block \(IANB\)/.test(nwSum) && /Palatal papilla/.test(nwProg),
+      'dental triage: the injection site prints by name, and Other by what was typed');
+    log(/Referral Referred to: Oral surgeon, Dr Lee, Riverside · Urgency: Urgent · Tooth #17 Impacted third molar/.test(nwSum)
+      && /Referred to: Oral surgeon, Dr Lee, Riverside/.test(nwProg),
+      'dental triage: the referral prints on the patient summary and the progress note');
+    const agentsPrinted = stB.ANESTHETICS.every((a) => {
+      const h = plain(pdfB.buildHtml({ first_name: 'A', last_name: 'B', medical_history: {}, triage: {}, consents: [], treatment: { anesthetic: [{ agent: a.key, carps: '1' }] } }, 'summary'));
+      return h.includes(a.en) && !new RegExp(`\\b${a.key}\\b`).test(h);
+    });
+    log(agentsPrinted, 'dental triage: every agent in the clinic list prints by name on the patient summary');
+    const sitesPrinted = DLr.ANES_SITES.filter((s) => s.key !== 'other').every((s) => {
+      const h = plain(pdfB.buildHtml({ first_name: 'A', last_name: 'B', medical_history: {}, triage: {}, consents: [], treatment: { anesthetic: [{ agent: 'articaine', location: s.key }] } }, 'progress'));
+      return h.includes(s.en);
+    });
+    log(sitesPrinted, 'dental triage: every injection site prints by name on the progress note');
+    const objShape = plain(pdfB.buildHtml({ first_name: 'A', last_name: 'B', medical_history: {}, triage: {}, consents: [], treatment: { anesthetic: { bupivacaine: { carps: '2', location: 'buccal' } }, fillings: [{ tooth: '9', surfaces: 'MO' }] } }, 'summary'));
+    log(/Bupivacaine 0\.5% × 2 carp\(s\) · buccal/.test(objShape) && /#9 · MO/.test(objShape),
+      'dental triage: the earliest stored shapes (anaesthetic keyed by agent, surfaces as a string) still print');
+
+    const bundleB = db.exportClinicBundle(evB.id);
+    const shB = sheetsB(bundleB);
+    const rowOf = (sheet, last) => {
+      const S = shB.find((x) => x.name === sheet);
+      const r = S.rows.find((x) => x[0] === last);
+      return r ? Object.fromEntries(S.columns.map((c, i) => [c, r[i]])) : {};
+    };
+    const legT = rowOf('Treatment', 'Legacy');
+    log(legT['Teeth filled'] === '14 2-surface, 3 1-surface, 2-surface' && /Mepivacaine 3% × 1 carp\(s\), tooth 14, #14 lingual/.test(legT.Anaesthetic),
+      'dental triage: the spreadsheet prints an older record’s surface counts, agent by name and typed site');
+    log(legT.Cleaning === '' && legT.Restorative === 'Denture — partial, new' && legT['Services (recorded before v0.0.15)'] === 'Alveoplasty × 2; Pulpotomy × 1'
+      && legT['X-rays taken'] === 2 && legT['X-rays uploaded'] === 2,
+      'dental triage: and its Restorative, earlier Services and x-rays, with no cleaning invented from the teeth list');
+    const nwT = rowOf('Treatment', 'Newrec');
+    log(nwT['Teeth filled'] === '30 MO' && /Inferior alveolar nerve block \(IANB\)/.test(nwT.Anaesthetic) && /Palatal papilla/.test(nwT.Anaesthetic),
+      'dental triage: the spreadsheet prints new surfaces and the injection site, which it did not export before');
+    log(nwT['Referred to'] === 'Oral surgeon, Dr Lee, Riverside' && nwT['Referral urgency'] === 'Urgent' && nwT['Referral details'] === '#17 — Impacted third molar' && nwT['X-rays taken'] === 4,
+      'dental triage: the spreadsheet carries the referral and the X-rays taken');
+    const bothP = rowOf('Patients', 'Bothroute');
+    log(bothP['Sent to'] === 'Dental Triage + Hygienist' && bothP.Status === 'Treatment waiting' && rowOf('Patients', 'Legacy')['Sent to'] === 'Dental Triage',
+      'dental triage: the spreadsheet names the station Dental Triage and the status Treatment waiting');
+
+    const sumB = db.buildEventSummary(evB.id);
+    const rawB = rawDb();
+    const wantTaken = rawB.prepare(`SELECT t.xrays_taken AS typed, (SELECT COUNT(*) FROM xrays x WHERE x.patient_id = p.id) AS n
+      FROM patients p LEFT JOIN triage t ON t.patient_id = p.id WHERE p.event_id = ?`).all(evB.id)
+      .reduce((acc, r) => acc + (r.typed != null ? r.typed : r.n), 0);
+    rawB.close();
+    log(sumB.xrays_taken === wantTaken && sumB.xrays === 2 && sumB.xrays_taken >= 6,
+      `dental triage: the report counts X-rays taken as typed, or the images for a visit without the count (${sumB.xrays_taken} taken, ${sumB.xrays} uploaded)`);
+    log(sumB.referrals === 3 && sumB.by_status.treatment_waiting >= 2, 'dental triage: the report counts referrals and patients waiting for a chair');
+    const mergedB = db.mergeSummaries([{ patients_seen: 3, xrays: 5 }, sumB]);
+    log(mergedB.xrays_taken === sumB.xrays_taken + 5 && mergedB.referrals === sumB.referrals,
+      'dental triage: totals kept before v0.0.15 contribute their images as x-rays taken, and no referrals');
+    const secB = Object.fromEntries(rexB.reportSections(sumB, 'This clinic').map((x) => [x.title, x]));
+    const procB = Object.fromEntries(secB['Procedures and imaging'].rows);
+    log(procB['X-rays taken'] === sumB.xrays_taken && procB['X-ray images uploaded'] === 2 && procB['Referred elsewhere for care'] === 3,
+      'dental triage: the exported report separates X-rays taken from images uploaded, and counts referrals');
+    log(secB['Where patients were in the clinic'].rows.some((r) => r[0] === 'Treatment waiting') && !secB['Where patients were in the clinic'].rows.some((r) => /_/.test(r[0])),
+      'dental triage: the exported report names every stage, Treatment waiting included');
+    const oldRep = Object.fromEntries(rexB.reportSections({ xrays: 7 }, 'Old').find((x) => x.title === 'Procedures and imaging').rows);
+    log(oldRep['X-rays taken'] === 7, 'dental triage: a report kept before v0.0.15 still says how many x-rays were taken');
+    const sumRows = Object.fromEntries(summarySheetsB(sumB)[0].rows);
+    log(sumRows['X-rays taken'] === sumB.xrays_taken && sumRows['X-rays uploaded'] === 2 && sumRows['Referred elsewhere for care'] === 3,
+      'dental triage: the clinic spreadsheet’s summary sheet agrees');
+    const repB = await view('reports.js', 'renderReports');
+    log(/X-rays taken/.test(repB.textContent) && /X-rays uploaded/.test(repB.textContent) && /Treatment waiting/.test(repB.textContent) && /Waiting for provider/.test(repB.textContent),
+      'dental triage: the Reports tab shows X-rays taken and uploaded, and every stage by name');
+
+    /* ---- the retire-safe anaesthetic list ---- */
+    const provSrcB = readSrcB('../src/renderer/js/views/provider.js');
+    log(/station: ''/.test(provSrcB) && !/station\.input/.test(provSrcB),
+      'dental triage: an uploaded x-ray is no longer stamped with the typed count as its station');
+    log(/ANESTHETICS\.filter\(\(a\) => !a\.retired\)\.map/.test(readSrcB('../src/renderer/js/views/inventory.js')),
+      'dental triage: the supplies starter list skips retired anaesthetics');
+    const mep = stB.ANESTHETICS.find((a) => a.key === 'mepivacaine');
+    const lido = stB.ANESTHETICS.find((a) => a.key === 'lidocaine');
+    mep.retired = true; lido.retired = true;
+    try {
+      const provR = await view('provider.js', 'renderProvider', { id: leg.id });
+      const optsOf = (row) => Array.from(row.querySelector('select').options).map((o) => o.value);
+      log(optsOf(provR.querySelectorAll('.anes-admin-row')[0]).includes('mepivacaine'),
+        'dental triage: a retired agent is still offered on the row that records it');
+      btnIn(provR, /Add anesthetic/).click();
+      await settle(2);
+      const fresh = Array.from(provR.querySelectorAll('.anes-admin-row')).pop();
+      log(!optsOf(fresh).includes('mepivacaine') && !optsOf(fresh).includes('lidocaine') && fresh.querySelector('select').value === 'articaine',
+        'dental triage: a retired agent is not offered for a new administration, and the default is the first agent still stocked');
+      btnIn(provR, /^Save progress$/).click();
+      await settle();
+      log(db.getPatient(leg.id).treatment.anesthetic[0].agent === 'mepivacaine',
+        'dental triage: a retired agent is saved back as itself, not rewritten to "Other"');
+      log(/Mepivacaine 3%/.test(plain(pdfB.buildHtml(db.getPatient(leg.id), 'progress'))), 'dental triage: and still prints by name');
+    } finally { delete mep.retired; delete lido.retired; }
+
+    // A locked record's referral is read-only.
+    const lk = mkB('Lou', 'Lockedref');
+    db.saveTreatment(currentUser, lk.id, { referral_out: { to: ['periodontist'], urgency: 'routine' }, provider_signature: 'data:image/png;base64,S', provider_name: 'Dr' }, 'lock');
+    const provK = await view('provider.js', 'renderProvider', { id: lk.id });
+    const refK = cardTitled(provK, 'Referral');
+    log(!!refK && Array.from(refK.querySelectorAll('button, select, input, textarea')).every((n) => n.disabled)
+      && /chip-select--on/.test(Array.from(refK.querySelectorAll('.chip-select')).find((b) => /Periodontist/.test(b.textContent)).className),
+      'dental triage: a locked record shows its referral, and cannot change it');
+
+    /* ---- sync safety: an older laptop, an older backup ---- */
+    const rawU = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).get(...a); } finally { r.close(); } };
+    const rawRun = (sql, ...a) => { const r = rawDb(); try { r.prepare(sql).run(...a); } finally { r.close(); } };
+    const collected = db.collectSyncRows(5000).rows;
+    const legTxUid = rawU('SELECT uid FROM treatments WHERE patient_id = ?', leg.id).uid;
+    const legTriUid = rawU('SELECT uid FROM triage WHERE patient_id = ?', leg.id).uid;
+    const legPUid = rawU('SELECT uid FROM patients WHERE id = ?', leg.id).uid;
+    const nwTriRow = collected.find((r) => r.uid === rawU('SELECT uid FROM triage WHERE patient_id = ?', nw.id).uid);
+    log(!!nwTriRow && nwTriRow.data.xrays_taken === 4 && !!nwTriRow.data.treatment_waiting_at && nwTriRow.data.treatment_waiting_by_name === 'Administrator',
+      'sync safety: X-rays taken and the Treatment Waiting stamp travel with the triage row');
+    const nwTxRow = collected.find((r) => r.uid === rawU('SELECT uid FROM treatments WHERE patient_id = ?', nw.id).uid);
+    log(!!nwTxRow && /oral_surgeon/.test(nwTxRow.data.referral_out || '') && nwTxRow.data.restorative != null && nwTxRow.data.services != null,
+      'sync safety: the referral, Restorative and Services travel with the treatment row');
+    const legTxRow = collected.find((r) => r.uid === legTxUid);
+    // What a laptop still on v0.0.14 sends: no restorative, services or referral_out.
+    const oldTx = { ...legTxRow.data };
+    delete oldTx.restorative; delete oldTx.services; delete oldTx.referral_out;
+    oldTx.clinical_notes = 'Edited on a laptop still running v0.0.14';
+    const age = (table, uid) => rawRun(`UPDATE ${table} SET updated_at = '2000-01-01T00:00:00.000Z@here' WHERE uid = ?`, uid);
+    const recent = () => new Date(Date.now() - 5000).toISOString() + '@oldlaptop';
+    age('treatments', legTxUid);
+    const oldStamp = recent();
+    const resOld = db.applyRemoteRows([{ entity: 'treatment', uid: legTxUid, patient_uid: legPUid, event_uid: null, deleted: 0, updated_at: oldStamp, data: oldTx }]);
+    const legS = db.getPatient(leg.id);
+    log(resOld.applied === 1 && legS.treatment.clinical_notes === 'Edited on a laptop still running v0.0.14',
+      'sync safety: a treatment row from a laptop that has not been upgraded applies, rather than being skipped');
+    log((legS.treatment.restorative.denture || {}).on === true && legS.treatment.services.pulpotomy === '1',
+      'sync safety: and this laptop keeps the Restorative and Services the older laptop never had');
+    const rePush = db.collectSyncRows(5000).rows.find((r) => r.uid === legTxUid);
+    log(!!rePush && /denture/.test(rePush.data.restorative) && rePush.updated_at > oldStamp && rePush.data.clinical_notes === oldTx.clinical_notes,
+      'sync safety: the merged row is sent back, so the cloud copy the older laptop overwrote gets them back');
+    const legTriRow = collected.find((r) => r.uid === legTriUid);
+    const oldTri = { ...legTriRow.data };
+    delete oldTri.xrays_taken; delete oldTri.treatment_waiting_at; delete oldTri.treatment_waiting_by_name;
+    oldTri.notes = 'Triage note from the older laptop';
+    rawRun('UPDATE triage SET xrays_taken = 5 WHERE uid = ?', legTriUid);
+    age('triage', legTriUid);
+    db.applyRemoteRows([{ entity: 'triage', uid: legTriUid, patient_uid: legPUid, event_uid: null, deleted: 0, updated_at: recent(), data: oldTri }]);
+    const legT2 = db.getPatient(leg.id).triage;
+    log(legT2.notes === 'Triage note from the older laptop' && legT2.xrays_taken === 5,
+      'sync safety: a triage row without the new columns keeps this laptop’s X-rays taken');
+    age('treatments', legTxUid);
+    db.applyRemoteRows([{ entity: 'treatment', uid: legTxUid, patient_uid: legPUid, event_uid: null, deleted: 0, updated_at: recent(),
+      data: { ...oldTx, restorative: '{}', services: '{}', referral_out: null, clinical_notes: 'From an upgraded laptop that never had them' } }]);
+    const legS2 = db.getPatient(leg.id).treatment;
+    log(legS2.clinical_notes === 'From an upgraded laptop that never had them' && (legS2.restorative.denture || {}).on === true && legS2.services.pulpotomy === '1',
+      'sync safety: an empty {} from a peer never overwrites a real Restorative or Services entry');
+    age('treatments', legTxUid);
+    db.applyRemoteRows([{ entity: 'treatment', uid: legTxUid, patient_uid: legPUid, event_uid: null, deleted: 0, updated_at: recent(),
+      data: { ...oldTx, restorative: JSON.stringify({ core_buildup: { on: true, tooth: '8' } }), services: '{}' } }]);
+    log((db.getPatient(leg.id).treatment.restorative.core_buildup || {}).tooth === '8' && !db.getPatient(leg.id).treatment.restorative.denture,
+      'sync safety: while a real edit from a peer still replaces it');
+    const evUidB = db.listEvents().find((e) => e.id === evB.id).uid;
+    const isoB = new Date().toISOString();
+    const resIns = db.applyRemoteRows([
+      { entity: 'patient', uid: 'dt-old-laptop-patient', event_uid: evUidB, patient_uid: null, deleted: 0, updated_at: recent(), data: {
+        language: 'en', first_name: 'Olaf', last_name: 'Oldlaptop', dob: null, gender: null, phone: null, email: null,
+        demographics: '{}', medical_history: '{}', dental_history: '{}', status: 'in_treatment', created_at: isoB,
+        dismissed_at: null, dismissed_by_name: null, arrived_at: null, arrived_by_name: null } },
+      { entity: 'treatment', uid: 'dt-old-laptop-treatment', event_uid: null, patient_uid: 'dt-old-laptop-patient', deleted: 0, updated_at: recent(), data: {
+        fillings: JSON.stringify([{ tooth: '19', surfaces: ['3'] }]), extractions: '[]', cleaning: '{}', anesthetic: '[]',
+        other_procedures: null, clinical_notes: null, provider_name: 'Dr Old', provider_signature: null, locked: 0, completed_at: null, completed_by_name: null } },
+    ]);
+    const olaf = db.listPatients({}).find((p) => p.last_name === 'Oldlaptop');
+    const olafP = olaf ? db.getPatient(olaf.id) : null;
+    log(resIns.applied === 2 && !!olafP && olafP.treatment.fillings[0].tooth === '19' && JSON.stringify(olafP.treatment.restorative) === '{}' && olafP.treatment.referral_out === null,
+      'sync safety: a new treatment from an older laptop is created with the defaults for what it did not send');
+    log(!!olafP && /#19 · 3-surface/.test(plain(pdfB.buildHtml(olafP, 'progress'))),
+      'sync safety: and prints correctly');
+
+    // A clinic backup from before these columns existed.
+    const rest = mkB('Rhea', 'Restore');
+    db.saveTriage(currentUser, rest.id, { complaint: 'r', xrays_taken: 3, status: 'ready' });
+    db.saveTreatment(currentUser, rest.id, { restorative: { bridge: { on: true, action: 'repair' } }, referral_out: { to: ['prosthodontist'] } });
+    const oldBundle = JSON.parse(JSON.stringify(db.exportClinicBundle(evB.id)));
+    oldBundle.treatments.forEach((t) => { delete t.restorative; delete t.services; delete t.referral_out; });
+    oldBundle.triage.forEach((t) => { delete t.xrays_taken; delete t.treatment_waiting_at; delete t.treatment_waiting_by; delete t.treatment_waiting_by_name; });
+    let restoreErr = '';
+    try { db.importClinicBundle(currentUser, oldBundle); } catch (e) { restoreErr = e.message; }
+    const restA = db.getPatient(rest.id);
+    log(!restoreErr && restA.triage.xrays_taken === 3 && (restA.treatment.restorative.bridge || {}).on === true && ((restA.treatment.referral_out || {}).to || [])[0] === 'prosthodontist',
+      'sync safety: restoring an older backup over this clinic keeps what the backup never had' + (restoreErr ? ': ' + restoreErr : ''));
+    db.deletePatient(currentUser, rest.id);
+    restoreErr = '';
+    try { db.importClinicBundle(currentUser, oldBundle); } catch (e) { restoreErr = e.message; }
+    const restBack = db.listPatients({}).find((p) => p.last_name === 'Restore');
+    const restB = restBack ? db.getPatient(restBack.id) : null;
+    log(!restoreErr && !!restB && JSON.stringify(restB.treatment.restorative) === '{}' && restB.treatment.referral_out === null && restB.triage.xrays_taken == null,
+      'sync safety: and an older backup restores into an empty laptop, taking the defaults' + (restoreErr ? ': ' + restoreErr : ''));
+
+    if (prevEventId && db.listEvents().some((e) => e.id === prevEventId)) db.setActiveEvent(currentUser, prevEventId);
+  }
+
   /* ===== The report, exported ===============================================
      CSV, Excel and PDF are three renderings of ONE set of section definitions.
      A grant return quoting the spreadsheet and a board paper quoting the PDF
