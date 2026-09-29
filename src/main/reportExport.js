@@ -56,6 +56,26 @@ function ranked(title, obj, total) {
 }
 
 /**
+ * Condition counts by name, for the "Most common conditions" table.
+ *
+ * 'none' and 'other' are what the form stores for "none of these" and "I typed
+ * something", not conditions; summaries kept before v0.0.15 counted them, and a
+ * kept summary is never recounted, so they are dropped here. Two keys that
+ * resolve to the same name are ADDED, never one overwriting the other. A key
+ * with no label (the Reports tab sends every one it knows, retired ones
+ * included) is title-cased rather than printed as a code to a funder.
+ */
+function conditionCounts(obj, labels) {
+  const out = {};
+  Object.entries(obj || {}).forEach(([k, v]) => {
+    if (k === 'none' || k === 'other') return;
+    const label = (labels && labels[k]) || String(k).replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    out[label] = (out[label] || 0) + (Number(v) || 0);
+  });
+  return out;
+}
+
+/**
  * The report, as titled tables.
  *
  * @param {object} summary   a summary from db.buildEventSummary / reportRollup
@@ -136,7 +156,7 @@ function reportSections(summary, scopeLabel, labels) {
 
   sections.push(ranked('Language', relabel(s.by_language, LANG), total));
   sections.push(ranked('City', s.by_city, total));
-  sections.push(ranked('Most common conditions', relabel(s.conditions, L.conditions), total));
+  sections.push(ranked('Most common conditions', conditionCounts(s.conditions, L.conditions), total));
   sections.push(ranked('Where patients were in the clinic', relabel(s.by_status, STATUS), total));
 
   sections.push({

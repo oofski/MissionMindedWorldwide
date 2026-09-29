@@ -5,6 +5,7 @@ import { icon } from '../icons.js';
 import { SignaturePad } from '../components/signature.js';
 import { Odontogram } from '../components/odontogram.js';
 import { patientHistoryCards, incompleteBanner } from '../components/patientHistory.js';
+import { clinicalFlags, medicalDisplay } from '../medicalHistory.js';
 import { sortedByName } from '../patientSort.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
@@ -88,13 +89,12 @@ export function renderProvider(ctx, params = {}) {
         .map((n) => el('option', { value: n })));
     let xrays = initialXrays;
 
-    // medical flags
-    // Blood thinners get their own dedicated danger banner + vitals-strip line, so
-    // exclude that condition here to avoid saying it three different ways.
-    const flagConds = conditions().filter((c) => c.flag && c.key !== 'blood_thinners' && (p.medical_history.conditions || []).includes(c.key)).map((c) => c.label);
-    const flagAllergies = allergies().filter((a) => (p.medical_history.allergies || []).includes(a.key)).map((a) => `Allergy: ${a.label}`);
-    if (p.medical_history.pregnancy === 'yes') flagConds.push('Pregnant');
-    const flags = [...flagConds, ...flagAllergies];
+    // medical flags — one rule, shared with every other reader of the history
+    // (medicalHistory.js): flagged conditions and "Unsure: …" ones, pregnancy,
+    // every allergy including a typed-in one, and an allergy answer of Unsure.
+    // Blood thinners get their own dedicated danger banner + vitals-strip line,
+    // so that condition is left out here rather than said three ways.
+    const flags = clinicalFlags(p.medical_history);
     // F12: blood-thinner detection — combine the EMT-confirmed triage answer
     // (triage.blood_thinner) with medication auto-detection so the danger banner
     // reflects both, not just the medication list (v1.2 bugfix).
@@ -1000,9 +1000,12 @@ export function renderProvider(ctx, params = {}) {
       el('details', { class: 'card', style: 'padding:0;overflow:hidden;margin-bottom:var(--space-4)' }, [
         el('summary', { class: 'card-title', style: 'cursor:pointer;list-style:none;padding:var(--space-3) var(--space-4);margin:0' }, [icon('user', { size: 15 }), 'Patient summary']),
         el('div', { class: 'mini-hist', style: 'padding:0 var(--space-4) var(--space-4)' }, [
-          el('div', {}, [el('b', {}, ['Allergies: ']), (allergies().filter((a) => (p.medical_history.allergies || []).includes(a.key)).map((a) => a.label).join(', ') || 'None')]),
-          el('div', {}, [el('b', {}, ['Conditions: ']), (conditions().filter((c) => (p.medical_history.conditions || []).includes(c.key)).map((c) => c.label).join(', ') || 'None')]),
-          el('div', {}, [el('b', {}, ['Medications: ']), (p.medical_history.medications || []).map((m) => m.name).join(', ') || 'None']),
+          ...((md) => [
+            el('div', {}, [el('b', {}, ['Allergies: ']), md.allergySummary]),
+            el('div', {}, [el('b', {}, ['Conditions: ']), md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? 'None (reviewed)' : 'None reported')]),
+            md.unsure.length ? el('div', {}, [el('b', {}, ['Unsure: ']), md.unsure.map((c) => c.label).join(', ')]) : null,
+            el('div', {}, [el('b', {}, ['Medications: ']), md.meds.map((m) => m.name).join(', ') || (md.medsNone ? 'None (reviewed)' : 'None reported')]),
+          ])(medicalDisplay(p.medical_history, 'en')),
           el('div', {}, [el('b', {}, ['Consent: ']), (p.consents || []).some((c) => c.type === 'general') ? 'Signed' : 'Missing']),
         ]),
       ]),

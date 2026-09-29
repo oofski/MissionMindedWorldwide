@@ -7,9 +7,10 @@
  * images — those cannot live in a spreadsheet, which is why the export also
  * writes a .chbak.json backup alongside it.
  */
-// Codes are title-cased for reading, the same way the printed record does it
-// (pdf.js historyItems), so the spreadsheet and the PDF never disagree.
-const titleKey = (k) => String(k || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// The medical and dental history are read through the same labels and rules as
+// the printed record (medicalLabels.js), so the spreadsheet and the PDF never
+// disagree about a patient.
+const medicalLabels = require('./medicalLabels');
 // Mirrors PRIOR_DENTIST in src/renderer/i18n/strings.js; the harness pins them
 // together. Unknown values fall through to the raw text so pre-dropdown records
 // still export the answer they recorded.
@@ -31,21 +32,12 @@ const j = (v, fallback) => {
   if (typeof v === 'object') return v;
   try { const p = JSON.parse(v); return p == null ? fallback : p; } catch { return fallback; }
 };
-// 'na' is a real answer on the pregnancy question, not a missing one — a man or
-// a child answering "Not applicable" is saying something, and printing the raw
-// code in an export a funder or a clinician reads is just a leak.
-const yn = (v) => (v === 'yes' ? 'Yes' : v === 'no' ? 'No' : v === 'na' ? 'Not applicable' : v || '');
-
-// Typed-in "other" text is always included, ticked or not — a written allergy
-// must never be missing from an exported record.
-function labelled(keys, other) {
-  const out = (Array.isArray(keys) ? keys : [])
-    .filter((k) => k !== 'other' && k !== 'none')
-    .map(titleKey);
-  if (other) out.push(String(other));
-  if (!out.length && (keys || []).includes('none')) return 'None';
-  return out.join(', ');
-}
+// 'na' and 'unsure' are real answers, not missing ones — a man or a child
+// answering "Not applicable" is saying something, and printing the raw code in
+// an export a funder or a clinician reads is just a leak.
+const yn = (v) => medicalLabels.answerLabel(v);
+const GENDER = { male: 'Male', female: 'Female', other: 'Other' };
+const ALLERGY_STATUS = { nkda: 'NKDA', yes: 'Yes', unsure: 'Unsure' };
 
 function ageFrom(dob) {
   if (!dob) return '';
@@ -78,9 +70,18 @@ function clinicSheets(bundle) {
   const patientRows = patients.map((p) => {
     const d = j(p.demographics, {}), m = j(p.medical_history, {}), dh = j(p.dental_history, {});
     const tr = triageBy.get(p.id) || {};
-    const meds = (m.medications || []).map((x) => (typeof x === 'string' ? x : [x.name, x.dose].filter(Boolean).join(' '))).filter(Boolean);
+    const md = medicalLabels.medicalDisplay(m);
+    const dd = medicalLabels.dentalDisplay(dh);
+    // Typed-in "other" text is always included, ticked or not — a written
+    // allergy must never be missing from an exported record.
+    const allergies = md.allergies.map((a) => a.label).join(', ') || (md.allergiesNone ? 'None' : '');
+    const conds = md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? 'None' : '');
+    const meds = md.meds.map((x) => [x.name, x.dose].filter(Boolean).join(' '));
+    // Retired questions only for a record that has them, so an empty cell
+    // there means "not asked", never "answered blank".
+    const legacy = Object.fromEntries(md.legacyRows.map((r) => [r.key, r.value]));
     return [
-      p.last_name, p.first_name, p.dob, ageFrom(p.dob), p.gender, p.language,
+      p.last_name, p.first_name, p.dob, ageFrom(p.dob), GENDER[p.gender] || p.gender, p.language,
       p.phone, p.email, d.address, d.city, d.state,
       d.emergency_name, d.emergency_phone,
       d.preregistered ? 'Online' : 'At the desk',
@@ -89,10 +90,15 @@ function clinicSheets(bundle) {
       // column now carries the countable answer the dropdown collects; records
       // taken before that keep printing whatever text they hold.
       PRIOR_DENTIST_LABELS[dh.prior_dentist] || dh.prior_dentist || '',
-      labelled(m.allergies, m.allergies_other),
-      labelled(m.conditions, m.conditions_other),
-      meds.length ? meds.join('; ') : (m.medications_none ? 'None' : ''),
-      yn(m.under_treatment), yn(m.hospitalized), yn(m.tobacco), yn(m.pregnancy),
+      // Step 3, one column per question, after the last-dental-visit answer.
+      ...dd.questions.map((q) => yn(q.value)),
+      ALLERGY_STATUS[md.allergyStatus] || '',
+      allergies,
+      conds,
+      md.unsure.map((c) => c.label).join(', '),
+      meds.length ? meds.join('; ') : (md.medsNone ? 'None' : ''),
+      yn(md.underTreatment), yn(md.surgery), md.surgerySites.join(', '), yn(md.smoke), yn(md.pregnancy),
+      yn(legacy.hospitalized), yn(legacy.pregnancy),
       tr.bp_systolic != null && tr.bp_diastolic != null ? `${tr.bp_systolic}/${tr.bp_diastolic}` : '',
       tr.heart_rate == null ? '' : tr.heart_rate,
       tr.route === 'dentist' ? 'Dentist' : tr.route === 'hygienist' ? 'Hygienist' : '',
@@ -141,8 +147,11 @@ function clinicSheets(bundle) {
       name: 'Patients',
       columns: ['Last name', 'First name', 'Date of birth', 'Age', 'Gender', 'Language',
         'Phone', 'Email', 'Address', 'City', 'State', 'Emergency contact', 'Emergency phone',
-        'Registered', 'Needed today', 'Last saw a dentist', 'Allergies', 'Conditions', 'Medications',
-        'Under doctor’s care', 'Hospitalized (2 yrs)', 'Tobacco', 'Pregnant/nursing',
+        'Registered', 'Needed today', 'Last saw a dentist',
+        ...Object.values(medicalLabels.DENTAL_Q_LABELS),
+        'Allergy status', 'Allergies', 'Conditions', 'Conditions (unsure)', 'Medications',
+        'Under doctor’s care', 'Major surgery (6 mo)', 'Surgery sites', 'Smokes / tobacco', 'Pregnancy',
+        'Hospitalized (2 yrs)', 'Pregnant/nursing',
         'Blood pressure', 'Pulse', 'Sent to', 'Status', 'Checked in at', 'Arrived at', 'Checked out at'],
       rows: patientRows,
     },

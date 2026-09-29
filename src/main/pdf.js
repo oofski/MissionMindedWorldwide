@@ -10,6 +10,7 @@
  */
 
 const { BrowserWindow } = require('electron');
+const medicalLabels = require('./medicalLabels');
 
 function esc(s) {
   if (s == null) return '';
@@ -20,8 +21,14 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+// An answer in words. 'unsure' and 'na' are answers too (the medical history's
+// Unsure, the pregnancy row's Not applicable) and must never print as a code.
 function yn(v) {
-  return v === true || v === 'yes' || v === 'Yes' ? 'Yes' : v === false || v === 'no' ? 'No' : esc(v || '—');
+  if (v === true || v === 'yes' || v === 'Yes') return 'Yes';
+  if (v === false || v === 'no') return 'No';
+  if (v === 'unsure') return 'Unsure';
+  if (v === 'na') return 'Not applicable';
+  return esc(v || '—');
 }
 
 // Only allow safe image sources (data:image or http(s)) and strip any stray
@@ -242,18 +249,45 @@ function fullPacketBody(p) {
   const d = p.demographics || {};
   const m = p.medical_history || {};
   const dh = p.dental_history || {};
+  const md = medicalLabels.medicalDisplay(m);
+  const dd = medicalLabels.dentalDisplay(dh);
 
-  const aItems = historyItems(m.allergies, m, 'allergies_other');
-  const allergies = aItems.length
-    ? aItems.map((a) => `<span class="flag">${a}</span>`).join('')
-    : `<span class="muted">${(m.allergies || []).includes('none') ? 'None (reviewed)' : 'None reported'}</span>`;
-  const cItems = historyItems(m.conditions, m, 'conditions_other');
-  const conditions = cItems.length
-    ? cItems.map((c) => `<span>${c}</span>`).join('')
-    : `<span class="muted">${(m.conditions || []).includes('none') ? 'None (reviewed)' : 'None reported'}</span>`;
-  const meds = (m.medications || []).map(
-    (x) => `<tr><td>${esc(x.name)}</td><td>${esc(x.dose || '')}</td><td>${esc(x.reason || '')}</td></tr>`
-  ).join('') || '<tr><td colspan="3" class="muted">None reported</td></tr>';
+  const chips = (items, cls) => items.map((x) => `<span${cls ? ` class="${cls}"` : ''}>${esc(x)}</span>`).join('');
+  const allergies = md.allergies.length
+    ? chips(md.allergies.map((a) => a.label), 'flag')
+    : md.allergyStatus === 'unsure' || md.allergyStatus === 'yes'
+      ? `<span class="flag">${esc(md.allergySummary)}</span>`
+      : `<span class="muted">${esc(md.allergySummary)}</span>`;
+  const conditions = md.yes.length
+    ? chips(md.yes.map((c) => c.label))
+    : `<span class="muted">${md.conditionsNone ? 'None (reviewed)' : md.unsure.length ? 'None answered Yes' : 'None reported'}</span>`;
+  // A checklist medication has no dose; the columns print only when a row
+  // (usually an older record) has one.
+  const withDose = md.meds.some((x) => x.dose || x.reason);
+  const meds = md.meds.map((x) => (withDose
+    ? `<tr><td>${esc(x.name)}</td><td>${esc(x.dose || '')}</td><td>${esc(x.reason || '')}</td></tr>`
+    : `<tr><td>${esc(x.name)}</td></tr>`)).join('')
+    || `<tr><td colspan="3" class="muted">${md.medsNone ? 'None (reviewed)' : 'None reported'}</td></tr>`;
+
+  // Two answers to a row. The retired questions (hospitalization, pregnant /
+  // nursing) print only for a record that has them, so a new record does not
+  // read "—" as if they had been skipped.
+  // field() escapes, so answers go in as plain words (yn() is pre-escaped HTML).
+  const ans = medicalLabels.answerLabel;
+  const medCells = [field('Currently under treatment', ans(md.underTreatment))];
+  if (md.version === 2 || md.surgery) {
+    medCells.push(field('Major surgery in the past 6 months', md.surgery === 'yes' && md.surgerySites.length
+      ? `Yes — ${md.surgerySites.join(', ')}` : ans(md.surgery)));
+  }
+  medCells.push(field('Smokes / tobacco', ans(md.smoke)));
+  if (md.version === 2) medCells.push(field('Pregnancy', ans(md.pregnancy)));
+  md.legacyRows.forEach((r) => medCells.push(field(r.key === 'hospitalized' ? 'Recent hospitalization' : r.label, ans(r.value))));
+  // The eight Step 3 questions, then the ones asked before v0.0.15 — only if
+  // this record has them.
+  const dentCells = [
+    ...dd.questions.map((q) => field(q.short, ans(q.value))),
+    ...dd.legacy.map((l) => field(l.label + ' (earlier form)', ans(l.value))),
+  ];
 
   const consents = (p.consents || []).map((c) => {
     const isSurgery = c.type === 'oral_surgery';
@@ -292,33 +326,29 @@ function fullPacketBody(p) {
     <h2>Patient Information</h2>
     <table class="grid">
       <tr>${field('Full name', `${p.first_name} ${p.last_name}`)}${field('Date of birth', p.dob)}</tr>
-      <tr>${field('Age', p.age)}${field('Gender', p.gender)}</tr>
+      <tr>${field('Age', p.age)}${field('Gender', GENDER_LABELS[p.gender] || p.gender)}</tr>
       <tr>${field('Phone', p.phone)}${field('Email', p.email)}</tr>
       <tr>${field('Address', d.address)}${field('Mailing address', d.mailing_address)}</tr>
       <tr>${field('City', d.city)}${field('State', d.state)}</tr>
-      <tr>${field('Marital status', d.marital_status)}${field('Emergency contact', d.emergency_name)}</tr>
+      <tr>${field('Marital status', MARITAL_LABELS[d.marital_status] || d.marital_status)}${field('Emergency contact', d.emergency_name)}</tr>
       <tr>${field('Emergency phone', d.emergency_phone)}${field('Referral source', d.referral === 'other' && d.referral_other ? d.referral_other : referralLabel(d.referral))}</tr>
       <tr>${field('Preferred language', p.language === 'es' ? 'Spanish' : 'English')}</tr>
     </table>
 
     <h2>Medical History</h2>
-    <table class="grid">
-      <tr>${field('Currently under treatment', m.under_treatment)}${field('Recent hospitalization', m.hospitalized)}</tr>
-      <tr>${field('Tobacco use', m.tobacco)}${field('Pregnant / nursing', m.pregnancy === 'na' ? 'Not applicable' : m.pregnancy)}</tr>
-    </table>
-    <div><span class="label">Medication allergies</span><div class="chips">${allergies}</div></div>
+    <table class="grid">${gridRows(medCells)}</table>
+    <div><span class="label">Medication allergies${md.allergyStatus ? ' — ' + esc(medicalLabels.ALLERGY_STATUS_LABELS[md.allergyStatus]) : ''}</span><div class="chips">${allergies}</div></div>
     <div><span class="label">Conditions</span><div class="chips">${conditions}</div></div>
+    ${md.unsure.length ? `<div><span class="label">Unsure — ask the patient</span><div class="chips">${chips(md.unsure.map((c) => c.label), 'flag')}</div></div>` : ''}
     <div><span class="label">Current medications</span>
-      <table class="box"><tr><th>Medication</th><th>Dose</th><th>Reason</th></tr>${meds}</table>
+      <table class="box"><tr><th>Medication</th>${withDose ? '<th>Dose</th><th>Reason</th>' : ''}</tr>${meds}</table>
     </div>
 
     <h2>Dental History</h2>
     <table class="grid">
       <tr>${field('What they need today', VISIT_LABELS[dh.visit_type] || '')}${field('May need extraction', dh.may_need_extraction === 'yes' ? 'Yes' : '')}</tr>
       <tr>${field('Last saw a dentist', PRIOR_DENTIST_LABELS[dh.prior_dentist] || dh.prior_dentist || '')}${dh.reason ? field('Reason for visit (legacy)', dh.reason) : '<td></td>'}</tr>
-      <tr>${field('Gums bleed', dh.gum_bleeding)}${field('Sores / lumps', dh.sores)}</tr>
-      <tr>${field('Head/neck/jaw injury', dh.jaw_injury)}${field('Clenching / grinding', dh.grinding)}</tr>
-      <tr>${field('Bleeding after extraction', dh.post_extraction_bleeding)}${field('Orthodontic history', dh.ortho)}</tr>
+      ${gridRows(dentCells)}
     </table>
 
     <h2>Consents & Signatures</h2>
@@ -338,16 +368,17 @@ function titleKey(k) {
   return String(k || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-// Display items for an allergies/conditions list, used by BOTH PDF paths so they
-// can never disagree: drop the 'other'/'none' sentinel keys, title-case the real
-// keys, and APPEND the typed "Other" free text — so a written-in allergen (e.g.
-// "Sulfa") is never dropped from the printed record.
-function historyItems(arr, m, otherKey) {
-  const items = (arr || []).filter((x) => x !== 'other' && x !== 'none').map((x) => esc(titleKey(x)));
-  // Print typed-in text whenever present, ticked or not (matches the screens).
-  if (m && m[otherKey]) items.push(esc(m[otherKey]));
-  return items;
+// Table rows of two cells from a flat list of <td>s, padding an odd count so
+// every row has the two cells the grid is laid out for.
+function gridRows(cells) {
+  const rows = [];
+  for (let i = 0; i < cells.length; i += 2) rows.push(`<tr>${cells[i]}${cells[i + 1] || '<td></td>'}</tr>`);
+  return rows.join('');
 }
+
+// Stored demographic codes in words; anything else prints as it was typed.
+const GENDER_LABELS = { male: 'Male', female: 'Female', other: 'Other' };
+const MARITAL_LABELS = { single: 'Single', married: 'Married', divorced: 'Divorced', widowed: 'Widowed' };
 
 // The patient's stated need from the 1–4 check-in scale.
 // Mirrors PRIOR_DENTIST in src/renderer/i18n/strings.js. Duplicated rather than
@@ -417,17 +448,17 @@ function healthBlock(p) {
     ? `${bpHtml(tr)}${bpRechecksHtml(tr) ? ' · ' + bpRechecksHtml(tr) : ''} · HR ${tr.heart_rate != null ? esc(tr.heart_rate) : '—'} bpm`
     : 'Not recorded';
   const thinner = bloodThinnerLine(p);
-  const list = (arr, otherKey) => {
-    // Shared with the full-packet PDF via historyItems() so the two record
-    // formats can never disagree on allergies/conditions.
-    const items = historyItems(arr, m, otherKey);
-    return items.length ? items.join(', ') : (arr && arr.includes('none') ? 'None (reviewed)' : 'None reported');
-  };
-  const allergies = list(m.allergies, 'allergies_other');
-  const conditions = list(m.conditions, 'conditions_other');
-  const meds = (m.medications || []).length
-    ? (m.medications || []).map((x) => `${esc(x.name)}${x.dose ? ' ' + esc(x.dose) : ''}`).join(', ')
-    : (m.medications_none ? 'None (reviewed)' : 'None reported');
+  // Read through the same display as the full packet (medicalLabels.js), so
+  // the two record formats can never disagree about a patient's history.
+  const md = medicalLabels.medicalDisplay(m);
+  const allergies = esc(md.allergySummary);
+  const conditions = md.yes.length ? md.yes.map((c) => esc(c.label)).join(', ')
+    : (md.conditionsNone ? 'None (reviewed)' : md.unsure.length ? 'None answered Yes' : 'None reported');
+  const unsure = md.unsure.map((c) => esc(c.label)).join(', ');
+  const meds = md.meds.length
+    ? md.meds.map((x) => `${esc(x.name)}${x.dose ? ' ' + esc(x.dose) : ''}`).join(', ')
+    : (md.medsNone ? 'None (reviewed)' : 'None reported');
+  const surgery = md.surgery === 'yes' && md.surgerySites.length ? `Yes — ${md.surgerySites.map(esc).join(', ')}` : (md.surgery ? yn(md.surgery) : '');
   const review = tr.emt_review && typeof tr.emt_review === 'object'
     ? Object.entries(tr.emt_review).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${titleKey(k)}: ${esc(String(v)).toUpperCase()}`)
     : [];
@@ -438,7 +469,9 @@ function healthBlock(p) {
     </table>
     <div><span class="label">Allergies</span> ${allergies}</div>
     <div><span class="label">Conditions</span> ${conditions}</div>
+    ${unsure ? `<div><span class="label">Unsure — ask the patient</span> ${unsure}</div>` : ''}
     <div><span class="label">Medications</span> ${meds}</div>
+    ${surgery ? `<div><span class="label">Major surgery (6 mo)</span> ${surgery}</div>` : ''}
     ${review.length ? `<div class="box"><span class="label">EMT review</span><br>${review.join(' · ')}</div>` : ''}`;
 }
 
