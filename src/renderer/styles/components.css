@@ -302,6 +302,18 @@
 .modal-title{ font-size:var(--fs-h3); font-weight:var(--fw-semibold); padding:16px 20px; border-bottom:var(--divider); }
 .modal-body{ padding:20px; overflow:auto; }
 .modal-actions{ display:flex; justify-content:flex-end; gap:8px; padding:14px 20px; border-top:var(--divider); }
+/* v0.0.15 patient info through the flow: the intake's own forms, edited over
+   the page (the 25-row history needs the width), and the lock's banners. */
+.modal-card--wide{ width:940px; }
+.card-title .card-edit{ margin-left:auto; text-transform:none; letter-spacing:normal; }
+.card-lock-note{ margin:-4px 0 8px; display:flex; align-items:center; gap:4px; }
+.history-review{ display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin-bottom:10px; }
+.history-review-stamp{ margin:0; display:flex; align-items:center; gap:4px; color:var(--success); }
+.history-review-stamp--none{ color:var(--warning); }
+.emt-confirmations{ margin:8px 0 0; }
+.lock-banner{ align-items:center; }
+.lock-banner .btn{ flex:none; margin-left:auto; }
+.plain-list{ list-style:none; margin:4px 0 0; padding:0; display:flex; flex-direction:column; gap:3px; }
 .toast-host{ position:fixed; bottom:22px; right:22px; display:flex; flex-direction:column; gap:10px; z-index:1100; }
 .toast{ display:flex; align-items:center; gap:10px; background:var(--surface-inverse); color:#fff; padding:12px 16px; border-radius:var(--radius-sm); box-shadow:var(--shadow-md); opacity:0; transform:translateY(10px); transition:opacity var(--dur) var(--ease), transform var(--dur) var(--ease); max-width:380px; font-weight:var(--fw-medium); font-size:var(--fs-sm); border-left:3px solid var(--info); }
 .toast.show{ opacity:1; transform:translateY(0); }

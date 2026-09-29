@@ -352,6 +352,26 @@ function migrate() {
   addColumn('triage', 'treatment_waiting_by', 'INTEGER');
   addColumn('triage', 'treatment_waiting_by_name', 'TEXT');
   addColumn('treatments', 'referral_out', 'TEXT');
+  // v0.0.15 Vitals: who went through the medical history with the patient at
+  // THIS visit, and when. On the triage row rather than inside the history, so
+  // a returning patient's new visit (which copies the history) starts out
+  // honestly "not yet reviewed". The name is stored as written — the reviewer
+  // at another station has no local user id here to resolve it from.
+  addColumn('triage', 'history_reviewed_at', 'TEXT');
+  addColumn('triage', 'history_reviewed_by_name', 'TEXT');
+  // v0.0.15 record lock accountability. `locked` has only ever said THAT a
+  // record is locked; these say who locked it, who unlocked it to amend it and
+  // why. lock_history is the whole trail as JSON [{action, at, by, reason?}]
+  // and is synced, because audit_log never leaves the laptop it was written on.
+  // All nullable: a row from a laptop not yet upgraded carries none of them,
+  // and a record locked before this release has only completed_at / by, which
+  // the readers fall back to.
+  addColumn('treatments', 'locked_at', 'TEXT');
+  addColumn('treatments', 'locked_by_name', 'TEXT');
+  addColumn('treatments', 'unlocked_at', 'TEXT');
+  addColumn('treatments', 'unlocked_by_name', 'TEXT');
+  addColumn('treatments', 'unlock_reason', 'TEXT');
+  addColumn('treatments', 'lock_history', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sync_patients ON patients(uid)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sync_events ON events(uid)');
   // v1.5.21 ONE-TIME HEAL. Until now the pull cursor was a timestamp high-water
@@ -1253,21 +1273,29 @@ function startVisitFromExisting(actor, sourceId) {
   VISIT_SPECIFIC_DENTAL_KEYS.forEach((k) => { delete dental[k]; });
   // Pregnancy and "major surgery in the past six months" are time-bound, so
   // they are asked again: with them unanswered, the history form refuses to
-  // save until they are (firstMissingMedical), and the screens show them as not
-  // yet asked. history_version goes too — it promises a history answered in
-  // full, which this one no longer is. Everything else carries over.
+  // save until they are (firstMissingMedical) — which is what the Vitals
+  // review of the new visit runs into — rather than carrying last visit's
+  // answer forward as if it were today's. history_version goes too — it
+  // promises a history answered in full, which this one no longer is.
+  // Everything else carries over.
   const medical = Object.assign({}, src.medical_history || {});
   delete medical.pregnancy; delete medical.major_surgery; delete medical.surgery_sites;
   delete medical.history_version;
   if (medical.condition_answers && typeof medical.condition_answers === 'object') {
     medical.condition_answers = Object.assign({}, medical.condition_answers);
     delete medical.condition_answers.pregnant;
-    // "None" was derived from EVERY condition being answered No, and one of
-    // them is now unanswered, so the history no longer says reviewed-none.
-    if (Array.isArray(medical.conditions) && medical.conditions.length === 1 && medical.conditions[0] === 'none') {
-      medical.conditions = [];
-      delete medical.conditions_none;
-    }
+  }
+  // A "None" over the conditions covered pregnancy too — the v0.0.15 form's
+  // 25th row, the older checklist's "Currently pregnant" chip — and that answer
+  // is exactly what a new visit must ask again, so the history no longer says
+  // reviewed-none, whichever form wrote it. Left in place on an older record,
+  // the returning patient's new visit read "Conditions: None (reviewed)" with
+  // pregnancy never asked.
+  if (Array.isArray(medical.conditions) && medical.conditions.length === 1 && medical.conditions[0] === 'none') {
+    medical.conditions = [];
+    delete medical.conditions_none;
+  } else if (medical.conditions_none === true && !(Array.isArray(medical.conditions) && medical.conditions.length)) {
+    delete medical.conditions_none;
   }
   // The derived list must not keep saying "pregnant" once the answer is gone.
   if (Array.isArray(medical.conditions) && medical.conditions.includes('pregnant')) {
@@ -1313,6 +1341,241 @@ function updatePatient(actor, id, data) {
     id
   );
   audit(actor, 'update', 'patient', id, null);
+  return getPatient(id);
+}
+
+/* ---------------- Editing the patient's own answers, from any station ----------------
+   v0.0.15: the three halves of the intake — who the patient is, their medical
+   history, their dental history — can be viewed at every station and corrected
+   by the roles that work with them. One section at a time, through one path:
+
+   - MERGED into what is stored NOW, not what the editing screen loaded. Only
+     the keys sent change; a key sent as null is removed. Everything else — an
+     older record's answers, a newer build's fields, the online form's
+     preregistered stamp — is kept. (updatePatient, which replaces a whole
+     blob, has no IPC channel any more: only the USB import, in the main
+     process, calls it.)
+   - Checked by the same rules as check-in: a history is not saved half
+     answered, and a required answer is not saved blank.
+   - Lock-aware: once a record is signed off and locked, only an administrator
+     may change the medical or dental history or who the patient is (name, date
+     of birth, gender — the returning-patient match keys off them). Contact
+     details stay editable: a finished visit still needs a phone that works.
+   - Audited by the section and the NAMES of what changed — never the values,
+     which are health information and would sit in a log nobody purges.
+
+   Which role may edit which section is here, beside the rule it serves, and
+   is enforced here for every caller (ipc.js checks it too, before the call);
+   the stations offer Edit from the renderer's copy, pinned to this one. */
+const SECTION_ROLES = {
+  demographics: ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
+  medical_history: ['admin', 'emt', 'triage', 'doctor', 'hygienist'],
+  dental_history: ['admin', 'emt', 'triage', 'doctor', 'hygienist'],
+};
+const IDENTITY_KEYS = ['first_name', 'last_name', 'dob', 'gender'];
+const PATIENT_EDIT_KEYS = [...IDENTITY_KEYS, 'phone', 'email', 'language', 'demographics'];
+// Check-in's required "About you" answers, as its form names them.
+const DEMO_REQUIRED = [
+  ['first_name', 'First name'], ['last_name', 'Last name'], ['dob', 'Date of birth'], ['gender', 'Gender'],
+  ['phone', 'Phone number'], ['demographics.city', 'City'], ['demographics.state', 'State'],
+  ['demographics.emergency_name', 'Emergency contact name'], ['demographics.emergency_phone', 'Emergency contact phone'],
+];
+const DENTAL_ANSWER_KEYS = Object.keys(require('./medicalLabels').DENTAL_Q_LABELS);
+
+const isPlainObject = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+// A value a station may send for a key it edits: text, a number, yes/no, a
+// list or a small object of those — trimmed and size-capped. Anything else is
+// refused rather than stored, because it would be stored for every station.
+function cleanEditValue(v, where, depth = 0) {
+  if (v === null) return null;
+  if (typeof v === 'string') return v.trim().slice(0, 2000);
+  if (typeof v === 'number') { if (!Number.isFinite(v)) throw new Error(`Invalid value for ${where}.`); return v; }
+  if (typeof v === 'boolean') return v;
+  if (depth < 3 && Array.isArray(v)) {
+    if (v.length > 100) throw new Error(`Too many entries for ${where}.`);
+    return v.map((x) => cleanEditValue(x, where, depth + 1)).filter((x) => x !== null);
+  }
+  if (depth < 3 && isPlainObject(v)) {
+    const keys = Object.keys(v);
+    if (keys.length > 100) throw new Error(`Too many entries for ${where}.`);
+    const out = {};
+    keys.forEach((k) => { out[String(k).slice(0, 80)] = cleanEditValue(v[k], where, depth + 1); });
+    return out;
+  }
+  throw new Error(`Invalid value for ${where}.`);
+}
+// Shallow merge where null deletes: the patch format every section uses.
+function mergePatch(before, patch, where) {
+  const out = { ...(before || {}) };
+  for (const [k, raw] of Object.entries(patch || {})) {
+    if (raw === undefined) continue;
+    const v = cleanEditValue(raw, where);
+    if (v === null) delete out[k]; else out[k] = v;
+  }
+  return out;
+}
+const blank = (v) => v == null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && !v.length);
+const sameJson = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+function changedKeys(before, after, prefix = '') {
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+  return [...keys].filter((k) => !sameJson((before || {})[k], (after || {})[k])).map((k) => prefix + k);
+}
+// Make sure the visit's triage row exists (it always should — createPatient
+// makes one — but a row restored from a partial backup may not have one).
+function ensureTriageRow(patientId) {
+  if (!db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId)) {
+    db.prepare("INSERT INTO triage (patient_id, status) VALUES (?, 'waiting')").run(patientId);
+  }
+}
+
+/**
+ * Save one section of a patient's intake answers from a station.
+ *   section  'demographics' | 'medical_history' | 'dental_history'
+ *   values   the CHANGES: for demographics the patient's own fields (first_name,
+ *            last_name, dob, gender, phone, email, language) plus `demographics`
+ *            (a patch of that blob); for the two histories a patch of the blob.
+ *            A key sent as null is removed; a key not sent is kept as stored.
+ *   reviewedOnly  medical_history only: "reviewed with the patient — no
+ *            changes". Stamps the review on this visit and changes nothing else.
+ * A medical save — edit or review — stamps triage.history_reviewed_at / _by_name
+ * (synced), and re-derives the dentist's flags from the saved history.
+ */
+function updatePatientSection(actor, id, section, values, { reviewedOnly = false } = {}) {
+  if (!SECTION_ROLES[section]) throw new Error('Unknown section.');
+  if (!actor || !SECTION_ROLES[section].includes(actor.role)) throw new Error('Your role does not have permission for this action.');
+  const row = db.prepare('SELECT * FROM patients WHERE id = ?').get(id);
+  if (!row) throw new Error('Patient not found.');
+  const isAdmin = !!(actor && actor.role === 'admin');
+  const locked = isRecordLocked(id);
+  if (values != null && !isPlainObject(values)) throw new Error('Invalid changes.');
+  const patch = values || {};
+  const ML = require('./medicalLabels');
+  const at = now();
+
+  if (section === 'medical_history') {
+    if (locked && !isAdmin) throw new Error(LOCKED_MSG);
+    const before = safeJson(row.medical_history, {});
+    let after = before;
+    let changed = [];
+    // "Reviewed — no changes" vouches for a history as it stands, so it must
+    // stand complete: a returning patient's pregnancy and recent-surgery
+    // answers, or an older record's new questions, are gone through with the
+    // patient (an edit), not ticked past.
+    // (Saving the form with nothing changed is the same review.)
+    const reviewing = reviewedOnly || !Object.keys(patch).length;
+    const gap = reviewing ? ML.firstMissingMedical(before) : null;
+    if (gap) throw new Error('Required: ' + ML.medicalQuestionLabel(gap) + ' — go through the history with the patient (Edit) before marking it reviewed.');
+    if (!reviewing) {
+      after = ML.normalizeMedical(mergePatch(before, patch, 'the medical history'));
+      const missing = ML.firstMissingMedical(after);
+      if (missing) throw new Error('Required: ' + ML.medicalQuestionLabel(missing));
+      changed = changedKeys(before, after);
+    }
+    const tx = db.transaction(() => {
+      if (changed.length) db.prepare('UPDATE patients SET medical_history = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(after), at, id);
+      ensureTriageRow(id);
+      // The dentist's flags are a snapshot the queues count from; refreshed
+      // here so an allergy added at Vitals is flagged before the dentist opens
+      // the chart, not only once they save it.
+      db.prepare('UPDATE triage SET history_reviewed_at = ?, history_reviewed_by_name = ?, flags = ? WHERE patient_id = ?')
+        .run(at, (actor && actor.full_name) || null, JSON.stringify(ML.clinicalFlags(after)), id);
+      audit(actor, changed.length ? 'history_edit' : 'history_review', 'patient', id,
+        changed.length ? ('medical_history: ' + changed.join(', ')).slice(0, 500) : 'Reviewed with patient — no changes');
+    });
+    tx();
+    return getPatient(id);
+  }
+
+  if (reviewedOnly) throw new Error('Only the medical history is reviewed without changes.');
+
+  if (section === 'dental_history') {
+    if (locked && !isAdmin) throw new Error(LOCKED_MSG);
+    const before = safeJson(row.dental_history, {});
+    const after = mergePatch(before, patch, 'the dental history');
+    for (const k of DENTAL_ANSWER_KEYS) {
+      if (after[k] != null && after[k] !== 'yes' && after[k] !== 'no') throw new Error('Answer Yes or No: ' + ML.DENTAL_Q_LABELS[k]);
+    }
+    if (after.visit_type != null && after.visit_type !== '' && !VISIT_ROUTE[after.visit_type]) throw new Error('Unknown answer to "What do you need today?".');
+    // Check-in's rule: when they last saw a dentist, all eight questions, and
+    // what they need today.
+    if (blank(after.prior_dentist)) throw new Error('Required: When did you last see a dentist?');
+    const gap = DENTAL_ANSWER_KEYS.find((k) => blank(after[k]));
+    if (gap) throw new Error('Required: ' + ML.DENTAL_Q_LABELS[gap]);
+    if (blank(after.visit_type)) throw new Error('Required: What do you need today?');
+    // The surgery-consent answer follows from the visit type, never from the
+    // screen that sent it.
+    after.may_need_extraction = visitNeedsSurgeryConsent(after.visit_type) ? 'yes' : 'no';
+    const changed = changedKeys(before, after);
+    if (!changed.length) return getPatient(id);
+    const tx = db.transaction(() => {
+      db.prepare('UPDATE patients SET dental_history = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(after), at, id);
+      // A changed visit type re-derives where the patient goes and the
+      // stand-in complaint — but only while they are still at Vitals. Once the
+      // EMT has sent them on, the station they were sent to is a decision a
+      // person made, and an edit here does not undo it.
+      if (before.visit_type !== after.visit_type) {
+        ensureTriageRow(id);
+        const tr = db.prepare('SELECT route, complaint, emt_signed_off FROM triage WHERE patient_id = ?').get(id);
+        if (!tr.emt_signed_off) {
+          const route = routeFromVisitType(after.visit_type);
+          if (route) db.prepare('UPDATE triage SET route = ? WHERE patient_id = ?').run(route, id);
+          // Only a complaint that is still the automatic one is replaced; a
+          // provider's own words, or an older record's reason, stay.
+          const auto = VISIT_COMPLAINT[String(before.visit_type || '')] || null;
+          if (!tr.complaint || tr.complaint === auto) {
+            db.prepare('UPDATE triage SET complaint = ? WHERE patient_id = ?').run(VISIT_COMPLAINT[after.visit_type] || null, id);
+          }
+        }
+      }
+      audit(actor, 'history_edit', 'patient', id, ('dental_history: ' + changed.join(', ')).slice(0, 500));
+    });
+    tx();
+    return getPatient(id);
+  }
+
+  // demographics — the patient's own columns plus the demographics blob.
+  const unknown = Object.keys(patch).filter((k) => !PATIENT_EDIT_KEYS.includes(k));
+  if (unknown.length) throw new Error('Unknown field: ' + unknown[0]);
+  if (patch.demographics != null && !isPlainObject(patch.demographics)) throw new Error('Invalid changes.');
+  const beforeD = safeJson(row.demographics, {});
+  const afterD = patch.demographics ? mergePatch(beforeD, patch.demographics, 'the patient details') : beforeD;
+  // One town name as every copy stores it (cleanCityName in intakeSections.js).
+  if (typeof afterD.city === 'string') afterD.city = afterD.city.replace(/\s+/g, ' ').trim().slice(0, 80);
+  ['services', 'race'].forEach((k) => {
+    if (afterD[k] != null && !(Array.isArray(afterD[k]) && afterD[k].every((x) => typeof x === 'string'))) throw new Error('Invalid value for ' + k + '.');
+  });
+  const cols = {};
+  for (const k of PATIENT_EDIT_KEYS) {
+    if (k === 'demographics' || !Object.prototype.hasOwnProperty.call(patch, k) || patch[k] === undefined) continue;
+    const v = cleanEditValue(patch[k], k);
+    if (v !== null && typeof v !== 'string') throw new Error('Invalid value for ' + k + '.');
+    cols[k] = v === null ? null : v.slice(0, k === 'email' ? 200 : 100);
+  }
+  if (cols.dob && !/^\d{4}-\d{2}-\d{2}$/.test(cols.dob)) throw new Error('Date of birth must be a date.');
+  const current = (k) => (Object.prototype.hasOwnProperty.call(cols, k) ? cols[k] : row[k]);
+  const identityChanged = IDENTITY_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(cols, k) && (cols[k] || '') !== (row[k] || ''));
+  if (locked && !isAdmin && identityChanged.length) {
+    throw new Error('This record is signed off and locked. Name, date of birth and gender can only be changed by an administrator — contact details can still be updated.');
+  }
+  // Check-in's required answers. The patient's identity is only demanded of
+  // someone who may change it: a locked record's missing gender cannot hold up
+  // a phone-number fix at check-out.
+  const identityEditable = !locked || isAdmin;
+  const valueOf = (path) => (path.startsWith('demographics.') ? afterD[path.slice(13)] : current(path));
+  for (const [path, label] of DEMO_REQUIRED) {
+    if (!identityEditable && IDENTITY_KEYS.includes(path)) continue;
+    if (blank(valueOf(path))) throw new Error('Required: ' + label);
+  }
+  if (!Array.isArray(afterD.services) || !afterD.services.length) throw new Error('Please choose at least one service.');
+  const changed = [
+    ...Object.keys(cols).filter((k) => (cols[k] || '') !== (row[k] || '')),
+    ...changedKeys(beforeD, afterD, 'demographics.'),
+  ];
+  if (!changed.length) return getPatient(id);
+  const setCols = Object.keys(cols);
+  db.prepare(`UPDATE patients SET ${setCols.map((c) => c + ' = ?, ').join('')}demographics = ?, updated_at = ? WHERE id = ?`)
+    .run(...setCols.map((c) => cols[c]), JSON.stringify(afterD), at, id);
+  audit(actor, 'patient_edit', 'patient', id, ('demographics: ' + changed.join(', ')).slice(0, 500));
   return getPatient(id);
 }
 
@@ -1449,6 +1712,7 @@ function getPatient(id) {
         // null (not {}) when nothing was recorded, so "was a referral made" is
         // a plain truthiness test for every reader.
         referral_out: t.referral_out ? safeJson(t.referral_out, null) : null,
+        lock_history: lockHistoryOf(t),
       }
     : null;
   p.xrays = db.prepare('SELECT id, station, note, created_at FROM xrays WHERE patient_id = ?').all(id);
@@ -1466,7 +1730,78 @@ function getPatient(id) {
   p.treatment_waiting_by_name = tr ? (tr.treatment_waiting_by_name || nameOf(tr.treatment_waiting_by)) : null;
   p.completed_by_name = t ? (t.completed_by_name || nameOf(t.completed_by)) : null;
   p.dismissed_by_name = p.dismissed_by_name || nameOf(p.dismissed_by);
+  p.lock = lockInfo(t, p.completed_by_name, p.status);
   return p;
+}
+
+// The lock trail as stored, tolerating a row from before it existed (NULL) or
+// a malformed value from a bad sync — never a reason for a chart not to open.
+function lockHistoryOf(t) {
+  const h = t ? safeJson(t.lock_history, []) : [];
+  return Array.isArray(h) ? h.filter((e) => e && typeof e === 'object') : [];
+}
+
+// Whether a record is being AMENDED: an administrator unlocked it after its
+// visit was finished, and the visit has not been finished again since. The
+// unlock has to come after the completion it amends. An admin move (Re-open,
+// Back to vitals, Back to check-in) also unlocks, but it restarts the visit,
+// and once that visit is completed again — the ordinary way, unlocked — the
+// unlock is history, not an amendment in progress. Reading only "unlocked and
+// finished" left every record that was ever re-opened amending for good. A
+// finished record with no completion stamp (an old import) that was unlocked
+// is read as amending, since nothing says it was finished again. The one test
+// the chart (lockInfo), the lists (listPatients) and the save use.
+function isAmending(t, status) {
+  if (!t || t.locked || !t.unlocked_at) return false;
+  if (status !== 'completed' && status !== 'dismissed') return false;
+  return !(Date.parse(t.completed_at || '') >= Date.parse(t.unlocked_at));
+}
+// A time for a lock event that must sort AFTER the earlier stamps on the same
+// record — an unlock after the sign-off it amends, a completion after the
+// unlock it closes — even when they land in the same millisecond, or come from
+// two laptops whose clocks disagree. Normally just now().
+function isoAfter(...priors) {
+  const at = now();
+  const p = Math.max(...priors.map((x) => Date.parse(x || '')).filter(Number.isFinite));
+  return Number.isFinite(p) && Date.parse(at) <= p ? new Date(p + 1).toISOString() : at;
+}
+
+// Everything a screen or a printout says about a record's lock, in one shape:
+//   locked, locked_at, locked_by_name   — who signed it off and locked it
+//   unlocked_at, unlocked_by_name, unlock_reason — the last admin unlock
+//   amending — unlocked by an administrator after the visit was finished, so
+//              the clinicians are correcting a signed-off record (isAmending)
+//   lockable — an administrator's Lock would be accepted (canLockRecord)
+//   history  — [{action:'lock'|'relock'|'unlock', at, by, reason?}]
+// locked_at / locked_by_name describe the lock the record is under now, so an
+// unlocked record has none (the trail keeps every earlier one).
+// A record locked before v0.0.15 has no lock stamp; the completion stamp is the
+// sign-off that locked it, so that is what it reads — derived here, never
+// written back, so no old row changes (and re-syncs) just because it was read.
+function lockInfo(t, completedByName, status) {
+  if (!t) return { locked: false, locked_at: null, locked_by_name: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null, amending: false, lockable: false, history: [] };
+  const locked = !!t.locked;
+  return {
+    locked,
+    locked_at: locked ? t.locked_at || t.completed_at || null : null,
+    locked_by_name: locked ? t.locked_by_name || completedByName || null : null,
+    unlocked_at: t.unlocked_at || null,
+    unlocked_by_name: t.unlocked_by_name || null,
+    unlock_reason: t.unlock_reason || null,
+    amending: isAmending(t, status),
+    lockable: canLockRecord(t, status),
+    history: lockHistoryOf(t),
+  };
+}
+// Whether lockRecord would accept a Lock: a treatment row that is not locked,
+// a finished visit, and a provider named on it. lockRecord refuses the same
+// things with a reason each; this is what lets a screen offer the button only
+// when it would work (a walk-out with no treatment, or an unsigned record, is
+// never offered one).
+function canLockRecord(t, status) {
+  if (!t || t.locked) return false;
+  if (!t.completed_at && status !== 'completed' && status !== 'dismissed') return false;
+  return !!String(t.provider_name || '').trim();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1475,8 +1810,30 @@ function getPatient(id) {
 
 const toIntOrNull = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; };
 
+/* ---------------- The record lock, enforced where the data is written ----------------
+   Until v0.0.15 only the treatment save checked the lock, so a signed-off
+   record's vitals, blood-thinner answer, route, x-rays and consents could all
+   still be changed from another station. A locked record is the one a provider
+   signed as final; every clinical write refuses it for everyone but an
+   administrator, who is the one who may unlock it. Checked here rather than
+   only on screen because the screens never live-refresh an open chart: a
+   station that opened the record before it was locked still shows it open.
+   Not gated, on purpose: check-out, the exit survey, printing and export, and
+   the patient's contact details — a signed-off visit still needs a phone
+   number that works. */
+const LOCKED_MSG = 'This record is signed off and locked. Ask an administrator to unlock it.';
+function isRecordLocked(patientId) {
+  const t = db.prepare('SELECT locked FROM treatments WHERE patient_id = ?').get(patientId);
+  return !!(t && t.locked);
+}
+function assertNotLocked(actor, patientId) {
+  if (actor && actor.role === 'admin') return;
+  if (isRecordLocked(patientId)) throw new Error(LOCKED_MSG);
+}
+
 // EMT / staff-measured vitals stored (with accountability) on the triage row.
 function saveVitals(actor, patientId, data) {
+  assertNotLocked(actor, patientId);
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
   const sys = toIntOrNull(d.bp_systolic), dia = toIntOrNull(d.bp_diastolic), hr = toIntOrNull(d.heart_rate);
@@ -1502,6 +1859,8 @@ function saveVitals(actor, patientId, data) {
   }
   // v1.2.0: the EMT's yes/no confirmations, stored only when at least one answer
   // is present so a blank/plain save never wipes a previously filled review.
+  // No screen sends them since v0.0.15 (Vitals reviews the whole history
+  // instead); the column, its sync and the older records' answers all stay.
   if (Object.prototype.hasOwnProperty.call(d, 'emt_review') && d.emt_review && typeof d.emt_review === 'object' && Object.keys(d.emt_review).length) {
     db.prepare('UPDATE triage SET emt_review=? WHERE patient_id=?').run(JSON.stringify(d.emt_review), patientId);
   }
@@ -1539,18 +1898,25 @@ function requireVitals(patientId) {
 }
 function routePatient(actor, patientId, route) {
   if (!ROUTES.includes(route)) throw new Error('Choose where the patient goes next: Dental Triage, the hygienist, or both.');
+  // A signed-off record is not re-routed from a station; an administrator's
+  // move (Management) is how a finished patient is sent somewhere again.
+  assertNotLocked(actor, patientId);
   requireVitals(patientId);
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
+  // The router's name is written with the id. It used to be left alone, so a
+  // name that arrived by sync from the FIRST routing kept naming that person
+  // after anyone else re-routed the patient.
+  const byName = (actor && actor.full_name) || null;
   if (!tr) {
-    db.prepare(`INSERT INTO triage (patient_id, status, route, routed_by, routed_at, emt_signed_off)
-                VALUES (?, 'ready', ?, ?, ?, 1)`).run(patientId, route, actor ? actor.id : null, now());
+    db.prepare(`INSERT INTO triage (patient_id, status, route, routed_by, routed_at, routed_by_name, emt_signed_off)
+                VALUES (?, 'ready', ?, ?, ?, ?, 1)`).run(patientId, route, actor ? actor.id : null, now(), byName);
   } else {
     // A patient already examined (waiting for a chair, in treatment, or done)
     // keeps that clinical state when they are only being re-routed — a
     // transfer to the hygienist is not a return to the start of the queue.
-    db.prepare(`UPDATE triage SET route=?, routed_by=?, routed_at=?, emt_signed_off=1,
+    db.prepare(`UPDATE triage SET route=?, routed_by=?, routed_at=?, routed_by_name=?, emt_signed_off=1,
                   status = CASE WHEN status IN ('completed','in_treatment','treatment_waiting') THEN status ELSE 'ready' END
-                WHERE patient_id=?`).run(route, actor ? actor.id : null, now(), patientId);
+                WHERE patient_id=?`).run(route, actor ? actor.id : null, now(), byName, patientId);
   }
   // Routing IS the EMT sign-off: it moves the patient out of the vitals queue and
   // into the chosen clinical queue (checked_in -> triaged). Re-routing later
@@ -1619,6 +1985,7 @@ function confirmArrival(actor, patientId, opts = {}) {
 function addPatientConsent(actor, patientId, consent) {
   const p = db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId);
   if (!p) throw new Error('Patient not found.');
+  assertNotLocked(actor, patientId);
   const c = consent || {};
   if (c.type !== 'general' && c.type !== 'oral_surgery') throw new Error('Unknown consent type.');
   const teeth = c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null;
@@ -1640,6 +2007,7 @@ function addPatientConsent(actor, patientId, consent) {
 function updateConsentTeeth(actor, consentId, toothNumbers) {
   const c = db.prepare("SELECT * FROM consents WHERE id = ? AND type = 'oral_surgery'").get(consentId);
   if (!c) throw new Error('Oral surgery consent not found.');
+  assertNotLocked(actor, c.patient_id);
   db.prepare('UPDATE consents SET tooth_numbers=?, amended_by=?, amended_at=? WHERE id=?')
     .run(String(toothNumbers || '').trim(), actor ? actor.full_name : null, now(), consentId);
   audit(actor, 'consent_teeth', 'patient', c.patient_id, String(toothNumbers || ''));
@@ -1671,6 +2039,8 @@ function dismissPatient(actor, id) {
 const MOVE_TARGETS = ['checkin', 'emt', 'dentist', 'treatment_waiting', 'hygienist', 'reopen', 'dismiss'];
 // Leaving the Treatment Waiting stage by any route but treatment itself.
 const CLEAR_WAITING_SQL = 'treatment_waiting_at=NULL, treatment_waiting_by=NULL, treatment_waiting_by_name=NULL';
+// How a move that unlocks a signed-off record names itself in the lock trail.
+const MOVE_LABELS = { checkin: 'back to check-in', emt: 'back to vitals', treatment_waiting: 'to Treatment waiting', reopen: 're-open' };
 function adminMovePatient(actor, id, target) {
   if (!MOVE_TARGETS.includes(target)) throw new Error('Unknown move target.');
   const p = db.prepare('SELECT * FROM patients WHERE id = ?').get(id);
@@ -1699,7 +2069,7 @@ function adminMovePatient(actor, id, target) {
     }
     // From check-out back to a chair: the visit is open again, like a re-open.
     db.prepare('UPDATE patients SET dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL WHERE id=?').run(id);
-    db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
+    liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
     markTreatmentWaiting(actor, id);
     audit(actor, 'admin_move', 'patient', id, target);
     return getPatient(id);
@@ -1711,9 +2081,9 @@ function adminMovePatient(actor, id, target) {
     // patient reappears in the arrivals list and the vitals queue.
     db.prepare(`UPDATE patients SET status='checked_in', arrived_at=NULL, arrived_by_name=NULL,
                   dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
-    db.prepare(`UPDATE triage SET route=NULL, routed_by=NULL, routed_at=NULL, emt_signed_off=0,
+    db.prepare(`UPDATE triage SET route=NULL, routed_by=NULL, routed_at=NULL, routed_by_name=NULL, emt_signed_off=0,
                   status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
-    db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
+    liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
   } else if (target === 'emt') {
     // Back to the vitals queue: undo the EMT sign-off that sent them onward, so
     // they are genuinely waiting to be seen again rather than sitting in a
@@ -1722,12 +2092,12 @@ function adminMovePatient(actor, id, target) {
                   dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
     db.prepare(`UPDATE triage SET routed_at=NULL, emt_signed_off=0,
                   status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
-    db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
+    liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
   } else if (target === 'reopen') {
     // Bring a completed OR dismissed patient back into treatment and unlock the
     // record so it can be edited again (clears any dismissal).
     db.prepare("UPDATE patients SET status='in_treatment', dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?").run(now(), id);
-    db.prepare('UPDATE treatments SET locked=0 WHERE patient_id=?').run(id);
+    liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
     db.prepare("UPDATE triage SET status='in_treatment' WHERE patient_id=? AND status IN ('completed','treatment_waiting')").run(id);
     db.prepare(`UPDATE triage SET ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
   } else if (target === 'dismiss') {
@@ -1745,7 +2115,39 @@ function patientAudit(id) {
   ).all(id);
 }
 
+// Whether the record here was unlocked after everything the patient's file
+// knows of its sign-off — completion, lock, unlock — so the file was written
+// before that unlock and is the older copy.
+function unlockedSinceFile(here, portable) {
+  if (!here || !here.unlocked_at) return false;
+  const ft = portable.treatment || {};
+  const lk = portable.lock || {};
+  const u = Date.parse(here.unlocked_at);
+  const seen = [ft.unlocked_at, lk.unlocked_at, ft.locked_at, lk.locked_at, ft.completed_at]
+    .map((x) => Date.parse(x || '')).filter(Number.isFinite);
+  return Number.isFinite(u) && !seen.some((x) => x >= u);
+}
+// Two lock trails as one: every entry either trail holds, once, in time order.
+// The trail says who unlocked a signed-off record and why, so an import must
+// never drop an entry this laptop holds by replacing the trail with the file's.
+function mergeLockTrails(here, file) {
+  const out = [];
+  const seen = new Set();
+  for (const e of [...here, ...file]) {
+    if (!e || typeof e !== 'object') continue;
+    const key = [e.action, e.at, e.by || ''].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+  }
+  const at = (e) => { const x = Date.parse(e.at || ''); return Number.isFinite(x) ? x : Infinity; };
+  return out.map((e, i) => [e, i]).sort((a, b) => (at(a[0]) - at(b[0])) || (a[1] - b[1])).map(([e]) => e);
+}
+
 // USB import: upsert a portable patient record (match by id, else name+dob+event).
+// Returns the patient; `import_skipped` says why nothing was taken from the
+// file when the record here is newer than it (see below), so the USB upload
+// can say how many files it skipped rather than counting them as uploaded.
 function importPatientFromPortable(actor, portable) {
   if (!portable || !portable.first_name) throw new Error('Invalid patient file.');
   const evId = Number(getSetting('active_event_id'));
@@ -1755,8 +2157,27 @@ function importPatientFromPortable(actor, portable) {
       .get(portable.first_name, portable.last_name, portable.dob, portable.dob);
   }
   let pid;
+  let trailHere = [];
   if (existing) {
     pid = existing.id;
+    // The record here has been signed off and locked since the patient's file
+    // was written, so the file is the older copy. Replaying it used to rewrite
+    // the history and the triage row and then fail at the treatment step,
+    // leaving half an import behind with no message. Nothing is taken from it.
+    // The same holds for a record an administrator unlocked here after the
+    // file was written — one being amended, or one the file would lock again
+    // with what it held at sign-off: replaying the file silently reverted the
+    // amendment and re-locked the record.
+    const here = db.prepare('SELECT locked, unlocked_at, completed_at, lock_history FROM treatments WHERE patient_id = ?').get(pid);
+    const fileTx = portable.treatment || {};
+    const skip = isRecordLocked(pid) ? 'the record here is signed off and locked'
+      : ((isAmending(here, existing.status) || fileTx.locked) && unlockedSinceFile(here, portable))
+        ? 'the record here was unlocked after this file was written' : null;
+    if (skip) {
+      audit(actor, 'usb_import', 'patient', pid, 'skipped: ' + skip);
+      return { ...getPatient(pid), import_skipped: skip };
+    }
+    trailHere = lockHistoryOf(here);
     updatePatient(actor, pid, {
       language: portable.language, first_name: portable.first_name, last_name: portable.last_name,
       dob: portable.dob, gender: portable.gender, phone: portable.phone, email: portable.email,
@@ -1778,6 +2199,22 @@ function importPatientFromPortable(actor, portable) {
     const waiting = portable.status === 'treatment_waiting';
     const mode = t.locked ? 'lock' : (t.completed_at ? 'complete' : (waiting ? 'waiting' : false));
     saveTreatment(actor, pid, t, mode);
+    // A locked record keeps the sign-off it carries — who locked it, when, and
+    // its lock trail — rather than being stamped as locked by whoever ran the
+    // import. A file from before those existed falls back to its completion.
+    if (t.locked) {
+      const lk = portable.lock || {};
+      const lockedAt = t.locked_at || lk.locked_at || t.completed_at || null;
+      const lockedBy = t.locked_by_name || lk.locked_by_name || portable.completed_by_name || null;
+      // The file's own trail; an older file without one gets the single lock it
+      // does evidence, rather than one naming whoever ran the import. Merged
+      // with the trail this laptop held before the import (not the entry the
+      // import's own save just added), so an unlock recorded here survives.
+      const hist = Array.isArray(t.lock_history) && t.lock_history.length
+        ? t.lock_history : [{ action: 'lock', at: lockedAt, by: lockedBy }];
+      db.prepare('UPDATE treatments SET locked_at = COALESCE(?, locked_at), locked_by_name = COALESCE(?, locked_by_name), lock_history = ? WHERE patient_id = ?')
+        .run(lockedAt, lockedBy, JSON.stringify(mergeLockTrails(trailHere, hist)), pid);
+    }
   } else if (portable.status === 'treatment_waiting') {
     // Parked for a chair with nothing charted yet — an admin can move a patient
     // there from Management without a treatment row. Without this they arrived
@@ -1833,6 +2270,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
+    const tx = db.prepare('SELECT locked, unlocked_at, completed_at, provider_name FROM treatments WHERE patient_id = ?').get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -1873,6 +2311,13 @@ function listPatients({ eventId, search } = {}) {
       // the EMT confirmed it, OR a thinner is in the med list, OR the patient
       // self-reported the condition at check-in. Queue pills read this.
       on_thinner: (tr && tr.blood_thinner === 'yes') || detectsBloodThinner(pt.medical_history),
+      // The record lock, so a list (Management) can show and act on it without
+      // opening every chart. `amending`: unlocked by an administrator after the
+      // visit was finished — the same test the chart and the save use.
+      // `lockable`: an administrator's Lock would be accepted (canLockRecord).
+      locked: !!(tx && tx.locked),
+      amending: isAmending(tx, pt.status),
+      lockable: canLockRecord(tx, pt.status),
     };
   });
 }
@@ -2217,6 +2662,10 @@ function sanitizeSurveyAnswers(raw) {
 // patient's stage as that laptop has it (see importPatientFromPortable). Never
 // set over IPC, which passes three arguments.
 function saveTriage(actor, patientId, data, opts = {}) {
+  // The provider saves the triage half before the treatment half, so without
+  // this a locked chart's complaint, teeth and notes were rewritten before the
+  // treatment save refused.
+  assertNotLocked(actor, patientId);
   const existing = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
   // Validated before anything is written, so a refused count leaves the rest
@@ -2318,12 +2767,38 @@ function saveTreatment(actor, patientId, data, finalize) {
   const restorative = has('restorative') ? JSON.stringify(d.restorative || {}) : ((existing && existing.restorative) || '{}');
   const services = has('services') ? JSON.stringify(d.services || {}) : ((existing && existing.services) || '{}');
   const referralOut = has('referral_out') ? cleanReferralOut(d.referral_out) : (existing ? existing.referral_out : null);
+  // v0.0.15: an administrator unlocked a FINISHED visit so its record can be
+  // corrected. That is an amendment, not the visit starting again: a save must
+  // not pull a checked-out patient back into the clinic, drop a completed one
+  // out of the check-out queue, or erase who completed the visit and when.
+  // (An admin "Re-open" is the move that does restart treatment; it leaves the
+  // patient in treatment, so it is not amending and saves as it always has —
+  // and once that visit is completed again it is not amending afterwards.)
+  const curStatus = (db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId) || {}).status;
+  const amending = isAmending(existing, curStatus);
+  // The completion an amendment keeps: who completed the visit and when, on a
+  // correction saved AND on the re-sign that locks it again. Re-signing used to
+  // stamp the completion as now, by the re-signer — which moved the visit's
+  // procedures out of the clinic day into the day of the amendment in the
+  // report, and put "Completed" after "Checked out". The re-lock is recorded
+  // where it belongs: locked_at / locked_by_name and a 'relock' in the trail.
+  // (A finished record with no completion stamp to keep is stamped now.)
+  const keepCompletion = amending && !waiting && !(complete && !existing.completed_at);
+  const freshCompletion = complete && !keepCompletion;
+  // Who completed the visit is written by name with the id, as every other
+  // *_by_name is: left alone, a name that arrived by sync from another laptop
+  // kept naming that person after someone here completed (or re-opened) it.
+  // A fresh completion is stamped after any earlier unlock of the record, so
+  // the amending test above reads it as finished again, whatever the clocks.
+  const completedBy = freshCompletion ? (actor ? actor.id : null) : (keepCompletion ? existing.completed_by : null);
+  const completedAt = freshCompletion ? isoAfter(existing && existing.unlocked_at) : (keepCompletion ? existing.completed_at : null);
+  const completedByName = freshCompletion ? ((actor && actor.full_name) || null) : (keepCompletion ? existing.completed_by_name : null);
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
          restorative=?, services=?, referral_out=?,
          other_procedures=?, clinical_notes=?, provider_name=?, provider_signature=?,
-         locked=?, completed_by=?, completed_at=?
+         locked=?, completed_by=?, completed_at=?, completed_by_name=?
        WHERE patient_id=?`
     ).run(
       JSON.stringify(d.fillings || []),
@@ -2338,28 +2813,36 @@ function saveTreatment(actor, patientId, data, finalize) {
       d.provider_name || null,
       d.provider_signature || null,
       lock ? 1 : 0,
-      complete ? (actor ? actor.id : null) : null,
-      complete ? now() : null,
+      completedBy,
+      completedAt,
+      completedByName,
       patientId
     );
   } else {
     db.prepare(
       `INSERT INTO treatments (patient_id, fillings, extractions, cleaning, anesthetic,
           restorative, services, referral_out,
-          other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          other_procedures, clinical_notes, provider_name, provider_signature, locked, completed_by, completed_at, completed_by_name)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       patientId, JSON.stringify(d.fillings || []), JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}), JSON.stringify(d.anesthetic || []),
       restorative, services, referralOut,
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
-      complete ? (actor ? actor.id : null) : null, complete ? now() : null
+      completedBy, completedAt, completedByName
     );
   }
+  if (lock) stampLock(actor, patientId, 'lock');
   if (complete) {
-    db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('completed', now(), patientId);
+    // A checked-out patient whose record is re-signed after an amendment has
+    // still left: re-signing finishes the record, not the visit.
+    if (!(amending && curStatus === 'dismissed')) {
+      db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('completed', now(), patientId);
+    }
     db.prepare("UPDATE triage SET status = 'completed' WHERE patient_id = ?").run(patientId);
+  } else if (keepCompletion) {
+    // Amending a finished visit: the patient stays exactly where they are.
   } else if (waiting) {
     markTreatmentWaiting(actor, patientId);
   } else {
@@ -2378,7 +2861,89 @@ function saveTreatment(actor, patientId, data, finalize) {
       db.prepare("UPDATE triage SET status = 'in_treatment' WHERE patient_id = ? AND status != 'completed'").run(patientId);
     }
   }
-  audit(actor, lock ? 'sign_off' : complete ? 'complete' : waiting ? 'treatment_waiting' : 'treatment', 'patient', patientId, null);
+  audit(actor, lock ? 'sign_off' : complete ? 'complete' : waiting ? 'treatment_waiting' : keepCompletion ? 'amend' : 'treatment', 'patient', patientId,
+    amending ? 'amending a signed-off record' : null);
+  return getPatient(patientId);
+}
+
+/* ---------------- Lock and unlock (administrator) ----------------
+   Locking says "this record is final". Until v0.0.15 the only way back out was
+   an admin MOVE (check-in, vitals, re-open), which silently set locked=0 as a
+   side effect of changing where the patient was, left no stamp, and could not
+   be done at all to a finished patient still waiting at check-out. Unlocking
+   is now its own act — an administrator, a reason, no change to where the
+   patient is — and every lock and unlock is recorded on the treatment row
+   itself (lock_history), which syncs, so each station can see who and why. */
+const LOCK_REASON_MAX = 500;
+function pushLockHistory(patientId, entry) {
+  const t = db.prepare('SELECT lock_history FROM treatments WHERE patient_id = ?').get(patientId);
+  const hist = lockHistoryOf(t);
+  hist.push(entry);
+  db.prepare('UPDATE treatments SET lock_history = ? WHERE patient_id = ?').run(JSON.stringify(hist), patientId);
+}
+// Stamp a lock that has just been applied: who, when, and whether it is the
+// first sign-off or a re-lock after an unlock.
+function stampLock(actor, patientId, action) {
+  const t = db.prepare('SELECT unlocked_at FROM treatments WHERE patient_id = ?').get(patientId);
+  const at = now();
+  const by = (actor && actor.full_name) || null;
+  db.prepare('UPDATE treatments SET locked_at = ?, locked_by_name = ? WHERE patient_id = ?').run(at, by, patientId);
+  pushLockHistory(patientId, { action: action === 'lock' && t && t.unlocked_at ? 'relock' : action, at, by });
+  return at;
+}
+// The one way a lock is lifted, whoever asks: an administrator from a station,
+// or an admin move that walks a signed-off patient back. Returns whether there
+// was a lock to lift. Status is never touched here — where the patient goes is
+// the caller's business.
+function liftLock(actor, patientId, reason) {
+  const t = db.prepare('SELECT locked, completed_at, locked_at FROM treatments WHERE patient_id = ?').get(patientId);
+  if (!t || !t.locked) return false;
+  // After the sign-off it unlocks (isAmending compares it with the completion;
+  // the USB import, with the lock a patient's file carries).
+  const at = isoAfter(t.completed_at, t.locked_at);
+  const by = (actor && actor.full_name) || null;
+  const why = String(reason || '').trim().slice(0, LOCK_REASON_MAX);
+  db.prepare('UPDATE treatments SET locked = 0, unlocked_at = ?, unlocked_by_name = ?, unlock_reason = ? WHERE patient_id = ?')
+    .run(at, by, why, patientId);
+  pushLockHistory(patientId, { action: 'unlock', at, by, reason: why });
+  audit(actor, 'unlock', 'patient', patientId, why);
+  return true;
+}
+function requireAdmin(actor, what) {
+  if (!actor || actor.role !== 'admin') throw new Error(`Only an administrator can ${what}.`);
+}
+
+// Unlock a signed-off record so it can be amended. The patient stays where they
+// are — a checked-out patient stays checked out, a completed one stays in the
+// check-out queue — and the reason is kept with the record.
+function unlockRecord(actor, patientId, reason) {
+  requireAdmin(actor, 'unlock a signed-off record');
+  const why = String(reason == null ? '' : reason).trim();
+  if (!why) throw new Error('Say why the record is being unlocked — the reason is kept with the record.');
+  if (!db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId)) throw new Error('Patient not found.');
+  if (!liftLock(actor, patientId, why)) throw new Error('This record is not locked.');
+  return getPatient(patientId);
+}
+
+// Lock a record: re-lock one an administrator unlocked for an amendment, or
+// lock a finished visit that was marked complete but never locked (locking has
+// been optional since v1.2.1). An unfinished visit is refused — the provider
+// finishes it — and so is a record nobody signed, since a lock says whose
+// record it is.
+function lockRecord(actor, patientId) {
+  requireAdmin(actor, 'lock a record');
+  const p = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+  if (!p) throw new Error('Patient not found.');
+  const t = db.prepare('SELECT locked, completed_at, provider_name FROM treatments WHERE patient_id = ?').get(patientId);
+  if (!t) throw new Error('No treatment has been recorded for this patient, so there is nothing to lock.');
+  if (t.locked) throw new Error('This record is already locked.');
+  if (!t.completed_at && p.status !== 'completed' && p.status !== 'dismissed') {
+    throw new Error('This visit is not finished. The provider marks it complete (or signs it off) first.');
+  }
+  if (!String(t.provider_name || '').trim()) throw new Error('This record does not name its provider. The provider signs it before it can be locked.');
+  db.prepare('UPDATE treatments SET locked = 1 WHERE patient_id = ?').run(patientId);
+  stampLock(actor, patientId, 'lock');
+  audit(actor, 'lock', 'patient', patientId, null);
   return getPatient(patientId);
 }
 
@@ -2450,6 +3015,7 @@ function recountXrays(patientId) {
 }
 
 function addXray(actor, patientId, { station, image_png, note, tooth }) {
+  assertNotLocked(actor, patientId);
   const info = db.prepare(
     `INSERT INTO xrays (patient_id, station, image_png, note, tooth, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`
   ).run(patientId, station || null, image_png, note || null, tooth != null && String(tooth).trim() ? String(tooth).trim() : null, now(), now());
@@ -2462,6 +3028,7 @@ function addXray(actor, patientId, { station, image_png, note, tooth }) {
 function updateXrayTooth(actor, id, tooth) {
   const row = db.prepare('SELECT patient_id FROM xrays WHERE id = ?').get(id);
   if (!row) throw new Error('X-ray not found.');
+  assertNotLocked(actor, row.patient_id);
   const t = tooth != null && String(tooth).trim() ? String(tooth).trim() : null;
   db.prepare('UPDATE xrays SET tooth = ?, updated_at = ? WHERE id = ?').run(t, now(), id);
   audit(actor, 'xray_tooth', 'patient', row.patient_id, `#${id} → ${t || '—'}`);
@@ -2480,6 +3047,9 @@ function listXrays(patientId) {
 }
 
 function deleteXray(actor, id) {
+  // Refused before the tombstone is written, so a refusal leaves no trace.
+  const target = db.prepare('SELECT patient_id FROM xrays WHERE id = ?').get(id);
+  if (target) assertNotLocked(actor, target.patient_id);
   ensureUids();
   // An x-ray is a full sync entity carrying the image itself, so deleting it on
   // one laptop and nowhere else leaves the image on every other station and in
@@ -2560,7 +3130,20 @@ function exportClinicBundle(eventId) {
   const evId = eventId || Number(getSetting('active_event_id'));
   const event = db.prepare('SELECT * FROM events WHERE id = ?').get(evId);
   if (!event) throw new Error('No clinic event to export.');
-  const patients = db.prepare('SELECT * FROM patients WHERE event_id = ?').all(evId);
+  // Who did each step, by name, the way sync sends it (NAME_SOURCE). A row
+  // written on this laptop holds only the local user id until something fills
+  // its *_by_name — who completed a visit was not written by name at all before
+  // v0.0.15 — and an id means nothing in the spreadsheet, or on the laptop a
+  // backup is restored to. So the spreadsheet's "Locked by" was blank for a
+  // record the screens and the PDF (which resolve the id) said who locked.
+  const named = (rows) => rows.map((r) => {
+    const out = { ...r };
+    for (const [col, idCol] of Object.entries(NAME_SOURCE)) {
+      if (Object.prototype.hasOwnProperty.call(out, col) && out[col] == null && out[idCol]) out[col] = nameOfId(out[idCol]);
+    }
+    return out;
+  });
+  const patients = named(db.prepare('SELECT * FROM patients WHERE event_id = ?').all(evId));
   const ids = patients.map((p) => p.id);
   const kids = (table) => (ids.length
     ? db.prepare(`SELECT * FROM ${table} WHERE patient_id IN (${ids.map(() => '?').join(',')})`).all(...ids)
@@ -2571,8 +3154,8 @@ function exportClinicBundle(eventId) {
     exported_at: now(),
     event,
     patients,
-    triage: kids('triage'),
-    treatments: kids('treatments'),
+    triage: named(kids('triage')),
+    treatments: named(kids('treatments')),
     consents: kids('consents'),
     xrays: kids('xrays'),
     exit_surveys: kids('exit_surveys'),
@@ -3210,13 +3793,20 @@ const SYNC_COLS = {
   // event scoping travels via event_uid (the parent), NULL for global admins.
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
   patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
+  // glucose and respiration were recorded at Vitals since v0.0.4 but never
+  // listed here, so the blood sugar and breathing rate existed only on the EMT's
+  // own laptop — no other station, printed record or clinic restore had them.
   triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name',
-    'xrays_taken', 'treatment_waiting_at', 'treatment_waiting_by_name'],
+    'xrays_taken', 'treatment_waiting_at', 'treatment_waiting_by_name',
+    'glucose', 'respiration', 'history_reviewed_at', 'history_reviewed_by_name'],
   // restorative and services were added as columns in v0.0.4 but never listed
   // here, so the dentist's denture, crown and pulpotomy entries lived only on
   // the laptop that entered them and were dropped by every clinic restore.
+  // The lock columns travel with `locked` so every station can say who signed
+  // a record off, and who unlocked it and why.
   treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name',
-    'restorative', 'services', 'referral_out'],
+    'restorative', 'services', 'referral_out',
+    'locked_at', 'locked_by_name', 'unlocked_at', 'unlocked_by_name', 'unlock_reason', 'lock_history'],
   // deemed_consent was added as a column and written by both consent paths, but
   // never listed here — so the HIV/Hepatitis answer a patient gives has been
   // silently dropped on every sync and every USB clinic restore since it shipped.
@@ -3300,6 +3890,31 @@ function writableCols(table, cols, incoming, local) {
     if (local && keep.includes(c) && isEmptyJson(incoming[c]) && !isEmptyJson(local[c])) return false;
     return true;
   });
+}
+
+/* ---------------- A lock is only lifted by an unlock ----------------
+   Last-write-wins let any later copy of a treatment row that says "unlocked"
+   clear a lock made elsewhere: a laptop still on v0.0.14, or one that saved the
+   chart before the sign-off reached it, pushed its stale copy with a newer
+   stamp, and every station then read the signed-off record as open — with a
+   lock trail whose last word was still "Locked" (a new build's stale copy even
+   sent the trail as null and wiped it). An unlocked copy now lifts a lock here
+   only when it carries an administrator's unlock made AFTER that lock
+   (liftLock always stamps one, strictly after the lock it lifts). Otherwise the
+   sign-off — the lock, its stamp and trail, the completion it locked — stays,
+   the rest of the row applies as usual, and the merged copy goes back up
+   (applyRemoteRows re-pushes any row it did not take whole), so the cloud and
+   the stale laptop get the lock back. A v0.0.14 laptop's admin move that
+   re-opened a record carries no unlock stamp and so does not unlock it here; an
+   administrator unlocks it on an updated station. */
+const STICKY_LOCK_COLS = ['locked', 'locked_at', 'locked_by_name', 'lock_history', 'unlocked_at', 'unlocked_by_name', 'unlock_reason', 'completed_at', 'completed_by_name'];
+function stickyLockCols(treatmentId, incoming) {
+  const t = db.prepare('SELECT locked, locked_at, completed_at FROM treatments WHERE id = ?').get(treatmentId);
+  if (!t || !t.locked || !incoming || Number(incoming.locked) === 1) return [];
+  const lockedAt = Date.parse(t.locked_at || t.completed_at || '');
+  const unlockedAt = Date.parse(incoming.unlocked_at || '');
+  const unlockedAfter = Number.isFinite(unlockedAt) && (!Number.isFinite(lockedAt) || unlockedAt > lockedAt);
+  return unlockedAfter ? [] : STICKY_LOCK_COLS;
 }
 
 function nameOfId(uid) { if (!uid) return null; const u = db.prepare('SELECT full_name FROM users WHERE id = ?').get(uid); return u ? u.full_name : null; }
@@ -3613,7 +4228,8 @@ function applyRemoteRows(remoteRows) {
     // longer the row that arrived, and is pushed back (below) — which is what
     // puts the kept value back in the cloud copy the older laptop overwrote.
     const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
-    const cols = writableCols(table, SYNC_COLS[entity], env.data, local);
+    const keepLocal = entity === 'treatment' && existing ? stickyLockCols(existing.id, env.data) : [];
+    const cols = writableCols(table, SYNC_COLS[entity], env.data, local).filter((c) => !keepLocal.includes(c));
     const vals = cols.map((c) => data[c]);
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];
@@ -3777,6 +4393,7 @@ module.exports = {
   DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD,
   listEvents, createEvent, updateEvent, setActiveEvent, setEventActive, deleteEvent, getActiveEvent,
   createPatient, startVisitFromExisting, updatePatient, deletePatient, getPatient, listPatients, searchAllPatients, patientHistory,
+  updatePatientSection, SECTION_ROLES, unlockRecord, lockRecord, assertNotLocked,
   findPatientByCode,
   listIncompletePatients, deleteIncompletePatients,
   saveVitals, routePatient, updateConsentTeeth, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,

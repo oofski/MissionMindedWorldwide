@@ -4,7 +4,8 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { SignaturePad } from '../components/signature.js';
 import { Odontogram } from '../components/odontogram.js';
-import { patientHistoryPanel } from '../components/patientHistory.js';
+import { patientInfoPanel } from '../components/patientHistory.js';
+import { lockBanner } from '../components/recordLock.js';
 import { bloodThinnerText } from '../medFlags.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
@@ -70,7 +71,7 @@ export function renderHygienist(ctx, params = {}) {
 
   async function detail(id) {
     ctx.setDetail && ctx.setDetail(true);
-    const p = await api.getPatient(id);
+    let p = await api.getPatient(id);
     // The hygienist needs the medical history as much as the dentist does — they
     // decide whether it is safe to scale someone on a blood thinner, and they are
     // the ones who spot an extraction and transfer it on. Load their prior visits
@@ -80,6 +81,8 @@ export function renderHygienist(ctx, params = {}) {
     const tr = p.triage || {};
     const cl = tr.checklist || {};
     const locked = !!tx.locked;
+    // Unlocked by an administrator after the visit was finished, to correct it.
+    const amending = !!(p.lock && p.lock.amending);
     const alsoDoctor = (p.triage && p.triage.route === 'both') || needsDoctor(cl);
     const me = store.user || null;
 
@@ -163,13 +166,17 @@ export function renderHygienist(ctx, params = {}) {
         return;
       }
       if (mode === 'lock') {
+        // A re-sign after an amendment is a new signature, never the one on
+        // file from before the correction (see the Dental Triage screen).
+        if (amending && !sigPad.getDataUrl()) { toast('Sign again to re-sign the corrected record — the signature on file was given before the amendment.', 'error'); return; }
         if (!payload.provider_signature) { toast('Signature is required to lock the record.', 'error'); return; }
         const ok = await modal({ title: 'Lock this record?', body: 'Locking finalizes the record so it can no longer be edited. Optional — the patient moves to check-out without it. Continue?', confirmText: 'Sign off & lock', cancelText: 'Cancel' });
         if (!ok) return;
       }
       try {
         await api.saveTreatment(id, payload, mode || 'cleaning');
-        toast(mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out' : 'Cleaning saved', 'success');
+        toast(mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out'
+          : amending ? 'Amendment saved — lock the record again when it is correct' : 'Cleaning saved', 'success');
         if (mode) queue(); else detail(id);
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -192,6 +199,15 @@ export function renderHygienist(ctx, params = {}) {
       } catch (e) { toast(e.message, 'error'); }
     }
 
+    const thinnerSlot = el('div', {});
+    function paintThinner() {
+      const bt = bloodThinnerText(p);
+      thinnerSlot.replaceChildren(...(bt.level === 'danger'
+        ? [el('div', { class: 'card', style: 'border-left:3px solid var(--danger);display:flex;gap:8px;align-items:center;padding:10px 12px;margin-bottom:12px' }, [icon('alert', { size: 16 }), el('span', {}, [bt.text])])]
+        : []));
+    }
+    paintThinner();
+
     // mount() clears and skips null children — the conditional banners below
     // would otherwise render as literal "null" text via native append().
     // LAYOUT (D7): the odontogram gets its OWN full-width card (like provider.js)
@@ -207,12 +223,16 @@ export function renderHygienist(ctx, params = {}) {
           el('p', { class: 'view-sub' }, [`${p.age != null ? p.age + ' yrs · ' : ''}${p.gender || ''}`]),
         ]),
         el('div', { class: 'inline-row', style: 'align-items:center;gap:8px' }, [
-          locked ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to Dental Triage for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to Dental Triage']),
+          // Not while the record is locked, or unlocked only to correct a
+          // finished visit — neither is a patient waiting to be moved on.
+          locked || amending ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to Dental Triage for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to Dental Triage']),
           statusPill(p.status),
         ]),
       ]),
 
-      locked ? el('div', { class: 'banner banner--locked' }, [icon('lock', { size: 16 }), 'This record is signed off and locked.']) : null,
+      // Signed off and locked (who, when; Unlock for an administrator), or
+      // unlocked by an administrator to be amended (who, when, why).
+      lockBanner(p, { onChanged: () => detail(id) }),
       alsoDoctor && !locked ? el('div', { class: 'banner banner--info' }, [icon('tooth', { size: 16 }), 'This patient is also flagged for the doctor (extraction/filling). Save your cleaning and leave sign-off to the provider.']) : null,
 
       // FULL-WIDTH odontogram card — spans the whole view, outside any .split.
@@ -234,10 +254,16 @@ export function renderHygienist(ctx, params = {}) {
         el('div', { class: 'col col--wide' }, [
           // Blood-thinner alert (reconciled the SAME way as EMT/dentist/PDF) — the
           // hygienist can transfer to the dentist for an extraction, so surface it.
-          (() => { const bt = bloodThinnerText(p); return bt.level === 'danger'
-            ? el('div', { class: 'card', style: 'border-left:3px solid var(--danger);display:flex;gap:8px;align-items:center;padding:10px 12px;margin-bottom:12px' }, [icon('alert', { size: 16 }), el('span', {}, [bt.text])])
-            : null; })(),
-          patientHistoryPanel(p, priorVisits, { open: true }),
+          // Repainted when the history is corrected from the panel below.
+          thinnerSlot,
+          // The patient panel, open: read it before scaling, and correct it —
+          // the hygienist is often the one the patient tells about a new
+          // medication. It saves in place; the cleaning above is not re-rendered.
+          patientInfoPanel(p, {
+            priorVisits,
+            open: true,
+            onSaved: (np) => { p = np; paintThinner(); },
+          }),
         ]),
         el('div', { class: 'col' }, [
           el('div', { class: 'card' }, [
@@ -245,7 +271,12 @@ export function renderHygienist(ctx, params = {}) {
             el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Hygienist (printed name)']), hygName]),
             el('div', { style: 'margin-top:8px' }, [sigPad.node]),
             tx.completed_at ? el('p', { class: 'subtle small', style: 'margin-top:6px' }, [`Completed by ${p.completed_by_name || tx.provider_name || '—'} · ${fmtWhen(tx.completed_at)}`]) : null,
-            locked ? null : el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
+            locked ? null : amending ? el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
+              // Correcting a finished visit: save the correction (the patient
+              // stays where they are), then sign it off and lock it again.
+              el('button', { class: 'btn btn--primary btn--block', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Re-sign & lock']),
+              el('button', { class: 'btn btn--ghost btn--block', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
+            ]) : el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
               el('button', { class: 'btn btn--ghost btn--block', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save cleaning']),
               el('button', { class: 'btn btn--primary btn--block', title: alsoDoctor ? 'Doctor work is pending — normally the provider finishes' : '', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark cleaning complete']),
               el('button', { class: 'btn btn--ghost btn--block', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Sign off & lock (optional)']),

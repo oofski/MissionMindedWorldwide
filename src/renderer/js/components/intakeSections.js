@@ -6,13 +6,18 @@
 // cannot be worded one way at check-in and another at the chair, or be required
 // in one place and optional in the other.
 //
-// Every builder returns { node, collect(), isDirty() }:
+// Every builder returns { node, collect(), isDirty(), initial() }:
 //   collect()  validates exactly as check-in does — a refusal is a toast that
 //              NAMES the question it wants — and returns a NEW object, the
 //              caller's record with the answers merged over it, so a key this
 //              form does not ask (an older record's answer, a newer build's
 //              field) survives the save. Returns false when refused.
 //   isDirty()  whether anything on screen differs from what it was built with.
+//   initial()  what collect() would have returned before anyone touched the
+//              form: the record as this form reads it (a state spelled out as
+//              its code, a town in the list's spelling). A staff edit sends
+//              the difference between this and collect(), so only what the
+//              person changed is saved — the same test isDirty() makes.
 //
 // `staff: true` is for a screen run by clinic staff rather than the patient;
 // the questions and the rules are the same either way.
@@ -124,20 +129,24 @@ export function normalizeState(v) {
  * Demographics. `initial` is patient-shaped: { first_name, last_name, dob,
  * gender, phone, email, demographics: {...} }. `cities` is the event's list;
  * empty keeps City a text box, exactly as before any list was configured.
+ * `lockIdentity` (a staff edit of a signed-off record by someone who may not
+ * change who the patient is) shows name, date of birth and gender read-only
+ * and does not demand them — they cannot be answered here, and a missing one
+ * must not hold up a phone-number fix.
  */
-export function demographicsSection(initial = {}, { staff = false, cities = [] } = {}) {
-  void staff;
+export function demographicsSection(initial = {}, { staff = false, cities = [], lockIdentity = false } = {}) {
   const base = initial || {};
   const d = base.demographics || {};
-  const first = textField(t('intake.firstName'), { value: base.first_name, required: true });
-  const last = textField(t('intake.lastName'), { value: base.last_name, required: true });
-  const dob = textField(t('intake.dob'), { value: base.dob, type: 'date', required: true });
+  const first = textField(t('intake.firstName'), { value: base.first_name, required: !lockIdentity });
+  const last = textField(t('intake.lastName'), { value: base.last_name, required: !lockIdentity });
+  const dob = textField(t('intake.dob'), { value: base.dob, type: 'date', required: !lockIdentity });
   const gender = recordedSelect(t('intake.gender'), [
     dash,
     { value: 'male', label: t('intake.genderM') },
     { value: 'female', label: t('intake.genderF') },
     { value: 'other', label: t('intake.genderO') },
-  ], base.gender, { required: true });
+  ], base.gender, { required: !lockIdentity });
+  if (lockIdentity) [first, last, dob, gender].forEach((f) => { f.input.disabled = true; });
   const phone = textField(t('intake.phone'), { value: base.phone, type: 'tel', required: true });
   const email = textField(t('intake.email'), { value: base.email, type: 'email' });
   const address = textField(t('intake.address'), { value: d.address });
@@ -202,7 +211,20 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
     { key: 'medical', label: L({ en: 'Medical', es: 'Médico', ru: 'Медицина' }) },
     { key: 'vision', label: L({ en: 'Vision', es: 'Visión', ru: 'Зрение' }) },
   ];
-  const chosenServices = new Set(Array.isArray(d.services) && d.services.length ? d.services : ['dental']);
+  // A new patient at the kiosk starts on Dental — almost everyone is here for
+  // it. A staff edit starts from what the record holds, and nothing else: a
+  // record with no answer must not gain one nobody gave.
+  const storedServices = Array.isArray(d.services) ? d.services : [];
+  const chosenServices = new Set(storedServices.length || staff ? storedServices : ['dental']);
+  // The services as stored, in their stored order, less any chip turned off,
+  // then any chip turned on. A service a newer build offers, or an older
+  // record holds, that this form has no chip for is kept rather than dropped;
+  // and nothing is re-ordered, so an untouched record is not a changed one.
+  const isChip = (k) => SERVICES.some((s) => s.key === k);
+  const servicesNow = () => [
+    ...storedServices.filter((k) => !isChip(k) || chosenServices.has(k)),
+    ...SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k) && !storedServices.includes(k)),
+  ];
   const serviceBtns = SERVICES.map((svc) => {
     const btn = el('button', {
       type: 'button',
@@ -285,7 +307,7 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
       ...d,
       address: address.get(), city: getCity(), state: stateF.get(), mailing_address: mailing.get(), marital_status: marital.get(),
       emergency_name: emName.get(), emergency_phone: emPhone.get(),
-      services: SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k)),
+      services: servicesNow(),
       // "Prefer not to answer" is about the list, so it replaces it rather
       // than joining it — a record must not say both "white" and "declined".
       race: race.get().includes('prefer_not') ? ['prefer_not'] : race.get(),
@@ -298,12 +320,15 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       const out = peek();
       const dm = out.demographics;
-      if (!out.first_name || !out.last_name) { toast(req() + t('intake.firstName') + ' / ' + t('intake.lastName'), 'error'); return false; }
-      if (!out.dob) { toast(req() + t('intake.dob'), 'error'); return false; }
-      if (!out.gender) { toast(req() + t('intake.gender'), 'error'); return false; }
+      if (!lockIdentity) {
+        if (!out.first_name || !out.last_name) { toast(req() + t('intake.firstName') + ' / ' + t('intake.lastName'), 'error'); return false; }
+        if (!out.dob) { toast(req() + t('intake.dob'), 'error'); return false; }
+        if (!out.gender) { toast(req() + t('intake.gender'), 'error'); return false; }
+      }
       if (cityOther && city.get() === 'other' && !cityOther.get()) { toast(req() + t('intake.cityOther'), 'error'); return false; }
       if (!dm.city) { toast(req() + t('intake.city'), 'error'); return false; }
       if (!dm.state) { toast(req() + t('intake.state'), 'error'); return false; }
@@ -548,6 +573,7 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       const out = peek();
       let missing = firstMissingMedical(out);
@@ -619,6 +645,7 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
   return {
     node,
     isDirty: () => JSON.stringify(peek()) !== baseline,
+    initial: () => JSON.parse(baseline),
     collect: () => {
       // Every dental question is required. Each refusal names the question it
       // is about — a bare "please complete this step" on a screen of

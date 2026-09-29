@@ -1,11 +1,11 @@
 import { el, clear, toast, modal } from '../dom.js';
-import { limitDigits } from '../forms.js';
 import { t, languageList } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
-import { incompleteBanner, demographicsRows, medicalHistoryParts, dentalHistoryParts } from '../components/patientHistory.js';
+import { incompleteBanner, patientInfoCards, historyReviewText } from '../components/patientHistory.js';
+import { lockBanner, adminLockButtons, lockHistoryList, lockedByText } from '../components/recordLock.js';
 import { bloodThinnerText, bpStatus } from '../medFlags.js';
 import { sortedByName } from '../patientSort.js';
 import { hasReferralOut } from '../../i18n/dentalLists.js';
@@ -15,7 +15,7 @@ import { hasReferralOut } from '../../i18n/dentalLists.js';
 // with the report it exports.
 function recVitals(p) {
   const tr = p.triage || {};
-  if (tr.bp_systolic == null && tr.bp_diastolic == null && tr.heart_rate == null) return el('span', { class: 'muted' }, ['Not recorded']);
+  if (tr.bp_systolic == null && tr.bp_diastolic == null && tr.heart_rate == null && tr.glucose == null && tr.respiration == null) return el('span', { class: 'muted' }, ['Not recorded']);
   const parts = [];
   const bp = bpStatus(tr.bp_systolic, tr.bp_diastolic);
   if (tr.bp_systolic != null || tr.bp_diastolic != null) {
@@ -26,6 +26,9 @@ function recVitals(p) {
     parts.push(el('span', { class: st.high ? 'pill pill--red' : 'small' }, [`re-check ${r.bp_systolic != null ? r.bp_systolic : '—'}/${r.bp_diastolic != null ? r.bp_diastolic : '—'}${st.high ? ' — HIGH' : ''}`]));
   });
   if (tr.heart_rate != null) parts.push(el('span', { class: 'small' }, [`HR ${tr.heart_rate}`]));
+  // Blood sugar and respiration, which Vitals has recorded all along.
+  if (tr.glucose != null) parts.push(el('span', { class: 'small' }, [`BS ${tr.glucose} mg/dL`]));
+  if (tr.respiration != null) parts.push(el('span', { class: 'small' }, [`RESP ${tr.respiration}/min`]));
   return el('div', { class: 'chip-row' }, parts);
 }
 function recThinner(p) {
@@ -104,21 +107,23 @@ export function renderRecords(ctx, params = {}) {
   async function detail(id) {
     ctx.setDetail && ctx.setDetail(true);
     const p = await api.getPatient(id);
-    // The demographic, medical and dental cards are the chart's own
-    // (components/patientHistory.js), so Records cannot show a patient
-    // differently from the screens they were treated on.
-    const med = medicalHistoryParts(p.medical_history);
-    const dent = dentalHistoryParts(p);
+    const tr = p.triage || {};
+    const lk = p.lock || {};
 
     const kv = (label, val) => el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, [label]), el('span', { class: 'kv-val' }, [val || '—'])]);
 
     // F20 — History / accountability. By-name fields come from getPatient; the
     // detailed audit log is fetched lazily into the table below.
+    const when = (w) => (w ? ' · ' + new Date(w).toLocaleString() : '');
     const accountabilityRows = [
       ['Triaged by', p.triaged_by_name],
       ['Vitals by', p.vitals_by_name],
+      // Who went through the medical history with the patient at this visit.
+      ['History reviewed by', historyReviewText(p) ? `${tr.history_reviewed_by_name || '—'}${when(tr.history_reviewed_at)}` : null],
       ['Completed by', p.completed_by_name],
-      ['Checked out by', p.dismissed_by_name ? `${p.dismissed_by_name}${p.dismissed_at ? ' · ' + new Date(p.dismissed_at).toLocaleString() : ''}` : null],
+      ['Locked by', lk.locked ? lockedByText(p).replace(/^Locked by /, '') : null],
+      ['Unlocked by', lk.unlocked_at ? `${lk.unlocked_by_name || '—'}${when(lk.unlocked_at)}${lk.unlock_reason ? ' — ' + lk.unlock_reason : ''}` : null],
+      ['Checked out by', p.dismissed_by_name ? `${p.dismissed_by_name}${when(p.dismissed_at)}` : null],
     ].filter(([, v]) => v);
     const auditBody = el('tbody', {}, [el('tr', {}, [el('td', { colspan: 4, class: 'subtle small' }, ['Loading history…'])])]);
     const auditCard = el('div', { class: 'card' }, [
@@ -163,44 +168,26 @@ export function renderRecords(ctx, params = {}) {
         onDelete: () => deletePatient(p),
         onNewCheckin: () => ctx.navigate('kiosk'),
       }),
+      lockBanner(p, { onChanged: () => detail(id) }),
       el('div', { class: 'split' }, [
         el('div', { class: 'col col--wide' }, [
-          el('div', { class: 'card' }, [
-            el('h3', { class: 'card-title' }, ['Patient information']),
-            el('div', { class: 'kv-grid' }, demographicsRows(p)),
-          ]),
-          el('div', { class: 'card' }, [
-            el('h3', { class: 'card-title' }, ['Medical history']),
-            med.kvGrid,
-            el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Vitals']), recVitals(p)]),
-            el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Blood thinner']), recThinner(p)]),
-            ...med.parts,
-          ]),
-          el('div', { class: 'card' }, [
-            el('h3', { class: 'card-title' }, ['Dental history']),
-            dent.kvGrid,
-            dent.legacy,
-          ]),
-          el('div', { class: 'card' }, [
-            el('h3', { class: 'card-title' }, ['Consents & signatures']),
-            (p.consents || []).length ? el('div', { class: 'consent-grid' }, p.consents.map((c) => el('div', { class: 'consent-card' }, [
-              el('div', { class: 'consent-card-title' }, [c.type === 'oral_surgery' ? 'Oral Surgery Consent' : 'General Consent']),
-              el('div', { class: 'muted' }, [`${c.signer_name}${c.relationship ? ' (' + c.relationship + ')' : ''}`]),
-              el('div', { class: 'muted small' }, [`${c.version} · ${new Date(c.signed_at).toLocaleString()}`]),
-              c.tooth_numbers ? el('div', { class: 'field', style: 'margin-top:6px' }, [
-                el('span', { class: 'field-label' }, ['Teeth']),
-                el('div', { class: 'chip-row' }, [el('span', { class: 'pill pill--info' }, [c.tooth_numbers])]),
-                c.amended_by ? el('div', { class: 'muted small' }, [`(added by ${c.amended_by}${c.amended_at ? ' on ' + new Date(c.amended_at).toLocaleString() : ''})`]) : null,
-              ]) : null,
-              c.signature_png ? el('img', { class: 'sig-thumb', src: c.signature_png }) : null,
-              // Say how it was signed. The caption baked into the image is a few
-              // pixels tall at thumbnail size, so on this screen a generated
-              // signature would otherwise be indistinguishable from a drawn one.
-              c.signature_method && c.signature_method !== 'draw'
-                ? el('div', { class: 'muted small' }, [c.signature_method === 'type' ? 'Signed by typed name' : 'Signature generated from typed name'])
-                : null,
-            ]))) : el('span', { class: 'muted' }, ['No consents on file']),
-          ]),
+          // The patient's information, medical and dental history and consents
+          // are the chart's own cards (components/patientHistory.js), so Records
+          // cannot show a patient differently from the screens they were
+          // treated on — and they are edited here the way they are everywhere,
+          // one section at a time by the roles allowed to (this replaces the
+          // administrator-only "Edit patient details", which could not reach
+          // City, State, race, services or either history).
+          patientInfoCards(p, {
+            stack: true,
+            emptyConsents: true,
+            // Records adds what Vitals measured to the medical card.
+            medicalExtras: (cp) => [
+              el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Vitals']), recVitals(cp)]),
+              el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Blood thinner']), recThinner(cp)]),
+            ],
+            onSaved: () => detail(id),
+          }),
           auditCard,
         ]),
         el('div', { class: 'col' }, [
@@ -210,48 +197,15 @@ export function renderRecords(ctx, params = {}) {
           ]),
           store.is('admin') ? el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Admin']),
-            el('button', { class: 'btn btn--ghost btn--block', onClick: () => editPatient(p) }, [icon('pen', { size: 16 }), 'Edit patient details']),
+            // Unlock a signed-off record to amend it (reason required), or lock
+            // a finished one; the lock trail below syncs to every station.
+            adminLockButtons(p, { onChanged: () => detail(id), size: 'sm', block: true }),
+            lockHistoryList(p),
             el('button', { class: 'btn btn--danger btn--block', style: 'margin-top:8px', onClick: () => deletePatient(p) }, [icon('trash', { size: 16 }), 'Delete patient record']),
           ]) : null,
         ]),
       ]),
     );
-  }
-
-  async function editPatient(p) {
-    const d = p.demographics || {};
-    const f = {
-      first_name: el('input', { class: 'input', value: p.first_name || '' }),
-      last_name: el('input', { class: 'input', value: p.last_name || '' }),
-      dob: el('input', { class: 'input', type: 'date', value: p.dob || '' }),
-      phone: el('input', { class: 'input', value: p.phone || '' }),
-      email: el('input', { class: 'input', value: p.email || '' }),
-      address: el('input', { class: 'input', value: d.address || '' }),
-      emergency_name: el('input', { class: 'input', value: d.emergency_name || '' }),
-      emergency_phone: el('input', { class: 'input', value: d.emergency_phone || '' }),
-    };
-    limitDigits(f.phone, 10);
-    limitDigits(f.emergency_phone, 10);
-    const fld = (label, node, span) => el('label', { class: 'field' + (span ? ' span-2' : '') }, [el('span', { class: 'field-label' }, [label]), node]);
-    const form = el('div', { class: 'form-grid' }, [
-      fld('First name', f.first_name), fld('Last name', f.last_name),
-      fld('Date of birth', f.dob), fld('Phone', f.phone),
-      fld('Email', f.email, true),
-      fld('Address', f.address, true),
-      fld('Emergency contact', f.emergency_name), fld('Emergency phone', f.emergency_phone),
-    ]);
-    const ok = await modal({ title: 'Edit patient details', body: form, confirmText: 'Save', cancelText: 'Cancel' });
-    if (!ok) return;
-    try {
-      await api.updatePatient({
-        id: p.id,
-        first_name: f.first_name.value.trim(), last_name: f.last_name.value.trim(),
-        dob: f.dob.value, phone: f.phone.value.trim(), email: f.email.value.trim(),
-        demographics: { ...d, address: f.address.value.trim(), emergency_name: f.emergency_name.value.trim(), emergency_phone: f.emergency_phone.value.trim() },
-      });
-      toast('Patient details updated', 'success');
-      detail(p.id);
-    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function deletePatient(p) {

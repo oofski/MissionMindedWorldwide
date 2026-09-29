@@ -4,7 +4,8 @@ import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { SignaturePad } from '../components/signature.js';
 import { Odontogram } from '../components/odontogram.js';
-import { patientHistoryCards, incompleteBanner } from '../components/patientHistory.js';
+import { patientInfoPanel, incompleteBanner, historyReviewText } from '../components/patientHistory.js';
+import { lockBanner } from '../components/recordLock.js';
 import { clinicalFlags, medicalDisplay } from '../medicalHistory.js';
 import { sortedByName } from '../patientSort.js';
 import { store } from '../store.js';
@@ -121,17 +122,23 @@ export function renderProvider(ctx, params = {}) {
     // every allergy including a typed-in one, and an allergy answer of Unsure.
     // Blood thinners get their own dedicated danger banner + vitals-strip line,
     // so that condition is left out here rather than said three ways.
-    const flags = clinicalFlags(p.medical_history);
+    // Recomputed when the history is corrected from this chart (the patient
+    // panel below), so the banner — and the flags saved with the chart — follow it.
+    let flags = clinicalFlags(p.medical_history);
     // F12: blood-thinner detection — combine the EMT-confirmed triage answer
     // (triage.blood_thinner) with medication auto-detection so the danger banner
     // reflects both, not just the medication list (v1.2 bugfix).
-    const thinnerStatus = bloodThinnerStatus(p);
+    let thinnerStatus = bloodThinnerStatus(p);
+    // An administrator unlocked this finished visit so it can be corrected: the
+    // sign-off panel offers the amendment and the re-lock instead of the
+    // usual "finish the visit" actions.
+    const amending = !!(p.lock && p.lock.amending);
 
     /* ---------- EMT vitals + routing strip (read-only) ---------- */
     // Compact one-line summary of what the EMT station recorded before sending
     // the patient here. Rendered only when vitals or a route exist.
     function vitalsStrip() {
-      const hasVitals = tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null;
+      const hasVitals = tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null || tr.glucose != null || tr.respiration != null;
       if (!hasVitals && !tr.route) return null;
       // BP renders as its own element so a hypertensive-crisis reading (systolic
       // over 180 or diastolic over 100) shows RED here, same as the EMT screen.
@@ -152,6 +159,9 @@ export function renderProvider(ctx, params = {}) {
       });
       const rest = [];
       if (tr.heart_rate != null) rest.push(`HR ${tr.heart_rate}`);
+      // Blood sugar and respiration, recorded at Vitals like the rest.
+      if (tr.glucose != null) rest.push(`BS ${tr.glucose} mg/dL`);
+      if (tr.respiration != null) rest.push(`RESP ${tr.respiration}/min`);
       if (p.vitals_by_name) rest.push(`recorded by ${p.vitals_by_name}`);
       // Blood-thinner wording comes from the ONE shared helper so it always
       // matches the danger banner and every other screen (no "No" vs "Yes" mismatch).
@@ -319,14 +329,14 @@ export function renderProvider(ctx, params = {}) {
     }
     (tx.extractions || []).filter((x) => !x.other).forEach((x) => addExtraction(x));
     const otherExisting = (tx.extractions || []).find((x) => x.other) || {};
-    const extOther = el('input', { class: 'input', placeholder: 'Other extraction (describe)', value: otherExisting.other || '' });
-    const extOtherTooth = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: otherExisting.tooth || '' });
+    const extOther = el('input', { class: 'input', placeholder: 'Other extraction (describe)', value: otherExisting.other || '', disabled: locked });
+    const extOtherTooth = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: otherExisting.tooth || '', disabled: locked });
 
     /* ---------- Cleaning ---------- */
     const cleanState = { ...(tx.cleaning || {}) };
     // An older record's teeth as a string ("1,2") stopped this screen drawing.
     cleanState.teeth = toothList(cleanState.teeth);
-    const quadDetail = el('input', { class: 'input input--sm', placeholder: 'Quadrant(s) e.g. UR, LL', value: cleanState.quad_detail || '', style: cleanState.quad_deep_scaling ? '' : 'display:none' });
+    const quadDetail = el('input', { class: 'input input--sm', placeholder: 'Quadrant(s) e.g. UR, LL', value: cleanState.quad_detail || '', style: cleanState.quad_deep_scaling ? '' : 'display:none', disabled: locked });
     const cleanTeeth = el('div', { class: 'odo-selected-list', style: 'margin-top:8px' });
     function renderCleanTeeth() {
       clear(cleanTeeth);
@@ -1008,6 +1018,10 @@ export function renderProvider(ctx, params = {}) {
         return;
       }
       if (mode === 'lock') {
+        // Re-signing an amended record is a new signature for what the record
+        // now says: the one on file signed the record before the correction,
+        // and falling back to it let "Re-sign & lock" lock with nobody signing.
+        if (amending && !sigPad.getDataUrl()) { toast('Sign again to re-sign the corrected record — the signature on file was given before the amendment.', 'error'); return; }
         if (!payload.provider_signature) { toast('Provider signature is required to lock the record.', 'error'); return; }
         const ok = await modal({ title: 'Lock this record?', body: 'Locking finalizes this record so it can no longer be edited. This is optional — the patient moves to check-out without it. Continue?', confirmText: 'Sign off & lock', cancelText: 'Cancel' });
         if (!ok) return;
@@ -1020,7 +1034,8 @@ export function renderProvider(ctx, params = {}) {
         toast(mode === 'lock' ? 'Record signed off and locked'
           : mode === 'complete' ? 'Visit complete — sent to check-out'
             : mode === 'waiting' ? 'Moved to Treatment Waiting — the patient is in the queue for a treatment chair'
-              : 'Progress saved', 'success');
+              : amending ? 'Amendment saved — lock the record again when it is correct'
+                : 'Progress saved', 'success');
         if (mode) ctx.navigate('provider'); else detail(id);
       } catch (e) { toast(e.message, 'error'); }
     }
@@ -1038,6 +1053,51 @@ export function renderProvider(ctx, params = {}) {
     }
 
     /* ---------- render ---------- */
+    const alertsSlot = el('div', { class: 'provider-alerts' });
+    function paintAlerts() {
+      alertsSlot.replaceChildren(...[
+        // F12: blood thinners get their own prominent danger banner above other
+        // flags. Driven by the EMT-confirmed answer combined with medication
+        // detection (bloodThinnerStatus), not the medication list alone.
+        thinnerStatus.onThinner ? el('div', { class: 'banner banner--alert' }, [
+          icon('alert', { size: 16 }),
+          el('div', {}, [
+            el('strong', {}, ['BLOOD THINNER — confirm before extraction']),
+            thinnerStatus.names.length ? el('div', { class: 'chip-row', style: 'margin-top:6px' }, thinnerStatus.names.map((n) =>
+              el('span', { class: 'pill pill--danger' }, [icon('alert', { size: 12 }), n]))) : null,
+          ]),
+        ]) : null,
+        // EMT station handoff — vitals, blood-thinner answer, who routed the patient.
+        vitalsStrip(),
+        flags.length ? el('div', { class: 'banner banner--alert' }, [icon('flag', { size: 16 }), 'Medical flags: ' + flags.join(' · ')]) : null,
+      ].filter(Boolean));
+    }
+    paintAlerts();
+    // A section of the intake corrected from this chart: the record the chart
+    // reads follows it, and so do the flags, the banner and the summary.
+    function historySaved(np) {
+      ['medical_history', 'dental_history', 'demographics', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'age']
+        .forEach((k) => { p[k] = np[k]; });
+      if (np.triage) Object.assign(tr, { history_reviewed_at: np.triage.history_reviewed_at, history_reviewed_by_name: np.triage.history_reviewed_by_name });
+      flags = clinicalFlags(p.medical_history);
+      thinnerStatus = bloodThinnerStatus(p);
+      paintAlerts();
+      summarySlot.replaceChildren(...miniHist());
+    }
+    const summarySlot = el('div', { class: 'mini-hist', style: 'padding:0 var(--space-4) var(--space-4)' });
+    function miniHist() {
+      return [
+        ...((md) => [
+          el('div', {}, [el('b', {}, ['Allergies: ']), md.allergySummary]),
+          el('div', {}, [el('b', {}, ['Conditions: ']), md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? 'None (reviewed)' : 'None reported')]),
+          md.unsure.length ? el('div', {}, [el('b', {}, ['Unsure: ']), md.unsure.map((c) => c.label).join(', ')]) : null,
+          el('div', {}, [el('b', {}, ['Medications: ']), md.meds.map((m) => m.name).join(', ') || (md.medsNone ? 'None (reviewed)' : 'None reported')]),
+        ])(medicalDisplay(p.medical_history, 'en')),
+        el('div', {}, [el('b', {}, ['Consent: ']), (p.consents || []).some((c) => c.type === 'general') ? 'Signed' : 'Missing']),
+      ].filter(Boolean);
+    }
+    summarySlot.replaceChildren(...miniHist());
+
     const panel = (ic, title, ...kids) => el('div', { class: 'card' }, [
       el('div', { class: 'card-title' }, [icon(ic, { size: 15 }), title]), ...kids,
     ]);
@@ -1071,21 +1131,13 @@ export function renderProvider(ctx, params = {}) {
         },
         onNewCheckin: () => ctx.navigate('kiosk'),
       }),
-      // F12: blood thinners get their own prominent danger banner above other
-      // flags. Driven by the EMT-confirmed answer combined with medication
-      // detection (bloodThinnerStatus), not the medication list alone.
-      thinnerStatus.onThinner ? el('div', { class: 'banner banner--alert' }, [
-        icon('alert', { size: 16 }),
-        el('div', {}, [
-          el('strong', {}, ['BLOOD THINNER — confirm before extraction']),
-          thinnerStatus.names.length ? el('div', { class: 'chip-row', style: 'margin-top:6px' }, thinnerStatus.names.map((n) =>
-            el('span', { class: 'pill pill--danger' }, [icon('alert', { size: 12 }), n]))) : null,
-        ]),
-      ]) : null,
-      // EMT station handoff — vitals, blood-thinner answer, who routed the patient.
-      vitalsStrip(),
-      flags.length ? el('div', { class: 'banner banner--alert' }, [icon('flag', { size: 16 }), 'Medical flags: ' + flags.join(' · ')]) : null,
-      locked ? el('div', { class: 'banner banner--locked' }, [icon('lock', { size: 16 }), 'This record is signed off and locked. View or export below.']) : null,
+      // The blood-thinner banner, the Vitals handoff and the medical flags, in
+      // one slot that is repainted when the history is corrected from this
+      // chart — without re-rendering the chart and losing what is typed in it.
+      alertsSlot,
+      // Signed off and locked (who, when; Unlock for an administrator), or
+      // unlocked by an administrator to be amended (who, when, why).
+      lockBanner(p, { onChanged: () => detail(id), lockedText: 'This record is signed off and locked. View or export below.' }),
       // Parked for a treatment chair. Said plainly, because the next save here
       // is what takes the patient out of that queue and into treatment.
       !locked && p.status === 'treatment_waiting' ? el('div', { class: 'banner banner--info' }, [icon('calendar', { size: 16 }),
@@ -1097,12 +1149,19 @@ export function renderProvider(ctx, params = {}) {
       // D2: shared tooth-number quick-pick source (invisible; referenced by inputs).
       teethDatalist,
 
-      // Full patient history — collapsible reference data, CLOSED by default to
-      // keep actionable treatment leading the chart.
-      el('details', { class: 'history-details', style: 'margin-bottom:var(--space-4)' }, [
-        el('summary', { class: 'history-summary' }, [icon('clipboard', { size: 16 }), 'Patient history', priorVisits.length ? el('span', { class: 'pill pill--info', style: 'margin-left:8px' }, [`${priorVisits.length} prior visit(s)`]) : null]),
-        el('div', { class: 'history-grid' }, patientHistoryCards(p, priorVisits)),
-      ]),
+      // Full patient history — the shared patient panel, CLOSED by default to
+      // keep actionable treatment leading the chart. The dentist can correct
+      // the history and the patient's details from it (Edit per section) until
+      // the record is signed off and locked.
+      (() => {
+        const hp = patientInfoPanel(p, {
+          priorVisits,
+          title: `Patient history${priorVisits.length ? ` · ${priorVisits.length} prior visit(s)` : ''}`,
+          onSaved: historySaved,
+        });
+        hp.style.marginBottom = 'var(--space-4)';
+        return hp;
+      })(),
 
       // Consents — right under patient history so the dentist can have a missing
       // consent (esp. oral surgery, with tooth numbers) completed at the chair.
@@ -1180,15 +1239,7 @@ export function renderProvider(ctx, params = {}) {
       // chart leads with treatment, not reference data.
       el('details', { class: 'card', style: 'padding:0;overflow:hidden;margin-bottom:var(--space-4)' }, [
         el('summary', { class: 'card-title', style: 'cursor:pointer;list-style:none;padding:var(--space-3) var(--space-4);margin:0' }, [icon('user', { size: 15 }), 'Patient summary']),
-        el('div', { class: 'mini-hist', style: 'padding:0 var(--space-4) var(--space-4)' }, [
-          ...((md) => [
-            el('div', {}, [el('b', {}, ['Allergies: ']), md.allergySummary]),
-            el('div', {}, [el('b', {}, ['Conditions: ']), md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? 'None (reviewed)' : 'None reported')]),
-            md.unsure.length ? el('div', {}, [el('b', {}, ['Unsure: ']), md.unsure.map((c) => c.label).join(', ')]) : null,
-            el('div', {}, [el('b', {}, ['Medications: ']), md.meds.map((m) => m.name).join(', ') || (md.medsNone ? 'None (reviewed)' : 'None reported')]),
-          ])(medicalDisplay(p.medical_history, 'en')),
-          el('div', {}, [el('b', {}, ['Consent: ']), (p.consents || []).some((c) => c.type === 'general') ? 'Signed' : 'Missing']),
-        ]),
+        summarySlot,
       ]),
 
       // Provider sign-off + export.
@@ -1199,6 +1250,14 @@ export function renderProvider(ctx, params = {}) {
           : sigPad.node,
         locked
           ? exportButtons(ctx, id)
+          : amending
+            // Correcting a finished visit an administrator unlocked: save the
+            // correction (the patient stays where they are), then sign it off
+            // and lock it again.
+            ? el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
+                primaryBtn('lock', 'Re-sign & lock', () => save('lock')),
+                el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
+              ])
           : el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
               // ONE clear primary action for the station; everything else is secondary.
               primaryBtn('checkCircle', 'Mark visit complete', () => save('complete')),
@@ -1253,11 +1312,25 @@ function accountabilityCard(p, tr, tx) {
   const vitalsStr = [];
   if (sys != null || dia != null) vitalsStr.push(`BP ${sys != null ? sys : '—'}/${dia != null ? dia : '—'}${bp.high ? ' — HIGH' : ''}`);
   if (hr != null) vitalsStr.push(`HR ${hr}`);
+  if (tr.glucose != null) vitalsStr.push(`BS ${tr.glucose}`);
+  if (tr.respiration != null) vitalsStr.push(`RESP ${tr.respiration}`);
 
+  const lk = p.lock || {};
   line('user', 'Triaged by', p.triaged_by_name, tr.triaged_at);
   line('syringe', 'Vitals by', p.vitals_by_name, tr.vitals_at);
+  // Who went through the medical history with the patient at this visit.
+  if (historyReviewText(p)) line('clipboard', 'History reviewed by', tr.history_reviewed_by_name, tr.history_reviewed_at);
   line('calendar', 'Moved to Treatment Waiting by', p.treatment_waiting_by_name, tr.treatment_waiting_at);
-  line('pen', 'Signed off by', p.completed_by_name, tx.completed_at);
+  // "Signed off" means locked. A visit marked complete without the lock
+  // (optional since v1.2.1) was completed, not signed off, and says so.
+  line('pen', 'Completed by', p.completed_by_name, tx.completed_at);
+  if (lk.locked) line('lock', 'Signed off & locked by', lk.locked_by_name, lk.locked_at);
+  if (lk.unlocked_at) {
+    lines.push(el('div', { class: 'kv' }, [
+      el('span', { class: 'kv-k' }, [icon('unlock', { size: 13 }), ' ', 'Unlocked by']),
+      el('span', { class: 'kv-v' }, [`${lk.unlocked_by_name || '—'} · ${fmtWhen(lk.unlocked_at)}${lk.unlock_reason ? ' — ' + lk.unlock_reason : ''}`]),
+    ]));
+  }
   if (p.dismissed_by_name || p.dismissed_at) line('checkCircle', 'Checked out by', p.dismissed_by_name, p.dismissed_at);
 
   if (!lines.length && !vitalsStr.length) return null;

@@ -14,6 +14,15 @@ works locally and re-syncs when reconnected.
   Worker only overwrites a stored row when the incoming `updated_at` is `>=` the stored one.
 - Accountability names are **denormalized** into `data` (e.g. `vitals_by_name`) so other
   devices display "who did what" without syncing user accounts.
+- **A lock is sticky (v0.0.15, app side).** A `treatment` row that arrives unlocked
+  (`locked` 0) lifts a lock the laptop holds only when it carries an `unlocked_at` later
+  than that lock (`locked_at`, or `completed_at` for a record locked before v0.0.15) —
+  an administrator's unlock, which always stamps one. Any other unlocked copy (a laptop
+  that saved the chart before the sign-off reached it, or one still on v0.0.14) applies
+  everything except the sign-off — `locked`, `locked_at`, `locked_by_name`,
+  `lock_history`, `unlocked_*`, `completed_at`, `completed_by_name` — which stays, and
+  the merged row is pushed back just above the stamp it merged. The Worker is unchanged:
+  it stores `data` as it is sent.
 
 ## Entities (sync `entity` values)
 `event`, `patient`, `triage`, `treatment`, `consent`, `xray`. (Users/auth are NOT synced.)

@@ -52,6 +52,24 @@ function ageFrom(dob) {
 // spreadsheet and the printed record cannot disagree.
 const DL = require('./dentalLabels');
 
+// The record lock in four columns: its state ("Locked", or "Unlocked" with the
+// administrator's reason while it is being amended), who locked it and when —
+// which, for a record locked before v0.0.15, is its completion, the sign-off
+// that locked it (the bundle names who completed it even when this laptop
+// only stored their user id: exportClinicBundle) — and every unlock of it,
+// which is what an amendment after sign-off leaves behind.
+function lockColumns(t) {
+  const hist = j(t.lock_history, []);
+  const unlocks = (Array.isArray(hist) ? hist : []).filter((h) => h && h.action === 'unlock');
+  const state = t.locked ? 'Locked' : (t.unlocked_at ? `Unlocked${t.unlock_reason ? ' — ' + t.unlock_reason : ''}` : '');
+  return [
+    state,
+    t.locked ? (t.locked_by_name || t.completed_by_name || '') : '',
+    t.locked ? (t.locked_at || t.completed_at || '') : '',
+    unlocks.map((h) => [h.at, h.by && 'by ' + h.by, h.reason].filter(Boolean).join(' ')).join('; '),
+  ];
+}
+
 function clinicSheets(bundle) {
   const b = bundle || {};
   const patients = b.patients || [];
@@ -107,6 +125,12 @@ function clinicSheets(bundle) {
       yn(legacy.hospitalized), yn(legacy.pregnancy),
       tr.bp_systolic != null && tr.bp_diastolic != null ? `${tr.bp_systolic}/${tr.bp_diastolic}` : '',
       tr.heart_rate == null ? '' : tr.heart_rate,
+      // Recorded at Vitals since v0.0.4; exported from v0.0.15.
+      tr.glucose == null ? '' : tr.glucose,
+      tr.respiration == null ? '' : tr.respiration,
+      // Who went through the medical history with the patient at this visit.
+      tr.history_reviewed_by_name || (tr.history_reviewed_at ? '—' : ''),
+      tr.history_reviewed_at || '',
       // 'dentist' is the Dental Triage station; the stored key never changed.
       tr.route === 'dentist' ? 'Dental Triage' : tr.route === 'hygienist' ? 'Hygienist' : tr.route === 'both' ? 'Dental Triage + Hygienist' : '',
       STATUS[p.status] || p.status,
@@ -154,7 +178,7 @@ function clinicSheets(bundle) {
       tr.xrays_taken == null ? images : tr.xrays_taken,
       images,
       t.other_procedures, t.clinical_notes, t.provider_name, t.completed_at,
-      t.locked ? 'Signed off' : '',
+      ...lockColumns(t),
     ]);
   });
 
@@ -186,7 +210,8 @@ function clinicSheets(bundle) {
         'Allergy status', 'Allergies', 'Conditions', 'Conditions (unsure)', 'Medications',
         'Under doctor’s care', 'Major surgery (6 mo)', 'Surgery sites', 'Smokes / tobacco', 'Pregnancy',
         'Hospitalized (2 yrs)', 'Pregnant/nursing',
-        'Blood pressure', 'Pulse', 'Sent to', 'Status', 'Checked in at', 'Arrived at', 'Checked out at'],
+        'Blood pressure', 'Pulse', 'Blood sugar (mg/dL)', 'Respiration (/min)', 'History reviewed by', 'History reviewed at',
+        'Sent to', 'Status', 'Checked in at', 'Arrived at', 'Checked out at'],
       rows: patientRows,
     },
     {
@@ -194,7 +219,8 @@ function clinicSheets(bundle) {
       columns: ['Last name', 'First name', 'Extractions', 'Teeth extracted', 'Fillings',
         'Teeth filled', 'Cleaning', 'Anaesthetic', 'Restorative', 'Services (recorded before v0.0.15)',
         'Referred to', 'Referral urgency', 'Referral details', 'X-rays taken', 'X-rays uploaded',
-        'Other procedures', 'Clinical notes', 'Provider', 'Completed at', 'Signed off'],
+        'Other procedures', 'Clinical notes', 'Provider', 'Completed at',
+        'Record lock', 'Locked by', 'Locked at', 'Amended after sign-off'],
       rows: treatmentRows,
     },
     {

@@ -46,8 +46,23 @@ const PERMS = {
   // documented intent.
   'patients:create': ['admin', 'doctor', 'triage', 'emt', 'registration'],
   'patients:newVisit': ['admin', 'doctor', 'triage', 'emt', 'registration'],
-  'patients:update': ['admin', 'triage', 'doctor'],
-  'patients:get': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
+  // v0.0.15: 'patients:update' is gone. It replaced the whole medical and
+  // dental history and the patient's name with no lock check, no validation
+  // and no merge, and once Records stopped calling it, it served only as a way
+  // around the section save below. The USB import calls db.updatePatient
+  // directly, in this process; nothing in the renderer needs it.
+  // v0.0.15: view and correct the patient's own answers at every station. Open
+  // to every staff role here; which SECTION a role may change is checked in
+  // the handler (db.SECTION_ROLES): the patient's details for all seven, the
+  // medical and dental history for the clinical roles.
+  'patients:updateSection': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
+  // registration opens the record from Arrivals to view and correct it.
+  'patients:get': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
+  // A scanned wristband resolves to the same full record patients:get returns,
+  // so it is gated the same way. Unlisted, ensure() let any caller through —
+  // a signed-out kiosk session included — to the medical history, consents
+  // and signatures. Every station that scans a band is one of these roles.
+  'patients:findByCode': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'patients:list': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'patients:searchAll': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'patients:history': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
@@ -65,6 +80,10 @@ const PERMS = {
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
   'patients:route': ['admin', 'doctor', 'triage', 'emt'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],
+  // Unlocking a signed-off record (reason required) and locking one are the
+  // administrator's, like every other override of the flow.
+  'treatment:unlock': ['admin'],
+  'treatment:lock': ['admin'],
   'consent:setTeeth': ['admin', 'doctor'],
   'consent:add': ['admin', 'doctor'],
   'xray:add': ['admin', 'doctor', 'triage', 'emt'],
@@ -351,12 +370,17 @@ function register(getMainWindow) {
       return { ok: false, error: err.message };
     }
   });
-  handle('patients:update', ({ id, ...data }) => db.updatePatient(currentUser, id, data));
+  handle('patients:updateSection', ({ id, section, values, reviewedOnly } = {}) => {
+    const roles = db.SECTION_ROLES[section];
+    if (!roles) throw new Error('Unknown section.');
+    if (!roles.includes(currentUser.role)) throw new Error('Your role does not have permission for this action.');
+    return db.updatePatientSection(currentUser, id, section, values, { reviewedOnly: !!reviewedOnly });
+  });
   handle('patients:get', (id) => db.getPatient(id));
   // MMW: resolve a scanned wristband. A handheld scanner types the digits and
   // presses Enter, so the code arrives with stray whitespace/CR — normalising
   // lives in the data layer, and an unknown band returns a clear error rather
-  // than a null the caller has to guess at.
+  // than a null the caller has to guess at. Signed-in staff only (PERMS).
   handle('patients:findByCode', (code) => {
     const found = db.findPatientByCode(code);
     if (!found) throw new Error('No patient found for that wristband.');
@@ -387,6 +411,8 @@ function register(getMainWindow) {
   // data layer. Same roles, so no new channel was needed.
   handle('treatment:save', ({ patientId, data, finalize }) =>
     db.saveTreatment(currentUser, patientId, data, finalize));
+  handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));
+  handle('treatment:lock', ({ patientId } = {}) => db.lockRecord(currentUser, patientId));
 
   /* ---- v1.0.6: vitals, consent teeth, dismissal, per-patient audit ---- */
   handle('vitals:save', ({ patientId, data }) => db.saveVitals(currentUser, patientId, data));
@@ -680,9 +706,18 @@ function register(getMainWindow) {
     const dir = await pickDir('Choose the USB drive to upload to the local database');
     if (!dir) return { uploaded: 0 };
     const files = usb.loadPatientFiles(dir);
+    // A file older than the record here (signed off, or unlocked, since it was
+    // written) is skipped by the import — counted as such, so the desk is told
+    // rather than shown it among the uploads.
     let uploaded = 0;
-    for (const f of files) { try { db.importPatientFromPortable(currentUser, f.patient); uploaded++; } catch (e) { /* skip bad file */ } }
-    return { dir, uploaded };
+    let skipped = 0;
+    for (const f of files) {
+      try {
+        const r = db.importPatientFromPortable(currentUser, f.patient);
+        if (r && r.import_skipped) skipped++; else uploaded++;
+      } catch (e) { /* skip bad file */ }
+    }
+    return { dir, uploaded, skipped };
   });
 
   handle('usb:clear', async ({ dir, choose } = {}) => {
