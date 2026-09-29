@@ -16,10 +16,10 @@ const fmtWhen = (w) => { if (!w) return ''; const d = new Date(w); return isNaN(
 const isAdmin = () => !!(store.user && store.user.role === 'admin');
 
 // A full record (getPatient) carries `lock`; a list row (listPatients) carries
-// only `locked` / `amending`. Both read the same here.
+// only `locked` / `amending` / `lockable`. Both read the same here.
 function lockOf(p) {
   if (p && p.lock) return p.lock;
-  return { locked: !!(p && p.locked), amending: !!(p && p.amending), history: [] };
+  return { locked: !!(p && p.locked), amending: !!(p && p.amending), lockable: !!(p && p.lockable), history: [] };
 }
 
 /** "Locked by Dr. X · 10/18/2026, 3:04 PM", or '' for an unlocked record. */
@@ -92,14 +92,15 @@ export async function lockRecord(p) {
   } catch (e) { toast(e.message, 'error'); return null; }
 }
 
-// Whether a Lock action makes sense for this record: unlocked, and the visit is
-// over (the data layer checks the same, and that a provider signed it).
+// Whether a Lock would be accepted: the data layer's own answer (lockable —
+// a treatment row, a finished visit, a provider named), carried on the full
+// record and on a list row alike. Deciding from the status here offered every
+// finished patient a Lock, walk-outs with no treatment and unsigned records
+// included, and each ended in a refusal after the confirmation. A record from
+// a caller that did not say is not offered one.
 function lockable(p) {
   const l = lockOf(p);
-  if (l.locked) return false;
-  const tx = p && p.treatment;
-  if (p && p.treatment !== undefined) return !!(tx && (tx.completed_at || p.status === 'completed' || p.status === 'dismissed'));
-  return p && (p.status === 'completed' || p.status === 'dismissed');
+  return !l.locked && l.lockable === true;
 }
 
 /**

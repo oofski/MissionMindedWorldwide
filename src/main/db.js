@@ -1771,23 +1771,37 @@ function isoAfter(...priors) {
 //   unlocked_at, unlocked_by_name, unlock_reason — the last admin unlock
 //   amending — unlocked by an administrator after the visit was finished, so
 //              the clinicians are correcting a signed-off record (isAmending)
+//   lockable — an administrator's Lock would be accepted (canLockRecord)
 //   history  — [{action:'lock'|'relock'|'unlock', at, by, reason?}]
+// locked_at / locked_by_name describe the lock the record is under now, so an
+// unlocked record has none (the trail keeps every earlier one).
 // A record locked before v0.0.15 has no lock stamp; the completion stamp is the
 // sign-off that locked it, so that is what it reads — derived here, never
 // written back, so no old row changes (and re-syncs) just because it was read.
 function lockInfo(t, completedByName, status) {
-  if (!t) return { locked: false, locked_at: null, locked_by_name: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null, amending: false, history: [] };
+  if (!t) return { locked: false, locked_at: null, locked_by_name: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null, amending: false, lockable: false, history: [] };
   const locked = !!t.locked;
   return {
     locked,
-    locked_at: t.locked_at || (locked ? t.completed_at || null : null),
-    locked_by_name: t.locked_by_name || (locked ? completedByName || null : null),
+    locked_at: locked ? t.locked_at || t.completed_at || null : null,
+    locked_by_name: locked ? t.locked_by_name || completedByName || null : null,
     unlocked_at: t.unlocked_at || null,
     unlocked_by_name: t.unlocked_by_name || null,
     unlock_reason: t.unlock_reason || null,
     amending: isAmending(t, status),
+    lockable: canLockRecord(t, status),
     history: lockHistoryOf(t),
   };
+}
+// Whether lockRecord would accept a Lock: a treatment row that is not locked,
+// a finished visit, and a provider named on it. lockRecord refuses the same
+// things with a reason each; this is what lets a screen offer the button only
+// when it would work (a walk-out with no treatment, or an unsigned record, is
+// never offered one).
+function canLockRecord(t, status) {
+  if (!t || t.locked) return false;
+  if (!t.completed_at && status !== 'completed' && status !== 'dismissed') return false;
+  return !!String(t.provider_name || '').trim();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2256,7 +2270,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
-    const tx = db.prepare('SELECT locked, unlocked_at, completed_at FROM treatments WHERE patient_id = ?').get(p.id);
+    const tx = db.prepare('SELECT locked, unlocked_at, completed_at, provider_name FROM treatments WHERE patient_id = ?').get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -2300,8 +2314,10 @@ function listPatients({ eventId, search } = {}) {
       // The record lock, so a list (Management) can show and act on it without
       // opening every chart. `amending`: unlocked by an administrator after the
       // visit was finished — the same test the chart and the save use.
+      // `lockable`: an administrator's Lock would be accepted (canLockRecord).
       locked: !!(tx && tx.locked),
       amending: isAmending(tx, pt.status),
+      lockable: canLockRecord(tx, pt.status),
     };
   });
 }
@@ -3876,6 +3892,31 @@ function writableCols(table, cols, incoming, local) {
   });
 }
 
+/* ---------------- A lock is only lifted by an unlock ----------------
+   Last-write-wins let any later copy of a treatment row that says "unlocked"
+   clear a lock made elsewhere: a laptop still on v0.0.14, or one that saved the
+   chart before the sign-off reached it, pushed its stale copy with a newer
+   stamp, and every station then read the signed-off record as open — with a
+   lock trail whose last word was still "Locked" (a new build's stale copy even
+   sent the trail as null and wiped it). An unlocked copy now lifts a lock here
+   only when it carries an administrator's unlock made AFTER that lock
+   (liftLock always stamps one, strictly after the lock it lifts). Otherwise the
+   sign-off — the lock, its stamp and trail, the completion it locked — stays,
+   the rest of the row applies as usual, and the merged copy goes back up
+   (applyRemoteRows re-pushes any row it did not take whole), so the cloud and
+   the stale laptop get the lock back. A v0.0.14 laptop's admin move that
+   re-opened a record carries no unlock stamp and so does not unlock it here; an
+   administrator unlocks it on an updated station. */
+const STICKY_LOCK_COLS = ['locked', 'locked_at', 'locked_by_name', 'lock_history', 'unlocked_at', 'unlocked_by_name', 'unlock_reason', 'completed_at', 'completed_by_name'];
+function stickyLockCols(treatmentId, incoming) {
+  const t = db.prepare('SELECT locked, locked_at, completed_at FROM treatments WHERE id = ?').get(treatmentId);
+  if (!t || !t.locked || !incoming || Number(incoming.locked) === 1) return [];
+  const lockedAt = Date.parse(t.locked_at || t.completed_at || '');
+  const unlockedAt = Date.parse(incoming.unlocked_at || '');
+  const unlockedAfter = Number.isFinite(unlockedAt) && (!Number.isFinite(lockedAt) || unlockedAt > lockedAt);
+  return unlockedAfter ? [] : STICKY_LOCK_COLS;
+}
+
 function nameOfId(uid) { if (!uid) return null; const u = db.prepare('SELECT full_name FROM users WHERE id = ?').get(uid); return u ? u.full_name : null; }
 // A globally-unique, totally-ordered revision stamp: a strictly-increasing
 // per-device ISO time, PERSISTED across restarts (so a wall-clock rewind can't
@@ -4187,7 +4228,8 @@ function applyRemoteRows(remoteRows) {
     // longer the row that arrived, and is pushed back (below) — which is what
     // puts the kept value back in the cloud copy the older laptop overwrote.
     const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
-    const cols = writableCols(table, SYNC_COLS[entity], env.data, local);
+    const keepLocal = entity === 'treatment' && existing ? stickyLockCols(existing.id, env.data) : [];
+    const cols = writableCols(table, SYNC_COLS[entity], env.data, local).filter((c) => !keepLocal.includes(c));
     const vals = cols.map((c) => data[c]);
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];

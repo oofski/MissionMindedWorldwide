@@ -4698,6 +4698,24 @@ async function main() {
     log(!docLock.ok && admLock.ok && admLock.data.treatment.locked && admLock.data.lock.history[0].action === 'lock' && admLock.data.status === 'completed'
       && !twice.ok && /already/i.test(twice.error) && !busyLock.ok && /not finished/i.test(busyLock.error) && dbNonAdmin,
       'lock: an administrator locks a finished, never-locked visit; an unfinished or already-locked one is refused, and so is anyone else');
+    // Lock is offered only where it would be accepted. The data layer says so
+    // on the record and on the list row (Management), from the test lockRecord
+    // itself makes: a walk-out with no treatment, an unsigned record, an
+    // unfinished visit and a locked one are not lockable.
+    const walkOut = mkC('Walt', 'Walkout', { vitals: true });
+    db.adminMovePatient(signInAdmin(), walkOut.id, 'dismiss');
+    const unsignedP = mkC('Una', 'Unsigned', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), unsignedP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }] }, 'complete');
+    const signedP = mkC('Sina', 'Signedunlocked', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), signedP.id, { provider_name: 'Dr C' }, 'complete');
+    const listedL = (id) => db.listPatients({}).find((x) => x.id === id);
+    const lockableBoth = (id) => JSON.stringify([listedL(id).lockable, db.getPatient(id).lock.lockable]);
+    const walkRefused = await window.api.treatmentLock({ patientId: walkOut.id });
+    const unsignedRefused = await window.api.treatmentLock({ patientId: unsignedP.id });
+    log(lockableBoth(walkOut.id) === '[false,false]' && lockableBoth(unsignedP.id) === '[false,false]'
+      && lockableBoth(busy.id) === '[false,false]' && lockableBoth(cmp.id) === '[false,false]' && lockableBoth(signedP.id) === '[true,true]'
+      && !walkRefused.ok && /nothing to lock/.test(walkRefused.error) && !unsignedRefused.ok && /provider/.test(unsignedRefused.error),
+      'lock: "lockable" is exactly what Lock would accept — a finished, signed, unlocked visit — on the record and on the list row alike');
 
     /* ---- the admin moves unlock through the same door ---- */
     const mvP = mkC('Mo', 'Mover', { route: 'dentist' });
@@ -4751,6 +4769,49 @@ async function main() {
     const skAp = db.getPatient(skA.id); const skBp = db.getPatient(skB.id);
     log(skAp.lock.amending && Date.parse(skAp.lock.unlocked_at) > Date.parse(ahead) && !skBp.lock.amending && Date.parse(skBp.treatment.completed_at) > Date.parse(ahead),
       'lock: an unlock always sorts after the sign-off it amends, and a completion after the unlock it closes — whatever another laptop\'s clock said');
+
+    /* ---- a stale copy does not lift a lock ---- */
+    // Sync is last-write-wins, so a copy of the treatment row from a laptop
+    // that saved the chart before the sign-off reached it (still on v0.0.14,
+    // or on this build) used to unlock the record everywhere — its trail still
+    // ending "Locked". Only an administrator's unlock, made after the lock,
+    // lifts it; the rest of the row applies, and the lock goes back up.
+    const scP = mkC('Stan', 'Stalecopy', { route: 'dentist' });
+    db.saveTreatment(signInAdmin(), scP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }], provider_name: 'Dr S', provider_signature: 'data:,s' }, 'lock');
+    const scLocked = db.getPatient(scP.id);
+    const scRows = db.collectSyncRows(5000).rows; // gives every row its uid
+    const scPUid = (() => { const r = rawDb(); try { return r.prepare('SELECT uid FROM patients WHERE id = ?').get(scP.id).uid; } finally { r.close(); } })();
+    const scEnv = scRows.find((r) => r.entity === 'treatment' && !r.deleted && !!scPUid && r.patient_uid === scPUid);
+    const scAt = (min) => new Date(Date.now() + min * 60e3).toISOString() + '@stale';
+    const scOut = () => db.collectSyncRows(5000).rows.find((r) => r.entity === 'treatment' && !r.deleted && r.uid === scEnv.uid);
+    const scOldLaptop = {};
+    db.SYNC_COLS_BEFORE_V0_0_15.treatment.forEach((c) => { scOldLaptop[c] = scEnv.data[c]; });
+    Object.assign(scOldLaptop, { locked: 0, completed_at: null, completed_by_name: null, clinical_notes: 'Saved before the sign-off arrived' });
+    const scAtOld = scAt(1);
+    const scRes1 = db.applyRemoteRows([{ ...scEnv, data: scOldLaptop, updated_at: scAtOld }]);
+    const sc1 = db.getPatient(scP.id);
+    const sc1Out = scOut();
+    const scKept = (pt) => pt.treatment.locked && pt.lock.locked && pt.lock.locked_at === scLocked.lock.locked_at && pt.lock.locked_by_name === scLocked.lock.locked_by_name
+      && pt.lock.history.map((h) => h.action).join(',') === 'lock' && pt.treatment.completed_at === scLocked.treatment.completed_at
+      && pt.completed_by_name === scLocked.completed_by_name && !pt.lock.amending;
+    log(scRes1.applied === 1 && scKept(sc1) && sc1.treatment.clinical_notes === 'Saved before the sign-off arrived'
+      && !!sc1Out && Number(sc1Out.data.locked) === 1 && sc1Out.updated_at > scAtOld,
+      'sync: a v0.0.14 laptop\'s stale copy does not unlock a signed-off record — the lock, its stamp, trail and completion stay, the rest applies, and the lock goes back up');
+    const scNewStale = { ...scEnv.data, locked: 0, locked_at: null, locked_by_name: null, lock_history: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null, clinical_notes: 'A second stale save' };
+    db.applyRemoteRows([{ ...scEnv, data: scNewStale, updated_at: scAt(2) }]);
+    const sc2 = db.getPatient(scP.id);
+    log(scKept(sc2) && sc2.treatment.clinical_notes === 'A second stale save',
+      'sync: nor does a stale copy from this build, whose lock stamp and trail arrive as nulls — the trail is not wiped');
+    const scUnAt = new Date(Date.parse(scLocked.lock.locked_at) + 1000).toISOString();
+    const scUnlock = {
+      ...sc1Out.data, locked: 0, unlocked_at: scUnAt, unlocked_by_name: 'Admin Elsewhere', unlock_reason: 'Wrong tooth',
+      lock_history: JSON.stringify([...scLocked.lock.history, { action: 'unlock', at: scUnAt, by: 'Admin Elsewhere', reason: 'Wrong tooth' }]),
+    };
+    db.applyRemoteRows([{ ...scEnv, data: scUnlock, updated_at: scAt(3) }]);
+    const sc3 = db.getPatient(scP.id);
+    log(!sc3.treatment.locked && !sc3.lock.locked && sc3.lock.amending && sc3.lock.unlocked_by_name === 'Admin Elsewhere'
+      && sc3.lock.history.map((h) => h.action).join(',') === 'lock,unlock' && sc3.lock.locked_at === null && sc3.lock.locked_by_name === null,
+      'sync: an administrator\'s unlock made after the lock does lift it, and the unlocked record no longer reports a current lock stamp');
 
     /* ---- a record locked before v0.0.15 ---- */
     const oldL = mkC('Olga', 'Oldlock', { route: 'dentist' });
@@ -5003,6 +5064,53 @@ async function main() {
       'Vitals: a refused save leaves the form open with what was typed, and names the question it needs');
     btnIn(edL, /^Cancel$/).click(); await settle();
     log(!document.body.contains(edL), 'Vitals: Cancel on an untouched form closes it');
+    // The same older checklist record, gone through with the patient to the
+    // end. The form reads its listed allergy as a "Yes" (and an allergy typed
+    // in without the Other tick as Other); the save must store those answers.
+    // Sent as changes only, the stored record never had allergy_status, so the
+    // save was refused beside a "Yes" — and Unsure, the one answer that saved,
+    // emptied the list and took the penicillin allergy off the dentist's flags.
+    const pickC = (sel, v) => { sel.value = v; sel.dispatchEvent(new window.Event('change', { bubbles: true })); };
+    const laLegacy = {
+      conditions: ['diabetes'], allergies: ['penicillin'], allergies_other: 'Latex gloves',
+      medications: [{ name: 'Metformin', dose: '500 mg', reason: '' }], under_treatment: 'no', tobacco: 'no', pregnancy: 'no',
+    };
+    const laP = mkC('Lara', 'Legacyallergy', { vitals: true, medical: laLegacy });
+    const emtLa = await viewC('emt.js', 'renderEmt', { id: laP.id });
+    cardOf(emtLa.querySelector('details.patient-info'), 'medical_history').querySelector('.card-edit').click(); await settle();
+    const edLa = $all('.section-editor').pop();
+    const fieldLa = (re) => $all('label.field', edLa).find((l) => re.test(l.textContent)).querySelector('select');
+    const gateLa = fieldLa(/allergy or serious reaction/i).value;
+    $all('.tri-row select', edLa).forEach((s) => { if (!s.value) pickC(s, 'no'); });
+    pickC(fieldLa(/Major surgery/i), 'no');
+    btnIn(edLa, /^Save$/).click(); await settle();
+    const laSaved = db.getPatient(laP.id);
+    const laMh = laSaved.medical_history;
+    log(gateLa === 'yes' && !document.body.contains(edLa) && /Medical history saved/.test(lastToastC())
+      && laMh.allergy_status === 'yes' && laMh.allergies.includes('penicillin') && laMh.allergies.includes('other') && laMh.allergies_other === 'Latex gloves'
+      && laMh.condition_answers.diabetes === 'yes' && laMh.medications.length === 1 && laMh.medications[0].name === 'Metformin'
+      && laMh.history_version === 2 && !MHr.firstMissingMedical(laMh) && laSaved.triage.flags.includes('Allergy: Penicillin'),
+      'Vitals: an older checklist record with an allergy, completed through Edit, saves the "Yes" the form shows — the penicillin allergy, the typed-in one and the dentist\'s flag all kept');
+    const laAudit = db.patientAudit(laP.id).find((a) => a.action === 'history_edit');
+    // What the editor sent: the answers the stored record did not come to on
+    // its own (the allergy "Yes", the Other tick), never a reading the data
+    // layer makes anyway (the medication list, which it normalises itself).
+    const secLa = IS.medicalHistorySection(laLegacy, { staff: true });
+    const laStart = secLa.initial();
+    $all('.tri-row select', secLa.node).forEach((s) => { if (!s.value) pickC(s, 'no'); });
+    pickC($all('label.field', secLa.node).find((l) => /Major surgery/i.test(l.textContent)).querySelector('select'), 'no');
+    const laPatch = PH.medicalPatch(laLegacy, laStart, secLa.collect());
+    log(!!laAudit && laAudit.user_name === 'C emt' && /allergy_status/.test(laAudit.detail) && /major_surgery/.test(laAudit.detail)
+      && laPatch.allergy_status === 'yes' && JSON.stringify(laPatch.allergies) === '["penicillin","other"]' && laPatch.major_surgery === 'no'
+      && !('medications' in laPatch) && !('allergies_other' in laPatch) && !('tobacco' in laPatch),
+      'Vitals: the save carries the answers the record gained (the allergy "Yes", the Other tick) and what was answered — not readings the data layer makes anyway');
+    // On a record already in today's form the editor still sends only what
+    // changed, and an unchanged save is still the review with the patient.
+    const todayMh = V2({ allergy_status: 'yes', allergies: ['penicillin'], medications: [{ key: 'warfarin', name: 'Warfarin (Coumadin)', dose: '', reason: '' }] });
+    const todayStart = IS.medicalHistorySection(todayMh, { staff: true }).initial();
+    log(JSON.stringify(PH.medicalPatch(todayMh, todayStart, todayStart)) === '{}'
+      && JSON.stringify(PH.medicalPatch(todayMh, todayStart, { ...todayStart, tobacco: 'yes' })) === '{"tobacco":"yes"}',
+      'Vitals: on a record in today\'s form, Save sends only the answer changed — and an untouched Save is the review');
     const emtEo = await viewC('emt.js', 'renderEmt', { id: emtOld.id });
     log(/Earlier EMT confirmations: Pregnant: No · Diabetic: Yes/.test(emtEo.textContent),
       'Vitals: an older visit\'s EMT confirmations are shown with its history');
@@ -5202,6 +5310,11 @@ async function main() {
     btnIn(confirmLock, /^Lock record$/).click(); await settle();
     log(db.getPatient(lkP.id).treatment.locked && db.getPatient(lkP.id).lock.locked_by_name === 'Administrator',
       'Management: Lock re-locks the amended record, as the administrator');
+    const mg2 = await viewC('management.js', 'renderManagement');
+    const mgRow2 = (last) => $all('tr', mg2).find((r) => new RegExp(last + ', ').test(r.textContent));
+    log(!!mgRow2('Walkout') && !btnIn(mgRow2('Walkout'), /Lock record/) && !!mgRow2('Unsigned') && !btnIn(mgRow2('Unsigned'), /Lock record/)
+      && !!mgRow2('Signedunlocked') && !!btnIn(mgRow2('Signedunlocked'), /^Lock record$/),
+      'Management: a walk-out with no treatment and an unsigned record are not offered a Lock that would be refused; a signed, finished one is');
     closeOverlays();
 
     currentUser = signInAdmin();

@@ -2,7 +2,7 @@ import { el, clear, toast, modal } from '../dom.js';
 import { statusLabel } from '../../i18n/dentalLists.js';
 import { icon } from '../icons.js';
 import { referralLabel, raceLabel } from '../i18n.js';
-import { medicalDisplay, dentalDisplay, firstMissingMedical } from '../medicalHistory.js';
+import { medicalDisplay, dentalDisplay, firstMissingMedical, normalizeMedical } from '../medicalHistory.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities } from './intakeSections.js';
@@ -451,6 +451,48 @@ export function sectionPatch(before = {}, after = {}) {
   });
   return out;
 }
+// A patch merged into a stored blob the way the data layer merges it
+// (db.mergePatch): a key sent as null is removed, every other key replaced.
+function applyPatch(stored = {}, patch = {}) {
+  const out = { ...(stored || {}) };
+  Object.entries(patch || {}).forEach(([k, v]) => {
+    if (v === undefined) return;
+    if (v === null) delete out[k]; else out[k] = v;
+  });
+  return out;
+}
+
+/**
+ * The medical history's changes, such that what the data layer stores is what
+ * the form showed when it was saved.
+ *
+ * The data layer merges the changes into the STORED record and normalises it,
+ * while the form reads an older checklist record in today's terms: a listed
+ * allergy is a "Yes" to the allergy question, an allergy typed in without the
+ * "Other" tick is ticked as Other. Those readings are answers on the screen the
+ * patient is taken through, so the save carries them too. Sent as changes only,
+ * the stored record never gained them: the save was refused for a question the
+ * form showed answered ("Required: Do you have an allergy…" beside a "Yes"), and
+ * the one answer that did save, Unsure, wiped the allergies.
+ *
+ * Each key the merged-and-normalised result would still have different from the
+ * form is added, until none is; readings the data layer makes anyway (an empty
+ * dose, a derived condition list) are never sent. An unchanged save of a record
+ * that already stands complete stays empty — the review of it with the patient.
+ */
+export function medicalPatch(stored = {}, start = {}, out = {}) {
+  const patch = sectionPatch(start, out);
+  if (!Object.keys(patch).length && !firstMissingMedical(stored)) return patch;
+  const keys = new Set([...Object.keys(stored || {}), ...Object.keys(out || {})]);
+  for (let pass = 0; pass <= keys.size; pass++) {
+    const gap = sectionPatch(normalizeMedical(applyPatch(stored, patch)), out);
+    const add = Object.keys(gap).filter((k) => !Object.prototype.hasOwnProperty.call(patch, k));
+    if (!add.length) break;
+    add.forEach((k) => { patch[k] = gap[k]; });
+  }
+  return patch;
+}
+
 const PERSON_KEYS = ['first_name', 'last_name', 'dob', 'gender', 'phone', 'email'];
 const IDENTITY_KEYS = ['first_name', 'last_name', 'dob', 'gender'];
 function personOf(p) {
@@ -510,6 +552,10 @@ export function openSectionEditor(p, section, { onSaved } = {}) {
       if (lockIdentity) IDENTITY_KEYS.forEach((k) => { delete patch[k]; });
       const dm = sectionPatch(start.demographics || {}, out.demographics || {});
       if (Object.keys(dm).length) patch.demographics = dm;
+    } else if (section === 'medical_history') {
+      // The history's answers are saved as the form shows them, including an
+      // older record's answers read in today's terms (medicalPatch).
+      patch = medicalPatch(before, start, out);
     } else {
       patch = sectionPatch(start, out);
     }
