@@ -390,6 +390,10 @@ function migrate() {
     }
     setSetting('cloud_severed_v1', 'done');
   }
+
+  // Last, once every column exists: a release that syncs more columns must not
+  // make every row look freshly edited (see rebaselineSyncColumns).
+  rebaselineSyncColumns();
 }
 
 
@@ -1709,17 +1713,26 @@ function importPatientFromPortable(actor, portable) {
     // locked, a completed-but-unlocked record stays completed (v1.2.1 "Mark visit
     // complete"), and only a genuinely in-progress record imports as such —
     // otherwise USB checkout silently reverted completed visits to in_treatment.
-    // A patient parked in Treatment Waiting stays there, with the stamp of who
-    // parked them and when rather than whoever ran the import.
     const t = portable.treatment;
     const waiting = portable.status === 'treatment_waiting';
     const mode = t.locked ? 'lock' : (t.completed_at ? 'complete' : (waiting ? 'waiting' : false));
     saveTreatment(actor, pid, t, mode);
-    const ptr = portable.triage || {};
-    if (mode === 'waiting' && ptr.treatment_waiting_at) {
-      db.prepare('UPDATE triage SET treatment_waiting_at=?, treatment_waiting_by=NULL, treatment_waiting_by_name=? WHERE patient_id=?')
-        .run(ptr.treatment_waiting_at, portable.treatment_waiting_by_name || ptr.treatment_waiting_by_name || null, pid);
-    }
+  } else if (portable.status === 'treatment_waiting') {
+    // Parked for a chair with nothing charted yet — an admin can move a patient
+    // there from Management without a treatment row. Without this they arrived
+    // as 'checked_in', back at the front of the clinic.
+    markTreatmentWaiting(actor, pid);
+  }
+  // The Treatment Waiting stamp says who examined the patient and parked them,
+  // and when. It is carried over whatever happened since — still waiting, taken
+  // into a chair, finished — because it is also what puts a patient in a chair
+  // in the In treatment list rather than back in Dental Triage's, and it is
+  // their stamp, not whoever ran the import. The id is local to the laptop the
+  // file came from, so only the name travels.
+  const ptr = portable.triage || {};
+  if (ptr.treatment_waiting_at) {
+    db.prepare('UPDATE triage SET treatment_waiting_at=?, treatment_waiting_by=NULL, treatment_waiting_by_name=? WHERE patient_id=?')
+      .run(ptr.treatment_waiting_at, portable.treatment_waiting_by_name || ptr.treatment_waiting_by_name || null, pid);
   }
   (portable.xrays || []).forEach((x) => { if (x.image_png) db.prepare('INSERT INTO xrays (patient_id, station, image_png, note, tooth, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run(pid, x.station || null, x.image_png, x.note || null, x.tooth || null, x.created_at || now(), now()); });
   recountXrays(pid);
@@ -2207,6 +2220,8 @@ function saveTreatment(actor, patientId, data, finalize) {
   //   falsy      -> save progress (status in_treatment), record stays editable
   //   'waiting'  -> v0.0.15: save progress AND park the patient in Treatment
   //                 Waiting — examined at Dental Triage, waiting for a chair
+  //   'cleaning' -> v0.0.15: the hygienist's progress save — a patient waiting
+  //                 for a treatment chair keeps their place (see below)
   //   'complete' -> mark the visit done (status completed) but NOT locked/editable
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
   const lock = finalize === true || finalize === 'lock';
@@ -2266,13 +2281,16 @@ function saveTreatment(actor, patientId, data, finalize) {
   } else if (waiting) {
     markTreatmentWaiting(actor, patientId);
   } else {
-    // A hygienist cleaning a patient who is waiting for a treatment chair (a
-    // 'both' patient) has not taken them into treatment — the patient keeps
-    // their place in the dentist's Treatment Waiting queue. Any other progress
-    // save, including the treating dentist opening a waiting patient, is the
-    // move into treatment.
+    // A cleaning saved at the hygienist's station for a patient who is waiting
+    // for a treatment chair (a 'both' patient) has not taken them into
+    // treatment — they keep their place in Dental Triage's Treatment Waiting
+    // queue. The station says so ('cleaning'); it is not read from who is
+    // signed in, because an administrator works the hygienist's screen too, and
+    // their cleaning save used to move the patient into a chair. Any other
+    // progress save, including the treating dentist opening a waiting patient,
+    // is the move into treatment.
     const cur = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
-    const keepWaiting = !!(cur && cur.status === 'treatment_waiting' && actor && actor.role === 'hygienist');
+    const keepWaiting = !!(cur && cur.status === 'treatment_waiting' && finalize === 'cleaning');
     if (!keepWaiting) {
       db.prepare('UPDATE patients SET status = ?, updated_at = ? WHERE id = ?').run('in_treatment', now(), patientId);
       db.prepare("UPDATE triage SET status = 'in_treatment' WHERE patient_id = ? AND status != 'completed'").run(patientId);
@@ -3083,6 +3101,25 @@ const SYNC_COLS = {
   inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
   inv_move: ['delta', 'reason', 'note', 'created_by_name', 'created_at'],
 };
+// The lists every station synced with before v0.0.15, frozen. They are what a
+// database from before rebaselineSyncColumns existed was hashed under, so they
+// are how its rows are recognised as in step. Never edit these: add to
+// SYNC_COLS above, and the stored copy of the lists takes care of the rest.
+const SYNC_COLS_BEFORE_V0_0_15 = {
+  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at'],
+  user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
+  patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
+  triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name'],
+  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name'],
+  consent: ['type', 'version', 'language', 'signer_name', 'relationship', 'signature_png', 'signed_at', 'tooth_numbers', 'amended_by', 'amended_at', 'deemed_consent', 'signature_method'],
+  xray: ['station', 'image_png', 'note', 'created_at', 'tooth'],
+  report: ['summary', 'patients_seen', 'finished_at', 'finished_by_name', 'created_at'],
+  survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
+  inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
+  inv_move: ['delta', 'reason', 'note', 'created_by_name', 'created_at'],
+};
+Object.values(SYNC_COLS_BEFORE_V0_0_15).forEach(Object.freeze);
+Object.freeze(SYNC_COLS_BEFORE_V0_0_15);
 // Denormalized name field -> the local user-id column it is resolved from.
 const NAME_SOURCE = {
   dismissed_by_name: 'dismissed_by', triaged_by_name: 'triaged_by',
@@ -3155,10 +3192,20 @@ function sig(obj) { return crypto.createHash('sha256').update(JSON.stringify(obj
 function uidOf(table, id) { if (!id) return null; const r = db.prepare(`SELECT uid FROM ${table} WHERE id = ?`).get(id); return r ? r.uid : null; }
 function localIdByUid(table, uid) { if (!uid) return null; const r = db.prepare(`SELECT id FROM ${table} WHERE uid = ?`).get(uid); return r ? r.id : null; }
 
+// A stamp that sorts immediately after `stamp` and before any later one: the
+// same instant, then this device. It replaces the copy that carries `stamp`
+// under last-write-wins, and loses to any edit made after it anywhere else.
+function justAbove(stamp) {
+  return String(stamp) + '~' + (getSetting('cloud_device_id') || '0');
+}
+
 // Build the ordered, stable payload object for a row (denormalizing names).
 function buildData(entity, row) {
+  return buildDataCols(SYNC_COLS[entity], row);
+}
+function buildDataCols(cols, row) {
   const out = {};
-  for (const col of SYNC_COLS[entity]) {
+  for (const col of cols) {
     if (NAME_SOURCE[col]) {
       // Keep an already-stored name verbatim (including an empty string synced
       // from a peer) so its content hash is stable and it isn't re-pushed every
@@ -3169,6 +3216,54 @@ function buildData(entity, row) {
     }
   }
   return out;
+}
+
+/* ---------------- A newly synced column is not a new edit ----------------
+   Whether a row needs sending is decided by a hash of its synced columns, so
+   adding a column to SYNC_COLS changes the hash of EVERY row, and the next sync
+   used to re-stamp each one with the current time and push it. Sync pushes
+   before it pulls: a laptop whose copy was behind (switched off just before a
+   colleague's last edit) pushed its whole stale table with fresh stamps, and
+   those won last-write-wins over the newer edits in the cloud and then on every
+   laptop — fillings, notes, the completion, the lock.
+
+   So when the lists change, a row that was in step under the OLD lists is
+   re-hashed under the new ones and keeps its stamp. A row with an edit still
+   waiting to go keeps its stamp too, which is when that edit was made. Only a
+   row whose newly synced columns hold something the cloud has never had — the
+   dentist's Restorative and Services entries, which were never synced before
+   v0.0.15 — is sent again, and with a stamp just above its own: enough to
+   replace the copy the cloud holds, never enough to beat a later edit made
+   elsewhere. The lists are stored once handled, so the next release that syncs
+   another column is dealt with the same way. */
+function rebaselineSyncColumns() {
+  const current = JSON.stringify(SYNC_COLS);
+  const seen = getSetting('sync_cols_seen');
+  if (seen === current) return;
+  const prior = safeJson(seen, null) || SYNC_COLS_BEFORE_V0_0_15;
+  db.transaction(() => {
+    for (const [entity, cols] of Object.entries(SYNC_COLS)) {
+      const oldCols = prior[entity];
+      // A brand-new entity has nothing in the cloud to be in step with.
+      if (!Array.isArray(oldCols) || JSON.stringify(oldCols) === JSON.stringify(cols)) continue;
+      const table = ENTITY_TABLE[entity];
+      const added = cols.filter((c) => !oldCols.includes(c));
+      const upd = db.prepare(`UPDATE ${table} SET content_rev = ?, synced_rev = ?, updated_at = ? WHERE id = ?`);
+      // content_rev IS NULL: never collected, so first sync stamps it fairly.
+      for (const row of db.prepare(`SELECT * FROM ${table} WHERE content_rev IS NOT NULL`).all()) {
+        const oldSig = sig(buildDataCols(oldCols, row));
+        // Edited since it was last stamped: an ordinary local change, which the
+        // next collect stamps now — exactly as it would have without an upgrade.
+        if (row.content_rev !== oldSig) continue;
+        const data = buildData(entity, row);
+        const newSig = sig(data);
+        if (row.synced_rev !== oldSig) upd.run(newSig, row.synced_rev, row.updated_at, row.id);
+        else if (added.some((c) => !isEmptyJson(data[c]))) upd.run(newSig, row.synced_rev, row.updated_at ? justAbove(row.updated_at) : null, row.id);
+        else upd.run(newSig, newSig, row.updated_at, row.id);
+      }
+    }
+    setSetting('sync_cols_seen', current);
+  })();
 }
 
 // Give every syncable row a uid (once). Cheap, idempotent.
@@ -3380,10 +3475,9 @@ function applyRemoteRows(remoteRows) {
       }
     }
     // Only the keys this row actually carries are written (see writableCols).
-    // rowSig above still hashes the row as sent, so when this laptop keeps a
-    // value the sender did not have, its copy differs from the hash, counts as
-    // changed, and is pushed back — which is what puts the kept value back in
-    // the cloud copy the older laptop just overwrote.
+    // When this laptop keeps a value the sender did not have, its copy is no
+    // longer the row that arrived, and is pushed back (below) — which is what
+    // puts the kept value back in the cloud copy the older laptop overwrote.
     const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
     const cols = writableCols(table, SYNC_COLS[entity], env.data, local);
     const vals = cols.map((c) => data[c]);
@@ -3405,6 +3499,18 @@ function applyRemoteRows(remoteRows) {
       const allCols = [...cols, ...extraCols];
       const ph = allCols.map(() => '?').join(', ');
       db.prepare(`INSERT INTO ${table} (${allCols.join(', ')}) VALUES (${ph})`).run(...vals, ...extraVals);
+    }
+    // The merged copy differs from what arrived — a column the sender's version
+    // does not have, a real Restorative kept against an empty one, a name only
+    // this laptop can resolve — so it has to go back up. It is stamped JUST
+    // above the row it merged, never with the current time: a current stamp
+    // outranks every edit made elsewhere since the sender's, so a colleague's
+    // later, genuine edit was refused here on the next pull and lost in the
+    // cloud, and the older laptop's content won everywhere.
+    const merged = db.prepare(`SELECT * FROM ${table} WHERE uid = ?`).get(env.uid);
+    const mergedSig = merged ? sig(buildData(entity, merged)) : rowSig;
+    if (mergedSig !== rowSig && env.updated_at) {
+      db.prepare(`UPDATE ${table} SET updated_at = ?, content_rev = ? WHERE id = ?`).run(justAbove(env.updated_at), mergedSig, merged.id);
     }
     applied++;
   };
@@ -3544,4 +3650,6 @@ module.exports = {
   // v1.1.0 cloud sync
   collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
   getSyncPending, setSyncPending, resetSyncCursor,
+  // Read-only; lets the harness rebuild a database exactly as v0.0.14 left it.
+  SYNC_COLS_BEFORE_V0_0_15,
 };

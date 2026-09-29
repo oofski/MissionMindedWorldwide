@@ -70,8 +70,11 @@ export function formatSurfaces(value) {
 
 // PROVISIONAL. MMW's own list has been promised and not yet received; this is
 // the standard set of infiltrations and blocks so the field can be a dropdown
-// now. When the clinic's list arrives, retire rather than delete: a stored key
-// that disappears from here prints as its raw code on every old record.
+// now. When the clinic's list arrives, retire rather than delete: mark a site
+// the clinic drops `retired: true` (here and in the mirror). It is then no
+// longer offered for a new administration, but a row that records it still
+// shows it by name, saves it back, and prints it — a key deleted from here
+// would print as its raw code on every old record.
 export const ANES_SITES = [
   { key: 'buccal_infiltration', en: 'Buccal infiltration' },
   { key: 'lingual_palatal_infiltration', en: 'Lingual / palatal infiltration' },
@@ -90,26 +93,15 @@ export const ANES_SITES = [
   { key: 'other', en: 'Other' },
 ];
 
-/**
- * Display text for one administration's site. The location used to be typed
- * free text ("buccal", "#14 lingual"); a value that is not a key is exactly
- * that, and is shown as written.
- */
-export function anesSiteText(a) {
-  const loc = a && a.location;
-  if (!loc) return '';
-  if (loc === 'other') return (a.location_other && String(a.location_other).trim()) || 'Other';
-  const hit = ANES_SITES.find((s) => s.key === loc);
-  return hit ? hit.en : String(loc);
-}
-
 /* ---------------- Referral out ---------------- */
 
 // Where the dentist sends a patient for care this clinic cannot give. Stored in
 // treatments.referral_out — deliberately NOT "referral", which has always meant
 // "how did you hear about us" (demographics.referral). PROVISIONAL list until
-// Dr. Trinh confirms it. Spanish is kept because the patient's own after-care
-// sheet prints where they were referred.
+// Dr. Trinh confirms it — and retired, never deleted, when it changes, exactly
+// as ANES_SITES above: `retired: true` keeps the label for the records that
+// use it and offers it only on those. Spanish is kept because the patient's
+// own after-care sheet prints where they were referred.
 export const DENTAL_REFERRAL_TO = [
   { key: 'oral_surgeon', en: 'Oral surgeon', es: 'Cirujano oral' },
   { key: 'endodontist', en: 'Endodontist (root canal)', es: 'Endodoncista (tratamiento de conducto)' },
@@ -130,26 +122,14 @@ export const REFERRAL_URGENCY = [
   { key: 'urgent', en: 'Urgent', es: 'Urgente' },
 ];
 
-const pick = (list, key, lang) => {
-  const hit = list.find((x) => x.key === key);
-  return hit ? (hit[lang] || hit.en) : String(key || '');
-};
-export const dentalReferralLabel = (key, lang = 'en') => pick(DENTAL_REFERRAL_TO, key, lang);
-export const referralUrgencyLabel = (key, lang = 'en') => pick(REFERRAL_URGENCY, key, lang);
+// How a referral or an injection site READS is decided in one place, the
+// CommonJS copy in src/main/dentalLabels.js that the printed record and the
+// spreadsheet use; no screen prints them yet, so no second copy lives here to
+// drift from it.
 
 /** True when a stored referral_out actually sends the patient somewhere. */
 export function hasReferralOut(r) {
   return !!(r && ((Array.isArray(r.to) && r.to.length) || (r.to_other && String(r.to_other).trim())));
-}
-
-/** "Oral surgeon, Endodontist (root canal)" — with any typed "Other" in place of the word. */
-export function referralDestinations(r, lang = 'en') {
-  if (!r) return '';
-  const to = (Array.isArray(r.to) ? r.to : []).filter((k) => k !== 'other').map((k) => dentalReferralLabel(k, lang));
-  const other = r.to_other && String(r.to_other).trim();
-  if (other) to.push(other);
-  else if ((r.to || []).includes('other')) to.push(dentalReferralLabel('other', lang));
-  return to.join(', ');
 }
 
 /* ---------------- Patient status ---------------- */

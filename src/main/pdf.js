@@ -135,11 +135,18 @@ const EXT_LABELS = {
   simple: 'Simple', impact_soft: 'Impact soft tissue', impact_bony: 'Impact part bony',
   surgical: 'Surgical', root_tip: 'Root tip',
 };
+// 'fluoride' and 'scaling' are keys an early build stored; they still print by
+// name on the records that carry them.
 const CLEAN_LABELS = {
   adult_prophy: 'Adult prophy', adult_fluoride: 'Adult fluoride', fluoride: 'Fluoride',
   gross_debridement: 'Gross debridement', quad_deep_scaling: 'Quadrant deep scaling',
+  scaling: 'Deep scaling',
   sealant: 'Sealant', ohi: 'Oral hygiene instruction',
 };
+// An extraction's type(s): the list of keys stored since the multi-select, or
+// the single key an early build stored as `type` — both printed by name.
+const extTypesText = (e) => (Array.isArray(e.types) ? e.types : (e.type ? [e.type] : []))
+  .map((k) => EXT_LABELS[k] || k).join(', ');
 // Dental Triage lists and the printing rules the spreadsheet shares: surfaces,
 // anaesthetic agent and site, restorative, referral, status. The agent names
 // mirror the clinic list (retired agents included) and are pinned to it by the
@@ -188,10 +195,13 @@ function referralOutOf(t) {
   if (typeof r === 'object') return r;
   try { return JSON.parse(r); } catch { return null; }
 }
+// Printed only when the patient is sent somewhere — the rule the report count,
+// the records list and the spreadsheet's "Referred to" all use — so the record
+// never shows a Referral the clinic's totals say was not made.
 function referralHtml(t) {
   const r = referralOutOf(t);
-  if (!r || !(DL.hasReferralOut(r) || r.reason || r.tooth || r.urgency)) return '';
-  const bits = [`<b>${esc(DL.referralDestinations(r) || 'Destination not recorded')}</b>`];
+  if (!DL.hasReferralOut(r)) return '';
+  const bits = [`<b>${esc(DL.referralDestinations(r))}</b>`];
   if (r.urgency) bits.push('Urgency: ' + esc(DL.referralUrgencyLabel(r.urgency)));
   if (r.tooth) bits.push('Tooth #' + esc(r.tooth));
   return `<div class="box"><span class="label">Referred to: </span>${bits.join(' · ')}${r.reason ? '<br>' + esc(r.reason) : ''}</div>`;
@@ -232,7 +242,7 @@ function progressNoteBody(p) {
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = Array.isArray(e.types) ? e.types.map((k) => EXT_LABELS[k] || k).join(', ') : (e.type || '');
+    const types = extTypesText(e);
     return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
   }).join('') || '<span class="muted">None</span>';
   const anesthetic = anesChips(t.anesthetic).join('') || '<span class="muted">None</span>';
@@ -499,7 +509,7 @@ function summaryBody(p) {
 
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = Array.isArray(e.types) ? e.types.map((k) => EXT_LABELS[k] || k).join(', ') : (e.type || '');
+    const types = extTypesText(e);
     return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
   }).join('') || '<span class="muted">None</span>';
 

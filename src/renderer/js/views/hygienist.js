@@ -147,6 +147,9 @@ export function renderHygienist(ctx, params = {}) {
 
     // v1.2.1: mode is false (save), 'complete' (mark the cleaning done and send
     // the patient onward — stays editable), or 'lock' (optional read-only finalize).
+    // A plain save goes to the data layer as 'cleaning': this station saying
+    // what it is doing, so a patient waiting for a treatment chair keeps their
+    // place whoever is signed in here (an administrator can work this screen).
     async function save(mode) {
       const payload = buildPayload();
       // Same rule as the dentist: a cleaning record has to name the hygienist
@@ -162,7 +165,7 @@ export function renderHygienist(ctx, params = {}) {
         if (!ok) return;
       }
       try {
-        await api.saveTreatment(id, payload, mode);
+        await api.saveTreatment(id, payload, mode || 'cleaning');
         toast(mode === 'lock' ? 'Cleaning signed off and locked' : mode === 'complete' ? 'Cleaning complete — sent to check-out' : 'Cleaning saved', 'success');
         if (mode) queue(); else detail(id);
       } catch (e) { toast(e.message, 'error'); }

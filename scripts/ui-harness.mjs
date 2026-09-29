@@ -2822,7 +2822,7 @@ async function main() {
     log(bothA.status === 'treatment_waiting', 'dental triage: and the patient keeps their place in the queue for a chair');
     // The data layer itself, for any writer that leaves the keys out (an older
     // portable file, an older hygienist build).
-    db.saveTreatment({ id: null, role: 'hygienist', full_name: 'Hy Gienist' }, both.id, { fillings: bothA.treatment.fillings, cleaning: { ohi: true } });
+    db.saveTreatment({ id: null, role: 'hygienist', full_name: 'Hy Gienist' }, both.id, { fillings: bothA.treatment.fillings, cleaning: { ohi: true } }, 'cleaning');
     const bothB = db.getPatient(both.id);
     log((bothB.treatment.restorative.recement || {}).on === true && bothB.treatment.services.irm === '1' && ((bothB.treatment.referral_out || {}).to || [])[0] === 'endodontist',
       'dental triage: a treatment save that leaves Restorative, Services or Referral out keeps them as stored');
@@ -3031,6 +3031,17 @@ async function main() {
     const rePush = db.collectSyncRows(5000).rows.find((r) => r.uid === legTxUid);
     log(!!rePush && /denture/.test(rePush.data.restorative) && rePush.updated_at > oldStamp && rePush.data.clinical_notes === oldTx.clinical_notes,
       'sync safety: the merged row is sent back, so the cloud copy the older laptop overwrote gets them back');
+    // Stamped just above the older laptop's edit, not "now": a current stamp
+    // outranked every edit a colleague made after the older laptop's, so the
+    // colleague's genuine later edit was refused here and lost in the cloud.
+    const peerLater = new Date(Date.now() - 2500).toISOString() + '@peer';
+    log(!!rePush && rePush.updated_at.startsWith(oldStamp + '~') && rePush.updated_at < peerLater,
+      'sync safety: the merged row is stamped just above the older laptop’s edit, never with the time it was merged');
+    const resPeer = db.applyRemoteRows([{ entity: 'treatment', uid: legTxUid, patient_uid: legPUid, event_uid: null, deleted: 0, updated_at: peerLater,
+      data: { ...rePush.data, clinical_notes: 'A colleague’s edit, made after the older laptop’s' } }]);
+    log(resPeer.applied === 1 && db.getPatient(leg.id).treatment.clinical_notes === 'A colleague’s edit, made after the older laptop’s'
+      && (db.getPatient(leg.id).treatment.restorative.denture || {}).on === true,
+      'sync safety: so a colleague’s later edit still wins over the merged row, in a mixed fleet as anywhere');
     const legTriRow = collected.find((r) => r.uid === legTriUid);
     const oldTri = { ...legTriRow.data };
     delete oldTri.xrays_taken; delete oldTri.treatment_waiting_at; delete oldTri.treatment_waiting_by_name;
@@ -3089,6 +3100,194 @@ async function main() {
     const restB = restBack ? db.getPatient(restBack.id) : null;
     log(!restoreErr && !!restB && JSON.stringify(restB.treatment.restorative) === '{}' && restB.treatment.referral_out === null && restB.triage.xrays_taken == null,
       'sync safety: and an older backup restores into an empty laptop, taking the defaults' + (restoreErr ? ': ' + restoreErr : ''));
+
+    /* ---- after review: the seams an adversarial pass found ---- */
+    // A USB record of a patient an admin parked for a chair without charting
+    // anything (no treatment row), and of one taken from the wait into a chair.
+    const PARKED_AT = '2026-01-02T03:04:05.000Z';
+    const pw = mkB('Wanda', 'Parkedonly');
+    db.adminMovePatient(currentUser, pw.id, 'treatment_waiting');
+    rawRun("UPDATE triage SET treatment_waiting_at = ?, treatment_waiting_by_name = 'Dr Parker' WHERE patient_id = ?", PARKED_AT, pw.id);
+    const pwFile = { ...db.getPatient(pw.id), xrays: [] };
+    db.deletePatient(currentUser, pw.id);
+    const pwBack = db.importPatientFromPortable(currentUser, pwFile);
+    log(!pwFile.treatment && pwBack.status === 'treatment_waiting' && pwBack.triage.status === 'treatment_waiting'
+      && pwBack.triage.treatment_waiting_at === PARKED_AT && pwBack.treatment_waiting_by_name === 'Dr Parker',
+      'dental triage: a USB record of a patient parked for a chair with nothing charted imports still waiting, with who parked them and when');
+    const pc = mkB('Chet', 'Chairtaken');
+    db.saveTreatment(currentUser, pc.id, { fillings: [] }, 'waiting');
+    rawRun("UPDATE triage SET treatment_waiting_at = ?, treatment_waiting_by_name = 'Dr Parker' WHERE patient_id = ?", PARKED_AT, pc.id);
+    db.saveTreatment(currentUser, pc.id, { fillings: [{ tooth: '5', surfaces: ['O'] }] });
+    const pcFile = { ...db.getPatient(pc.id), xrays: [] };
+    db.deletePatient(currentUser, pc.id);
+    const pcBack = db.importPatientFromPortable(currentUser, pcFile);
+    const queueR = await view('provider.js', 'renderProvider');
+    log(pcBack.status === 'in_treatment' && pcBack.triage.treatment_waiting_at === PARKED_AT && pcBack.treatment_waiting_by_name === 'Dr Parker'
+      && /Chairtaken, Chet/.test(cardTitled(queueR, 'In treatment').textContent) && !/Chairtaken/.test(cardTitled(queueR, 'Dental Triage').textContent),
+      'dental triage: a USB record of a patient taken from the wait into a chair imports in treatment — not back in Dental Triage’s list');
+
+    // Which station saved, not who is signed in, decides whether a cleaning
+    // takes a waiting patient out of the queue for a chair.
+    const bw = mkB('Bea', 'Bothwait', 'both');
+    db.saveTreatment(currentUser, bw.id, { fillings: [] }, 'waiting');
+    const hygAdm = await view('hygienist.js', 'renderHygienist', { id: bw.id });
+    Array.from(hygAdm.querySelectorAll('.chip-btn')).find((b) => /Adult prophy/.test(b.textContent)).click();
+    btnIn(hygAdm, /^Save cleaning$/).click();
+    await settle();
+    const bwA = db.getPatient(bw.id);
+    log(currentUser.role === 'admin' && bwA.status === 'treatment_waiting' && bwA.treatment.cleaning.adult_prophy === true,
+      'dental triage: an administrator saving a cleaning on the hygienist’s screen leaves a patient waiting for a chair in the queue');
+    db.saveTreatment(currentUser, bw.id, { ...bwA.treatment });
+    log(db.getPatient(bw.id).status === 'in_treatment', 'dental triage: while a Dental Triage save by the same administrator takes them into treatment');
+
+    // The dashboard's counts and the board's columns.
+    const dashR = await view('dashboard.js', 'renderDashboard');
+    const statsR = db.dashboardStats();
+    const tilesR = Array.from(dashR.querySelectorAll('.stat-card'));
+    log(!tilesR.some((c) => /In treatment/.test(c.textContent))
+      && tilesR.some((c) => /With a provider/.test(c.textContent) && c.querySelector('.stat-value').textContent === String(statsR.in_treatment))
+      && Array.from(dashR.querySelectorAll('.step-name')).some((n) => n.textContent === 'With a provider'),
+      'dental triage: the count of everyone in treatment is called "With a provider", so it never contradicts the board’s narrower In treatment column');
+    const inTxR = Array.from(dashR.querySelectorAll('.crm-col')).find((c) => c.querySelector('.crm-col-label').textContent === 'In treatment');
+    const cardR = inTxR && Array.from(inTxR.querySelectorAll('.crm-card')).find((c) => /Chairtaken/.test(c.textContent));
+    log(!!cardR && /since triage$/.test(cardR.querySelector('.crm-chip--stage').textContent),
+      'dental triage: the In treatment column times a patient from when Dental Triage parked them, and says so');
+
+    // A referral is somewhere to send the patient.
+    const rn = mkB('Ren', 'Nodest');
+    const provRn = await view('provider.js', 'renderProvider', { id: rn.id });
+    const refRn = cardTitled(provRn, 'Referral');
+    setInput(refRn.querySelector('select'), 'urgent');
+    btnIn(provRn, /^Save progress$/).click();
+    await settle();
+    log(toastTexts().some((m) => /Required: Refer to/.test(m)) && !db.getPatient(rn.id).treatment,
+      'dental triage: an urgency with nowhere to send the patient is refused, naming "Refer to", and nothing is saved');
+    Array.from(refRn.querySelectorAll('.chip-select')).find((b) => b.textContent === 'Oral surgeon').click();
+    btnIn(provRn, /^Save progress$/).click();
+    await settle();
+    log((((db.getPatient(rn.id).treatment || {}).referral_out) || {}).urgency === 'urgent', 'dental triage: and is saved once a destination is ticked');
+    const halfRef = { first_name: 'A', last_name: 'B', medical_history: {}, triage: {}, consents: [], treatment: { referral_out: { to: [], to_other: '', urgency: 'urgent', tooth: '', reason: 'x' } } };
+    log(!/Referred to|Referral/.test(plain(pdfB.buildHtml(halfRef, 'summary'))) && !/Referred to/.test(plain(pdfB.buildHtml(halfRef, 'progress'))),
+      'dental triage: the printed record shows a Referral only when the patient is sent somewhere, the rule every count uses');
+    const refCases = [null, {}, { to: [] }, { to: ['other'] }, { to: [], to_other: ' ' }, { to: [], to_other: 'Dr X' }, { to: ['physician'], urgency: 'soon' }, { urgency: 'urgent', reason: 'x' }];
+    log(refCases.every((r) => DLr.hasReferralOut(r) === DLm.hasReferralOut(r)) && refCases.filter((r) => DLm.hasReferralOut(r)).length === 3,
+      'dental triage: the records screen and the printed record agree on what counts as a referral');
+    log(!('referralDestinations' in DLr) && !('anesSiteText' in DLr) && typeof DLm.referralDestinations === 'function' && typeof DLm.anesSiteText === 'function',
+      'dental triage: how a referral and a site read is decided once, in the copy the printed record uses');
+
+    // The provisional lists retire entries rather than lose them.
+    const siteR = DLr.ANES_SITES.find((x) => x.key === 'psa');
+    const destR = DLr.DENTAL_REFERRAL_TO.find((x) => x.key === 'orthodontist');
+    siteR.retired = true; destR.retired = true;
+    try {
+      const rt = mkB('Rita', 'Retired');
+      db.saveTreatment(currentUser, rt.id, { anesthetic: [{ agent: 'articaine', carps: '1', location: 'psa' }], referral_out: { to: ['orthodontist', 'teledentistry'], urgency: 'routine' } });
+      const provRt = await view('provider.js', 'renderProvider', { id: rt.id });
+      const siteSel = provRt.querySelector('.anes-admin-row').querySelectorAll('select')[1];
+      log(siteSel.value === 'psa' && selectedText(siteSel) === siteR.en, 'dental triage: a retired injection site is still shown by name on the row that records it');
+      btnIn(provRt, /Add anesthetic/).click();
+      await settle(2);
+      const freshSite = Array.from(provRt.querySelectorAll('.anes-admin-row')).pop().querySelectorAll('select')[1];
+      log(!Array.from(freshSite.options).some((o) => o.value === 'psa'), 'dental triage: and is not offered for a new administration');
+      const chipsRt = Array.from(cardTitled(provRt, 'Referral').querySelectorAll('.chip-select'));
+      const onOf = (label) => { const b = chipsRt.find((x) => x.textContent === label); return b ? b.classList.contains('chip-select--on') : null; };
+      log(onOf('Orthodontist') === true && onOf('(recorded) teledentistry') === true && chipsRt[chipsRt.length - 1].textContent === 'Other',
+        'dental triage: a retired or unknown referral destination on a record is shown ticked, where the dentist can see it and untick it');
+      btnIn(provRt, /^Save progress$/).click();
+      await settle();
+      const rtP = db.getPatient(rt.id);
+      log(rtP.treatment.anesthetic[0].location === 'psa' && JSON.stringify(rtP.treatment.referral_out.to) === JSON.stringify(['orthodontist', 'teledentistry']),
+        'dental triage: a re-save keeps a retired site and destination as recorded');
+      log(/Posterior superior alveolar block \(PSA\)/.test(plain(pdfB.buildHtml(rtP, 'progress'))) && /Orthodontist/.test(plain(pdfB.buildHtml(rtP, 'summary'))),
+        'dental triage: and they still print by name');
+      const provFresh = await view('provider.js', 'renderProvider', { id: mkB('Fay', 'Fresh').id });
+      const freshChips = Array.from(cardTitled(provFresh, 'Referral').querySelectorAll('.chip-select')).map((b) => b.textContent);
+      log(!freshChips.includes('Orthodontist') && freshChips.includes('Oral surgeon'), 'dental triage: a retired destination is not offered on a new record');
+    } finally { delete siteR.retired; delete destR.retired; }
+
+    // Keys an early build stored for procedures print by name.
+    const earlyKeys = { first_name: 'A', last_name: 'B', medical_history: {}, triage: {}, consents: [], treatment: { cleaning: { scaling: true }, extractions: [{ tooth: '1', type: 'simple' }] } };
+    log(['progress', 'summary', 'full'].every((f) => { const h = plain(pdfB.buildHtml(earlyKeys, f)); return /Deep scaling/.test(h) && /#1 · Simple/.test(h) && !/· simple|Cleaning scaling/.test(h); }),
+      'dental triage: an early record’s "scaling" cleaning and single extraction type print by name, not as codes');
+
+    // Upgrading a laptop that has synced: separate process, because it needs a
+    // database hashed the way v0.0.14 hashed it, then a real restart.
+    const { execFileSync: execB } = await import('node:child_process');
+    const { fileURLToPath: toPathB } = await import('node:url');
+    const upgradeProbe = `
+      const os=require('os'),fs=require('fs'),path=require('path'),crypto=require('crypto');
+      const B=require('better-sqlite3');
+      const db=require(process.argv[2]);
+      const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mmwcols-'));
+      const file=db.init(dir);
+      const out={};
+      const admin=db.login('admin','admin');
+      const ev=db.createEvent(admin,{name:'Upgraded clinic',location:'X'});
+      db.setActiveEvent(admin,ev.id);
+      const GEN=[{type:'general',signer_name:'X',signature_png:'data:image/png;base64,AAAA'}];
+      const mk=(first)=>{const p=db.createPatient(admin,{first_name:first,last_name:'Upgrade',dob:'1980-01-01',consents:GEN});
+        db.saveVitals(admin,p.id,{bp_systolic:'120',bp_diastolic:'80',heart_rate:'70'});db.routePatient(admin,p.id,'dentist');return p;};
+      const quiet=mk('Quiet'); db.saveTreatment(admin,quiet.id,{fillings:[{tooth:'3',surfaces:['2']}],clinical_notes:'as synced'});
+      const dent=mk('Denture'); db.saveTreatment(admin,dent.id,{restorative:{denture:{on:true,kind:'full',action:'new'}}});
+      const edit=mk('Edited'); db.saveTreatment(admin,edit.id,{clinical_notes:'edited offline, not sent yet'});
+      const first=db.collectSyncRows(5000); db.markSynced(first.mark);
+      /* As v0.0.14 left it: every triage and treatment row hashed under the
+         column lists it synced with, which knew none of the new columns. */
+      const V14=db.SYNC_COLS_BEFORE_V0_0_15;
+      const sha=(o)=>crypto.createHash('sha256').update(JSON.stringify(o)).digest('hex');
+      const pick=(data,cols)=>{const o={};for(const c of cols)o[c]=data[c]===undefined?null:data[c];return o;};
+      let raw=new B(file);
+      const uidOf=(t,pid)=>raw.prepare('SELECT uid FROM '+t+' WHERE patient_id=?').get(pid).uid;
+      const U={qTri:uidOf('triage',quiet.id),qTx:uidOf('treatments',quiet.id),dTri:uidOf('triage',dent.id),dTx:uidOf('treatments',dent.id),eTx:uidOf('treatments',edit.id)};
+      const before={};
+      for (const r of first.rows) {
+        if (r.entity!=='triage'&&r.entity!=='treatment') continue;
+        const s=sha(pick(r.data,V14[r.entity]));
+        raw.prepare('UPDATE '+(r.entity==='triage'?'triage':'treatments')+' SET synced_rev=?, content_rev=? WHERE uid=?').run(s,s,r.uid);
+        before[r.uid]=r.updated_at;
+      }
+      raw.prepare("UPDATE treatments SET synced_rev='an earlier revision' WHERE uid=?").run(U.eTx);
+      raw.prepare("DELETE FROM settings WHERE key='sync_cols_seen'").run();
+      raw.close(); db.close();
+      db.init(dir);   /* the upgraded launch */
+      const up=db.collectSyncRows(5000);
+      const sent=Object.fromEntries(up.rows.map((r)=>[r.uid,r]));
+      out.quiet=!sent[U.qTri]&&!sent[U.qTx]&&!sent[U.dTri];
+      out.only=up.rows.length===2;
+      out.dentBumped=!!sent[U.dTx]&&sent[U.dTx].updated_at.startsWith(before[U.dTx]+'~');
+      out.dentCarries=!!sent[U.dTx]&&/denture/.test(sent[U.dTx].data.restorative);
+      out.editKeeps=!!sent[U.eTx]&&sent[U.eTx].updated_at===before[U.eTx];
+      db.markSynced(up.mark);
+      out.cleanAfter=db.collectSyncRows(5000).rows.length===0;
+      db.close(); db.init(dir);
+      out.restartQuiet=db.collectSyncRows(5000).rows.length===0;
+      /* A later release syncing one more column: the lists stored at this
+         upgrade are what its rows are recognised by. */
+      raw=new B(file); raw.prepare('UPDATE treatments SET synced_rev=NULL').run(); raw.close();
+      const all=db.collectSyncRows(5000).rows.filter((r)=>r.entity==='treatment');
+      const fewer=Object.keys(all[0].data).filter((c)=>c!=='referral_out');
+      raw=new B(file);
+      for (const r of all) { const s=sha(pick(r.data,fewer)); raw.prepare('UPDATE treatments SET synced_rev=?, content_rev=? WHERE uid=?').run(s,s,r.uid); }
+      raw.prepare("UPDATE settings SET value=? WHERE key='sync_cols_seen'").run(JSON.stringify({treatment:fewer}));
+      raw.close(); db.close(); db.init(dir);
+      out.laterRelease=db.collectSyncRows(5000).rows.length===0;
+      db.close(); fs.rmSync(dir,{recursive:true,force:true});
+      process.stdout.write(JSON.stringify(out));
+    `;
+    const upgradeFile = path.join(toPathB(new URL('.', import.meta.url)), '.upgrade-probe.cjs');
+    let upR = {};
+    try {
+      fs.writeFileSync(upgradeFile, upgradeProbe);
+      upR = JSON.parse(execB(process.execPath, [upgradeFile, toPathB(new URL('../src/main/db.js', import.meta.url))], { encoding: 'utf8' }));
+    } catch (e) { upR = { error: String(e.message || e).slice(0, 300) }; }
+    finally { fs.rmSync(upgradeFile, { force: true }); }
+    log(upR.quiet && upR.only,
+      'sync safety: upgrading re-sends no triage or treatment row nobody edited, so a laptop that was behind cannot push its stale copy over newer edits' + (upR.error ? ': ' + upR.error : ''));
+    log(upR.dentBumped && upR.dentCarries,
+      'sync safety: a Restorative entry that never synced is sent once, stamped just above its own last edit, so it cannot outrank a later one');
+    log(upR.editKeeps, 'sync safety: an edit made before the upgrade and not yet sent keeps the time it was made');
+    log(upR.cleanAfter && upR.restartQuiet, 'sync safety: once sent, nothing is sent again, and a restart does not redo the upgrade');
+    log(upR.laterRelease, 'sync safety: a later release that syncs another column is handled the same way, from the lists stored at this upgrade');
 
     if (prevEventId && db.listEvents().some((e) => e.id === prevEventId)) db.setActiveEvent(currentUser, prevEventId);
   }

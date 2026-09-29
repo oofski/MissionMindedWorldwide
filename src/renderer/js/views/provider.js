@@ -374,13 +374,16 @@ export function renderProvider(ctx, params = {}) {
       // It starts blank, so the empty row offered on a new chart is not saved.
       // A site typed as free text before v0.0.15 ("buccal", "#14 lingual") is
       // offered as its own "(recorded)" choice, selected, so it reads as it was
-      // written and survives a re-save instead of silently becoming blank.
+      // written and survives a re-save instead of silently becoming blank. A
+      // site retired from the list when MMW's own arrives is offered only on a
+      // row that already records it, by its name, like a retired agent.
       const site = a.location || '';
       const knownSite = ANES_SITES.some((s) => s.key === site);
       const loc = el('select', { class: 'input input--sm' }, [
         el('option', { value: '' }, ['—']),
         site && !knownSite ? el('option', { value: site, selected: true }, [`(recorded) ${site}`]) : null,
-        ...ANES_SITES.map((s) => el('option', { value: s.key, selected: s.key === site }, [s.en])),
+        ...ANES_SITES.filter((s) => !s.retired || s.key === site)
+          .map((s) => el('option', { value: s.key, selected: s.key === site }, [s.en])),
       ]);
       const locOther = el('input', { class: 'input input--sm', placeholder: 'Describe the site', value: a.location_other || '', style: site === 'other' ? '' : 'display:none' });
       loc.addEventListener('change', () => { locOther.style.display = loc.value === 'other' ? '' : 'none'; });
@@ -484,7 +487,18 @@ export function renderProvider(ctx, params = {}) {
        them keeps them: they are shown read-only here and saveTreatment leaves
        the stored values alone, because this screen no longer sends them. */
     const ro = tx.referral_out || {};
-    const refTo = chipGrid('Refer to', DENTAL_REFERRAL_TO.map((d) => ({ key: d.key, label: d.en })), { selected: Array.isArray(ro.to) ? ro.to : [] });
+    const storedTo = Array.isArray(ro.to) ? ro.to : [];
+    // The list is provisional. A destination retired from it is offered only on
+    // a record that already names it, and a key this build does not know (one
+    // a newer laptop added) is shown as recorded — both selected, so the
+    // dentist can see them and untick them, rather than being saved back
+    // unseen. "Other" stays last.
+    const refItems = [
+      ...DENTAL_REFERRAL_TO.filter((d) => d.key !== 'other' && (!d.retired || storedTo.includes(d.key))).map((d) => ({ key: d.key, label: d.en })),
+      ...storedTo.filter((k) => !DENTAL_REFERRAL_TO.some((d) => d.key === k)).map((k) => ({ key: k, label: `(recorded) ${k}` })),
+      ...DENTAL_REFERRAL_TO.filter((d) => d.key === 'other').map((d) => ({ key: d.key, label: d.en })),
+    ];
+    const refTo = chipGrid('Refer to', refItems, { selected: storedTo });
     const refOther = el('input', { class: 'input', placeholder: 'Name the clinic or provider', value: ro.to_other || '' });
     const refOtherField = el('label', { class: 'field', style: (ro.to || []).includes('other') ? '' : 'display:none' }, [
       el('span', { class: 'field-label' }, ['Other destination']), refOther,
@@ -948,6 +962,17 @@ export function renderProvider(ctx, params = {}) {
       if (taken && !(/^\d+$/.test(taken) && Number(taken) <= 99)) {
         toast('Number of X-rays taken must be a whole number from 0 to 99.', 'error');
         xraysTaken.focus();
+        return;
+      }
+      // A referral is where the patient is sent. Urgency, a tooth or a reason
+      // with nowhere ticked is not one — no count, list or printed record would
+      // show it — so the dentist is asked where, rather than it being kept out
+      // of sight.
+      const refDest = refTo.get();
+      if (!refDest.length && (refUrgency.value || refTooth.value.trim() || refReason.value.trim())) {
+        toast(t('common.required') + ': Refer to', 'error');
+        const firstChip = refTo.node.querySelector('button');
+        if (firstChip) firstChip.focus();
         return;
       }
       const payload = collectTreatment();

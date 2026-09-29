@@ -32,6 +32,8 @@ function stageOf(p) {
   if (p.status === 'triaged') return 'ready';
   return p.has_vitals ? 'vitals' : 'checkin'; // checked_in
 }
+// The KPI tile and journey step for status in_treatment (see statCards).
+const WITH_PROVIDER = 'With a provider';
 function minsSince(iso) {
   if (!iso) return null;
   const ms = Date.now() - new Date(iso).getTime();
@@ -106,7 +108,12 @@ export function renderDashboard(ctx) {
       { label: t('dash.triaged'), value: stats.triaged, ic: 'clipboard', kind: 'ready' },
       // A stats payload from before v0.0.15 has no such count; show 0, not NaN.
       { label: STATUS_LABELS.treatment_waiting, value: stats.treatment_waiting || 0, ic: 'calendar', kind: 'waiting' },
-      { label: t('dash.inTreatment'), value: stats.in_treatment, ic: 'tooth', kind: 'treatment' },
+      // Every patient whose status is in_treatment: being examined at Dental
+      // Triage, cleaned at the hygienist's chair, or treated after the wait. The
+      // board splits those three across its Dental Triage, Hygienist and In
+      // treatment columns, so this tile is named for what it counts rather
+      // than after one column it would never agree with.
+      { label: WITH_PROVIDER, value: stats.in_treatment, ic: 'tooth', kind: 'treatment' },
     ];
 
     /* ---- Patient journey ----
@@ -119,7 +126,7 @@ export function renderDashboard(ctx) {
       { name: 'Clearance', n: stats.waiting_triage, kind: 'vitals' },
       { name: STATUS_LABELS.triaged, n: stats.triaged, kind: 'ready' },
       { name: STATUS_LABELS.treatment_waiting, n: stats.treatment_waiting || 0, kind: 'waiting' },
-      { name: 'Treatment', n: stats.in_treatment, kind: 'treatment' },
+      { name: WITH_PROVIDER, n: stats.in_treatment, kind: 'treatment' },
       { name: 'Checked out', n: checkedOut, kind: 'done' },
     ];
     // The furthest stage that actually has someone in it drives the fill; the
@@ -274,7 +281,16 @@ export function renderDashboard(ctx) {
       const total = elapsedMins(clockStart(p), endIso);
       const stage = elapsedMins(stageEnteredAt(p), endIso);
       if (total != null) foot.push(el('span', { class: 'crm-chip', title: 'Total time since arrival at Vitals' }, [icon('calendar', { size: 10 }), waitLabel(total) + ' total']));
-      if (stage != null) foot.push(el('span', { class: 'crm-chip crm-chip--stage', title: 'Time at this stage' }, [waitLabel(stage) + ' here']));
+      // Nothing records the moment a patient leaves Treatment Waiting for a
+      // chair, so the In treatment column's clock runs from when Dental Triage
+      // parked them — the wait included — and says so rather than "here".
+      const sinceTriage = stageOf(p) === 'treatment';
+      if (stage != null) {
+        foot.push(el('span', {
+          class: 'crm-chip crm-chip--stage',
+          title: sinceTriage ? 'Time since Dental Triage moved them to Treatment waiting, the wait for a chair included' : 'Time at this stage',
+        }, [waitLabel(stage) + (sinceTriage ? ' since triage' : ' here')]));
+      }
       if (p.on_thinner) foot.push(el('span', { class: 'crm-chip crm-chip--warn', title: 'On blood thinner — verify before extraction' }, ['Thinner']));
       return el('button', { class: 'crm-card', onClick: () => openByStatus(p) }, [
         el('div', { class: 'crm-card-top' }, [

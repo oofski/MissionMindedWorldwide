@@ -36,6 +36,8 @@ const ANESTHETICS = [
   { key: 'prilocaine', en: 'Prilocaine 4%' },
 ];
 
+// Retire, never delete (see dentalLists.js): a retired entry keeps its label
+// here so every record that used it still prints it by name.
 const ANES_SITES = [
   { key: 'buccal_infiltration', en: 'Buccal infiltration' },
   { key: 'lingual_palatal_infiltration', en: 'Lingual / palatal infiltration' },
