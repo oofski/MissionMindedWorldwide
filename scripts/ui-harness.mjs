@@ -4781,9 +4781,12 @@ async function main() {
     // that saved the chart before the sign-off reached it (still on v0.0.14,
     // or on this build) used to unlock the record everywhere — its trail still
     // ending "Locked". Only an administrator's unlock, made after the lock,
-    // lifts it; the rest of the row applies, and the lock goes back up.
+    // lifts it. Any other unlocked copy was saved from the chart as it stood
+    // before the lock, so none of it applies — taking its notes, procedures and
+    // (missing) signature under the kept lock left a "signed off" record
+    // holding content nobody signed — and the signed record goes back up whole.
     const scP = mkC('Stan', 'Stalecopy', { route: 'dentist' });
-    db.saveTreatment(signInAdmin(), scP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }], provider_name: 'Dr S', provider_signature: 'data:,s' }, 'lock');
+    db.saveTreatment(signInAdmin(), scP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }], provider_name: 'Dr S', provider_signature: 'data:,s', clinical_notes: 'Signed: one filling on #3' }, 'lock');
     const scLocked = db.getPatient(scP.id);
     const scRows = db.collectSyncRows(5000).rows; // gives every row its uid
     const scPUid = (() => { const r = rawDb(); try { return r.prepare('SELECT uid FROM patients WHERE id = ?').get(scP.id).uid; } finally { r.close(); } })();
@@ -4792,7 +4795,11 @@ async function main() {
     const scOut = () => db.collectSyncRows(5000).rows.find((r) => r.entity === 'treatment' && !r.deleted && r.uid === scEnv.uid);
     const scOldLaptop = {};
     db.SYNC_COLS_BEFORE_V0_0_15.treatment.forEach((c) => { scOldLaptop[c] = scEnv.data[c]; });
-    Object.assign(scOldLaptop, { locked: 0, completed_at: null, completed_by_name: null, clinical_notes: 'Saved before the sign-off arrived' });
+    // The chart as the other laptop had it before the sign-off: no filling
+    // yet, no signature, saved by someone else (a hygienist's save sends
+    // exactly this — the chart as loaded, provider_signature null).
+    Object.assign(scOldLaptop, { locked: 0, completed_at: null, completed_by_name: null, clinical_notes: 'Saved before the sign-off arrived',
+      fillings: '[]', provider_name: 'Hy Elsewhere', provider_signature: null });
     const scAtOld = scAt(1);
     const scRes1 = db.applyRemoteRows([{ ...scEnv, data: scOldLaptop, updated_at: scAtOld }]);
     const sc1 = db.getPatient(scP.id);
@@ -4800,24 +4807,36 @@ async function main() {
     const scKept = (pt) => pt.treatment.locked && pt.lock.locked && pt.lock.locked_at === scLocked.lock.locked_at && pt.lock.locked_by_name === scLocked.lock.locked_by_name
       && pt.lock.history.map((h) => h.action).join(',') === 'lock' && pt.treatment.completed_at === scLocked.treatment.completed_at
       && pt.completed_by_name === scLocked.completed_by_name && !pt.lock.amending;
-    log(scRes1.applied === 1 && scKept(sc1) && sc1.treatment.clinical_notes === 'Saved before the sign-off arrived'
-      && !!sc1Out && Number(sc1Out.data.locked) === 1 && sc1Out.updated_at > scAtOld,
-      'sync: a v0.0.14 laptop\'s stale copy does not unlock a signed-off record — the lock, its stamp, trail and completion stay, the rest applies, and the lock goes back up');
-    const scNewStale = { ...scEnv.data, locked: 0, locked_at: null, locked_by_name: null, lock_history: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null, clinical_notes: 'A second stale save' };
+    // What was signed, as it was signed: the notes, the procedures, the
+    // provider and the signature (a synced row carries the fillings as JSON).
+    const asJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    const scSigned = (t) => !!t && t.clinical_notes === 'Signed: one filling on #3' && t.provider_name === 'Dr S' && t.provider_signature === 'data:,s'
+      && JSON.stringify(asJson(t.fillings)) === JSON.stringify([{ tooth: '3', surfaces: ['O'] }]);
+    log(scRes1.applied === 1 && scKept(sc1) && scSigned(sc1.treatment)
+      && !!sc1Out && Number(sc1Out.data.locked) === 1 && scSigned(sc1Out.data) && sc1Out.updated_at > scAtOld && sc1Out.updated_at < scAt(2),
+      'sync: a v0.0.14 laptop\'s stale copy does not unlock a signed-off record, nor put its unsigned chart under the lock — the signed notes, procedures, provider and signature stay, and the signed record goes back up just above the stale one');
+    const sc1Pdf = plainC(pdfC.buildHtml(sc1, 'progress'));
+    log(/Clinical notes Signed: one filling on #3 Provider Sign-Off Provider Dr S Signed off & locked /.test(sc1Pdf)
+      && sc1Pdf.includes('by ' + scLocked.lock.locked_by_name) && !/No signature/.test(sc1Pdf) && !/Saved before the sign-off arrived/.test(sc1Pdf),
+      'sync: and the record prints as what was signed, with its signature');
+    const scNewStale = { ...scEnv.data, locked: 0, locked_at: null, locked_by_name: null, lock_history: null, unlocked_at: null, unlocked_by_name: null, unlock_reason: null,
+      clinical_notes: 'A second stale save', provider_signature: null };
     db.applyRemoteRows([{ ...scEnv, data: scNewStale, updated_at: scAt(2) }]);
     const sc2 = db.getPatient(scP.id);
-    log(scKept(sc2) && sc2.treatment.clinical_notes === 'A second stale save',
-      'sync: nor does a stale copy from this build, whose lock stamp and trail arrive as nulls — the trail is not wiped');
+    log(scKept(sc2) && scSigned(sc2.treatment),
+      'sync: nor does a stale copy from this build, whose lock stamp and trail arrive as nulls — the trail is not wiped, and the signed content stays');
     const scUnAt = new Date(Date.parse(scLocked.lock.locked_at) + 1000).toISOString();
     const scUnlock = {
       ...sc1Out.data, locked: 0, unlocked_at: scUnAt, unlocked_by_name: 'Admin Elsewhere', unlock_reason: 'Wrong tooth',
       lock_history: JSON.stringify([...scLocked.lock.history, { action: 'unlock', at: scUnAt, by: 'Admin Elsewhere', reason: 'Wrong tooth' }]),
+      clinical_notes: 'Amended after the unlock: #3 was #4',
     };
     db.applyRemoteRows([{ ...scEnv, data: scUnlock, updated_at: scAt(3) }]);
     const sc3 = db.getPatient(scP.id);
     log(!sc3.treatment.locked && !sc3.lock.locked && sc3.lock.amending && sc3.lock.unlocked_by_name === 'Admin Elsewhere'
-      && sc3.lock.history.map((h) => h.action).join(',') === 'lock,unlock' && sc3.lock.locked_at === null && sc3.lock.locked_by_name === null,
-      'sync: an administrator\'s unlock made after the lock does lift it, and the unlocked record no longer reports a current lock stamp');
+      && sc3.lock.history.map((h) => h.action).join(',') === 'lock,unlock' && sc3.lock.locked_at === null && sc3.lock.locked_by_name === null
+      && sc3.treatment.clinical_notes === 'Amended after the unlock: #3 was #4',
+      'sync: an administrator\'s unlock made after the lock does lift it, its content applies, and the unlocked record no longer reports a current lock stamp');
 
     /* ---- a record locked before v0.0.15 ---- */
     const oldL = mkC('Olga', 'Oldlock', { route: 'dentist' });
@@ -5326,6 +5345,150 @@ async function main() {
     currentUser = signInAdmin();
     storeC.setUser(currentUser);
     if (prevEvC && db.listEvents().some((e) => e.id === prevEvC)) db.setActiveEvent(currentUser, prevEvC);
+  }
+
+  /* ===== v0.0.15 fix pass: re-routes, backups, the restored online form =====
+     Seams the last review found. A re-route back to Dental Triage from the
+     hygienist's side kept the name of whoever routed the patient before, on
+     every station. A clinic backup restored over a record signed off since
+     it was made unlocked the record and put the unsigned chart back, and an
+     empty lock trail in a backup wiped the trail. And the online form, put
+     back by the browser on a reload, hid the lists its answers need. (A stale
+     synced copy against a lock is covered with the lock, above; the Worker's
+     keeping of an older build's missing columns, in cloud/test-worker.mjs.) */
+  {
+    const a0 = signInAdmin();
+    const prevEvF = Number(db.getSetting('active_event_id'));
+    const evF = db.createEvent(a0, { name: 'Fix Pass Clinic', location: 'Sandy' });
+    db.setActiveEvent(a0, evF.id);
+    for (const [u, n, r] of [['fx_emt', 'Fay Emt', 'emt'], ['fx_doc', 'Dr Fixley', 'doctor'], ['fx_hy', 'Hal Hygienist', 'hygienist']]) {
+      db.createUser(a0, { username: u, full_name: n, role: r, password: 'x' });
+    }
+    const emtF = () => db.login('fx_emt', 'x'), docF = () => db.login('fx_doc', 'x'), hyF = () => db.login('fx_hy', 'x');
+    const mkF = (first, route) => {
+      const p = db.createPatient(signInAdmin(), { first_name: first, last_name: 'Fixpass', dob: '1980-03-03', gender: 'female', phone: '5035550123',
+        demographics: {}, medical_history: {}, dental_history: { visit_type: 'filling' },
+        consents: [{ type: 'general', signer_name: first, signature_png: 'data:image/png;base64,AAAA' }] });
+      db.saveVitals(emtF(), p.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '72' });
+      db.routePatient(emtF(), p.id, route);
+      return p;
+    };
+    const uidOfF = (id) => { const r = rawDb(); try { return r.prepare('SELECT uid FROM patients WHERE id = ?').get(id).uid; } finally { r.close(); } };
+
+    /* ---- who moved the patient, after every re-route ---- */
+    const rw = mkF('Rhoda', 'hygienist');
+    db.saveTreatment(docF(), rw.id, { provider_name: 'Dr Fixley' }, 'waiting');
+    const rwP = db.getPatient(rw.id);
+    log(rwP.status === 'treatment_waiting' && rwP.triage.route === 'dentist' && rwP.routed_by_name === 'Dr Fixley',
+      'routing: a hygienist\'s patient the dentist parks for a chair was sent to Dental Triage by the dentist — not by the EMT who sent them to the hygienist');
+    const rc = mkF('Rafe', 'dentist');
+    db.saveTreatment(docF(), rc.id, { provider_name: 'Dr Fixley' }, 'waiting');
+    db.routePatient(docF(), rc.id, 'hygienist'); // "Transfer to hygienist" from the wait
+    const rcMid = db.getPatient(rc.id);
+    db.saveTreatment(hyF(), rc.id, { cleaning: { prophy: true }, provider_name: 'Hal Hygienist' }, 'cleaning_complete');
+    const rcP = db.getPatient(rc.id);
+    const rcRows = db.collectSyncRows(100000).rows; // gives every row its uid
+    const rcUid = uidOfF(rc.id);
+    const rcTri = rcRows.find((r) => r.entity === 'triage' && !r.deleted && !!rcUid && r.patient_uid === rcUid);
+    log(rcMid.routed_by_name === 'Dr Fixley' && rcP.status === 'treatment_waiting' && rcP.triage.route === 'dentist' && rcP.routed_by_name === 'Hal Hygienist'
+      && !!rcTri && rcTri.data.routed_by_name === 'Hal Hygienist',
+      'routing: and one whose cleaning is completed while waiting goes back to Dental Triage named as the hygienist\'s move — here and in the row every other station receives');
+
+    /* ---- a clinic backup restored over a record signed off since ---- */
+    const evR = db.createEvent(signInAdmin(), { name: 'Fix Pass Restore', location: 'Sandy' });
+    db.setActiveEvent(signInAdmin(), evR.id);
+    const bk = mkF('Bea', 'dentist');
+    db.saveTreatment(docF(), bk.id, { fillings: [{ tooth: '14', surfaces: ['M'] }], provider_name: 'Dr Fixley', clinical_notes: 'In progress' }, false);
+    const bkMidVisit = JSON.parse(JSON.stringify(db.exportClinicBundle(evR.id)));
+    db.saveTreatment(docF(), bk.id, { fillings: [{ tooth: '14', surfaces: ['M', 'O'] }], provider_name: 'Dr Fixley', provider_signature: 'data:,bk',
+      clinical_notes: 'Final: #14 MO' }, 'lock');
+    const bkLocked = db.getPatient(bk.id);
+    const bkSignedOff = JSON.parse(JSON.stringify(db.exportClinicBundle(evR.id)));
+    const trailOf = (pt) => pt.lock.history.map((h) => h.action).join(',');
+    const bkWhole = (pt) => pt.treatment.locked && pt.lock.locked && pt.lock.locked_at === bkLocked.lock.locked_at && pt.lock.locked_by_name === 'Dr Fixley'
+      && pt.treatment.completed_at === bkLocked.treatment.completed_at && pt.treatment.clinical_notes === 'Final: #14 MO'
+      && pt.treatment.provider_signature === 'data:,bk' && JSON.stringify(pt.treatment.fillings) === JSON.stringify([{ tooth: '14', surfaces: ['M', 'O'] }]);
+    db.importClinicBundle(signInAdmin(), bkMidVisit);
+    const bk1 = db.getPatient(bk.id);
+    log(bkWhole(bk1) && trailOf(bk1) === 'lock',
+      'restore: a backup taken mid-visit does not unlock a record signed off since, nor put the unsigned chart back — the lock, its trail and the signed record stay');
+    // A backup from a build whose trail was empty for this record (or before
+    // the trail existed) never wipes the one here; the two are merged.
+    for (const empty of [null, '[]']) {
+      const noTrail = JSON.parse(JSON.stringify(bkSignedOff));
+      noTrail.treatments.forEach((t) => { t.lock_history = empty; });
+      db.importClinicBundle(signInAdmin(), noTrail);
+    }
+    const bkNoDrop = JSON.parse(JSON.stringify(bkSignedOff));
+    bkNoDrop.treatments.forEach((t) => { delete t.lock_history; });
+    db.importClinicBundle(signInAdmin(), bkNoDrop);
+    const bk2 = db.getPatient(bk.id);
+    log(bkWhole(bk2) && trailOf(bk2) === 'lock' && bk2.lock.history[0].by === 'Dr Fixley',
+      'restore: a backup whose lock trail is empty, null or absent never wipes the trail here');
+    // The other way round: a backup taken at sign-off, over a record an
+    // administrator has since unlocked to amend.
+    db.unlockRecord(signInAdmin(), bk.id, 'Wrong surface');
+    const bkAm = db.getPatient(bk.id);
+    db.importClinicBundle(signInAdmin(), bkSignedOff);
+    const bk3 = db.getPatient(bk.id);
+    log(bkAm.lock.amending && !bk3.treatment.locked && bk3.lock.amending && bk3.lock.unlocked_at === bkAm.lock.unlocked_at && trailOf(bk3) === 'lock,unlock',
+      'restore: nor does a backup taken at sign-off lock again a record an administrator has since unlocked to amend');
+    // A backup that carries an unlock made after the lock here does lift it,
+    // and its content applies — with both trails kept.
+    if (!db.getPatient(bk.id).treatment.locked) db.lockRecord(signInAdmin(), bk.id);
+    const bkRe = db.getPatient(bk.id);
+    const laterUnlock = new Date(Date.parse(bkRe.lock.locked_at) + 60e3).toISOString();
+    const bkElsewhere = JSON.parse(JSON.stringify(bkSignedOff));
+    bkElsewhere.treatments.forEach((t) => Object.assign(t, { locked: 0, unlocked_at: laterUnlock, unlocked_by_name: 'Admin Elsewhere', unlock_reason: 'Tooth number',
+      clinical_notes: 'Final: #15 MO (was #14)',
+      lock_history: JSON.stringify([...JSON.parse(t.lock_history), { action: 'unlock', at: laterUnlock, by: 'Admin Elsewhere', reason: 'Tooth number' }]) }));
+    db.importClinicBundle(signInAdmin(), bkElsewhere);
+    const bk4 = db.getPatient(bk.id);
+    log(!bk4.treatment.locked && bk4.lock.unlocked_by_name === 'Admin Elsewhere' && bk4.treatment.clinical_notes === 'Final: #15 MO (was #14)'
+      && trailOf(bk4) === 'lock,unlock,relock,unlock' && bk4.lock.history[3].by === 'Admin Elsewhere',
+      'restore: a backup carrying an unlock made after the lock here does lift it, its content applies, and both trails are kept');
+
+    /* ---- the online form, as a browser puts it back ---- */
+    // A reload, Back or a restored tab refills the answers WITHOUT change
+    // events, before the page's script runs. So the page is parsed with its
+    // script held back, answered the way a browser restores it, and then its
+    // own script is run.
+    const workerF = (await import('../cloud/worker.js')).default;
+    const envF = { DB: { prepare(sql) { return { bind() { return this; },
+      async first() { return /entity = 'event'/.test(sql) ? { data: JSON.stringify({ name: 'Restored Clinic', active: 1 }) } : null; },
+      async run() { return {}; } }; } } };
+    const formHtml = await (await workerF.fetch(new Request('https://sync.example/checkin/evt-restored'), envF, {})).text();
+    const openForm = (restore) => {
+      const d = new JSDOM(formHtml, { runScripts: 'outside-only', url: 'https://sync.example/checkin/evt-restored', pretendToBeVisual: true });
+      const w = d.window;
+      w.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {} });
+      w.HTMLElement.prototype.scrollIntoView = function () {};
+      restore(w.document);
+      w.eval(Array.from(w.document.querySelectorAll('script:not([src])')).map((s) => s.textContent).join('\n'));
+      return w.document;
+    };
+    const shown = (doc, id) => doc.getElementById(id).style.display !== 'none';
+    const litRight = (doc) => Array.from(doc.querySelectorAll('.chip input')).every((i) => i.closest('.chip').classList.contains('on') === i.checked);
+    const back = openForm((doc) => {
+      doc.getElementById('allergy_status').value = 'yes';
+      doc.querySelector('input[name=allergy][value=penicillin]').checked = true;
+      doc.querySelector('input[name=allergy][value=other]').checked = true;
+      doc.getElementById('major_surgery').value = 'yes';
+      doc.querySelector('input[name=surgery_site]').checked = true;
+      doc.querySelector('input[name=med][value=other]').checked = true;
+      doc.querySelector('input[name=visit][value=extraction_pain]').checked = true;
+    });
+    log(shown(back, 'allergyListWrap') && shown(back, 'allergyOtherWrap') && shown(back, 'surgerySitesWrap') && shown(back, 'medOtherWrap')
+      && back.querySelectorAll('#meds input').length === 1 && shown(back, 'surgeryCard') && litRight(back)
+      && back.querySelectorAll('.chip.on').length === 5,
+      'online form (real page): answers a browser puts back show the allergy list, the surgery sites, the typed-medication box and the surgery consent they need, with their chips lit');
+    const fresh = openForm(() => {});
+    log(['allergyListWrap', 'allergyOtherWrap', 'surgerySitesWrap', 'medOtherWrap', 'surgeryCard'].every((id) => !shown(fresh, id))
+      && fresh.querySelectorAll('#meds input').length === 0 && fresh.querySelectorAll('.chip.on').length === 0,
+      'online form (real page): and a new form still opens with all of them hidden and nothing lit');
+
+    currentUser = signInAdmin();
+    if (prevEvF && db.listEvents().some((e) => e.id === prevEvF)) db.setActiveEvent(currentUser, prevEvF);
   }
 
   /* ===== The clinic's own drug and medication lists =========================

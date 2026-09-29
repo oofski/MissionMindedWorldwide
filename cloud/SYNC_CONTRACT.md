@@ -18,11 +18,20 @@ works locally and re-syncs when reconnected.
   (`locked` 0) lifts a lock the laptop holds only when it carries an `unlocked_at` later
   than that lock (`locked_at`, or `completed_at` for a record locked before v0.0.15) —
   an administrator's unlock, which always stamps one. Any other unlocked copy (a laptop
-  that saved the chart before the sign-off reached it, or one still on v0.0.14) applies
-  everything except the sign-off — `locked`, `locked_at`, `locked_by_name`,
-  `lock_history`, `unlocked_*`, `completed_at`, `completed_by_name` — which stays, and
-  the merged row is pushed back just above the stamp it merged. The Worker is unchanged:
-  it stores `data` as it is sent.
+  that saved the chart before the sign-off reached it, or one still on v0.0.14) was
+  edited from the chart as it stood before the lock, so NONE of it applies — not the
+  sign-off columns, and not the notes, procedures, provider name or signature either:
+  the signed record stays whole and is pushed back just above the stamp of the copy it
+  refused, so it wins everywhere. A clinic-backup restore applies the same rule, and
+  merges the backup's lock trail with the laptop's instead of replacing it.
+- **An omitted key is not a cleared one (v0.0.15, Worker side).** The app always sends
+  every column it knows, with `null` for one it has no value for, so a key missing from
+  a pushed live row means only that the sender's build does not have that column. The
+  Worker keeps such keys from the stored live copy of the row, so a laptop still on an
+  older build cannot strip newer columns from the cloud copy (and from every laptop that
+  later pulls it). An explicit `null` still clears. Deletions are never merged: a
+  tombstone is pushed with `data: {}` precisely to scrub the patient's details from the
+  server, and a row revived after a deletion holds exactly what the restore sent.
 
 ## Entities (sync `entity` values)
 `event`, `patient`, `triage`, `treatment`, `consent`, `xray`. (Users/auth are NOT synced.)
@@ -48,7 +57,8 @@ Base URL = the deployed Worker, e.g. `https://mmw-sync.<subdomain>.workers.dev`.
 - **Auth (all other routes):** header `Authorization: Bearer <CLINIC_KEY>`. The Worker
   compares against the `CLINIC_KEY` secret (constant-time). Mismatch → `401 {ok:false,error}`.
 - `POST /v1/push` — body `{ device_id, rows: [<envelope>...] }`.
-  Upserts each row into D1 with LWW. → `{ ok:true, applied:<n>, skipped:<n>, time:"<iso>" }`.
+  Upserts each row into D1 with LWW, keeping the stored live row's keys that a live
+  incoming row omits (see above). → `{ ok:true, applied:<n>, skipped:<n>, time:"<iso>" }`.
 - `GET /v1/pull?since=<cursor>&event_uid=<uid>&limit=500` — returns rows with
   `seq > since` (optionally scoped to `event_uid`), ordered by `seq` asc.
   → `{ ok:true, rows:[<envelope>...], cursor:"<seq>", more:false, mode:"seq" }`.

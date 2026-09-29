@@ -2773,8 +2773,10 @@ function hygienistFinalize(actor, patientId, finalize) {
   }
   const tr = db.prepare('SELECT route FROM triage WHERE patient_id = ?').get(patientId);
   if (tr && tr.route === 'hygienist') {
-    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
-      .run(actor ? actor.id : null, now(), patientId);
+    // The mover's name goes with the id, as routePatient writes it; otherwise
+    // the name of whoever routed the patient before is what every station shows.
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=?, routed_by_name=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, now(), (actor && actor.full_name) || null, patientId);
     audit(actor, 'route', 'patient', patientId, 'dentist');
   }
   return 'cleaning';
@@ -3004,9 +3006,12 @@ function markTreatmentWaiting(actor, patientId) {
     // screen and the board then filed them with the hygienist while the
     // Treatment waiting count included them, so no chair queue showed them.
     // They are re-routed as an admin move to Treatment waiting routes them;
-    // 'both' already reaches Dental Triage and stays as it is.
-    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=? WHERE patient_id=?")
-      .run(actor ? actor.id : null, at, patientId);
+    // 'both' already reaches Dental Triage and stays as it is. The mover is
+    // named with the id: getPatient prefers a stored name, so the EMT who sent
+    // them to the hygienist was otherwise credited with this move — on Dental
+    // Triage's "Sent here by", at Vitals, and on every station it synced to.
+    db.prepare("UPDATE triage SET route='dentist', routed_by=?, routed_at=?, routed_by_name=? WHERE patient_id=?")
+      .run(actor ? actor.id : null, at, (actor && actor.full_name) || null, patientId);
     audit(actor, 'route', 'patient', patientId, 'dentist');
   }
   // The name is stored alongside the id at the moment of the move, so a later
@@ -3265,9 +3270,26 @@ function importClinicBundle(actor, bundle) {
         const pid = childOf(row);
         if (!pid) continue;
         const existing = db.prepare(`SELECT * FROM ${table} WHERE patient_id = ?`).get(pid);
+        // A backup's treatment row is the record as it stood when the backup
+        // was made. Restored over a record signed off and locked here since, it
+        // silently unlocked it and put back the unsigned chart, so the rule sync
+        // uses (olderThanLock) applies: only an unlock made after the lock lifts
+        // it, and otherwise the signed record stays whole. The other way round,
+        // a backup taken at sign-off would lock again a record an administrator
+        // has since unlocked to amend, with what it held before the amendment —
+        // as a patient's older USB file would (unlockedSinceFile), so that record
+        // stays as it is too.
+        if (table === 'treatments' && existing && (olderThanLock(existing.id, row)
+          || (!existing.locked && Number(row.locked) === 1 && unlockedSinceFile(existing, { treatment: row })))) continue;
         // Keys an older backup never had keep their local value / default.
         const use = writableCols(table, cols, row, existing);
-        const vals = use.map((c) => row[c]);
+        // The lock trail says who unlocked a signed-off record and why. A backup
+        // from before the trail existed, or before this record was signed off,
+        // carries none (or an empty one), and writing that over the trail here
+        // wiped it; the two are merged, as a USB import merges them.
+        const trailHere = table === 'treatments' && existing ? lockHistoryOf(existing) : [];
+        const vals = use.map((c) => (c === 'lock_history' && trailHere.length
+          ? JSON.stringify(mergeLockTrails(trailHere, lockHistoryOf(row))) : row[c]));
         if (existing) {
           if (use.length) db.prepare(`UPDATE ${table} SET ${use.map((c) => c + '=?').join(', ')} WHERE id=?`).run(...vals, existing.id);
         } else {
@@ -3955,21 +3977,26 @@ function writableCols(table, cols, incoming, local) {
    lock trail whose last word was still "Locked" (a new build's stale copy even
    sent the trail as null and wiped it). An unlocked copy now lifts a lock here
    only when it carries an administrator's unlock made AFTER that lock
-   (liftLock always stamps one, strictly after the lock it lifts). Otherwise the
-   sign-off — the lock, its stamp and trail, the completion it locked — stays,
-   the rest of the row applies as usual, and the merged copy goes back up
+   (liftLock always stamps one, strictly after the lock it lifts). Any other
+   unlocked copy was saved from the chart as it stood before the lock — every
+   edit made after a lock needs an unlock, and saveTreatment refuses the rest —
+   so none of it applies: not the sign-off, and not its notes, procedures,
+   provider name or signature either. Keeping only the lock and taking the rest
+   left a record reported as "Signed off & locked by Dr X" that held content
+   nobody signed and no signature, and no clinician could correct it, because a
+   locked record refuses every save. The row here stays whole and goes back up
    (applyRemoteRows re-pushes any row it did not take whole), so the cloud and
-   the stale laptop get the lock back. A v0.0.14 laptop's admin move that
-   re-opened a record carries no unlock stamp and so does not unlock it here; an
-   administrator unlocks it on an updated station. */
-const STICKY_LOCK_COLS = ['locked', 'locked_at', 'locked_by_name', 'lock_history', 'unlocked_at', 'unlocked_by_name', 'unlock_reason', 'completed_at', 'completed_by_name'];
-function stickyLockCols(treatmentId, incoming) {
+   the stale laptop get the signed record back. A v0.0.14 laptop's admin move
+   that re-opened a record carries no unlock stamp and so does not unlock it
+   here; an administrator unlocks it on an updated station. The clinic-backup
+   restore applies the same rule (importClinicBundle). */
+function olderThanLock(treatmentId, incoming) {
   const t = db.prepare('SELECT locked, locked_at, completed_at FROM treatments WHERE id = ?').get(treatmentId);
-  if (!t || !t.locked || !incoming || Number(incoming.locked) === 1) return [];
+  if (!t || !t.locked || !incoming || Number(incoming.locked) === 1) return false;
   const lockedAt = Date.parse(t.locked_at || t.completed_at || '');
   const unlockedAt = Date.parse(incoming.unlocked_at || '');
   const unlockedAfter = Number.isFinite(unlockedAt) && (!Number.isFinite(lockedAt) || unlockedAt > lockedAt);
-  return unlockedAfter ? [] : STICKY_LOCK_COLS;
+  return !unlockedAfter;
 }
 
 function nameOfId(uid) { if (!uid) return null; const u = db.prepare('SELECT full_name FROM users WHERE id = ?').get(uid); return u ? u.full_name : null; }
@@ -4282,9 +4309,11 @@ function applyRemoteRows(remoteRows) {
     // When this laptop keeps a value the sender did not have, its copy is no
     // longer the row that arrived, and is pushed back (below) — which is what
     // puts the kept value back in the cloud copy the older laptop overwrote.
+    // A copy older than the lock this laptop holds writes nothing at all (see
+    // olderThanLock): the signed record stays whole and is re-pushed below.
     const local = existing && KEEP_NONEMPTY[table] ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(existing.id) : null;
-    const keepLocal = entity === 'treatment' && existing ? stickyLockCols(existing.id, env.data) : [];
-    const cols = writableCols(table, SYNC_COLS[entity], env.data, local).filter((c) => !keepLocal.includes(c));
+    const keepLocal = entity === 'treatment' && !!existing && olderThanLock(existing.id, env.data);
+    const cols = keepLocal ? [] : writableCols(table, SYNC_COLS[entity], env.data, local);
     const vals = cols.map((c) => data[c]);
     const extraCols = ['uid', 'updated_at', 'synced_rev', 'content_rev'];
     const extraVals = [env.uid, env.updated_at, rowSig, rowSig];
@@ -4307,7 +4336,8 @@ function applyRemoteRows(remoteRows) {
     }
     // The merged copy differs from what arrived — a column the sender's version
     // does not have, a real Restorative kept against an empty one, a name only
-    // this laptop can resolve — so it has to go back up. It is stamped JUST
+    // this laptop can resolve, a signed record kept against a copy older than
+    // its lock — so it has to go back up. It is stamped JUST
     // above the row it merged, never with the current time: a current stamp
     // outranks every edit made elsewhere since the sender's, so a colleague's
     // later, genuine edit was refused here on the next pull and lost in the

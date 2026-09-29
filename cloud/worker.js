@@ -202,13 +202,18 @@ async function handlePush(request, env) {
       continue;
     }
 
-    // An event row pushed by a laptop on an older build leaves out the columns
-    // that build does not know — v0.0.14 has no check-in City list. Stored
-    // whole, that push would take the list off the online form until an
-    // upgraded laptop happened to save the event again, so what the stored copy
-    // has and the incoming row does not carry is kept. An explicit null (an
-    // admin clearing the list) still clears it.
-    const data = row.entity === 'event' && existing ? await keepOmittedEventKeys(env, row.uid, row.data) : row.data;
+    // A row pushed by a laptop on an older build leaves out the columns that
+    // build does not know — v0.0.14 has no check-in City list on the event, no
+    // x-ray count, Treatment Waiting stamp, glucose or breathing rate on the
+    // triage row, and no referral, lock trail or review stamps on the treatment
+    // row. Stored whole, that push dropped them from the cloud copy, so a laptop
+    // set up fresh or restored from the cloud never received them (and the
+    // online form lost the City list). So what the stored live copy has and the
+    // incoming row does not carry is kept. An explicit null (an admin clearing
+    // the list) still clears it. A deletion is never merged: a tombstone is
+    // pushed with empty data precisely so the patient's details leave the
+    // server, and a row coming back from deletion has nothing stored to keep.
+    const data = existing && !existing.deleted && !row.deleted ? await keepOmittedKeys(env, row.uid, row.entity, row.data) : row.data;
     const dataStr =
       typeof data === 'string' ? data : JSON.stringify(data);
 
@@ -241,15 +246,16 @@ async function handlePush(request, env) {
   return json({ ok: true, applied, skipped, time: nowIso() });
 }
 
-// The incoming event data with every key it omits filled from the stored live
-// copy. Events only: they are a handful of rows, so the extra read is nothing,
-// and they hold no patient data a deliberate omission might be meant to drop.
-async function keepOmittedEventKeys(env, uid, incoming) {
+// The incoming data with every key it omits filled from the stored live copy
+// of the same row. The app always sends every column it knows (a column it has
+// no value for goes as null), so an omitted key only ever means "this build
+// does not have that column", never "remove it".
+async function keepOmittedKeys(env, uid, entity, incoming) {
   const next = parseData(incoming);
   if (!next || typeof next !== 'object' || Array.isArray(next)) return incoming;
   const stored = await env.DB
-    .prepare("SELECT data FROM sync_rows WHERE uid = ? AND entity = 'event' AND deleted = 0")
-    .bind(uid)
+    .prepare('SELECT data FROM sync_rows WHERE uid = ? AND entity = ? AND deleted = 0')
+    .bind(uid, entity)
     .first();
   const prev = stored ? parseData(stored.data) : null;
   if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return incoming;
@@ -1182,15 +1188,23 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     "function checked(name){return Array.prototype.slice.call(document.querySelectorAll('input[name='+name+']:checked')).map(function(i){return i.value;});}" +
     "function mkpad(id){var c=el(id);if(!c)return null;var ctx=c.getContext('2d');var drawing=false,empty=true;function fit(){var r=c.getBoundingClientRect();if(!r.width)return;c.width=r.width;c.height=150;ctx.lineWidth=2.2;ctx.lineCap='round';ctx.strokeStyle='#12303f';}fit();window.addEventListener('resize',fit);function pt(e){var r=c.getBoundingClientRect();var t=(e.touches&&e.touches[0])?e.touches[0]:e;return{x:t.clientX-r.left,y:t.clientY-r.top};}function down(e){drawing=true;empty=false;var p=pt(e);ctx.beginPath();ctx.moveTo(p.x,p.y);e.preventDefault();}function mv(e){if(!drawing)return;var p=pt(e);ctx.lineTo(p.x,p.y);ctx.stroke();e.preventDefault();}function up(){drawing=false;}c.addEventListener('pointerdown',down);c.addEventListener('pointermove',mv);window.addEventListener('pointerup',up);return{data:function(){return empty?null:c.toDataURL('image/png');},clear:function(){ctx.clearRect(0,0,c.width,c.height);empty=true;},fit:fit};}" +
     "var gpad=mkpad('gsig');var spad=mkpad('ssig');el('gclear').onclick=function(){if(gpad)gpad.clear();};if(el('sclear'))el('sclear').onclick=function(){if(spad)spad.clear();};" +
-    "document.querySelectorAll('input[name=visit]').forEach(function(i){i.addEventListener('change',function(){document.querySelectorAll('input[name=visit]').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});var v=(document.querySelector('input[name=visit]:checked')||{}).value||'';var ex=(v==='extraction_pain'||v==='extraction_no_pain');el('surgeryCard').style.display=ex?'block':'none';if(ex&&spad)setTimeout(function(){spad.fit();},0);});});" +
+    "function syncVisit(){document.querySelectorAll('input[name=visit]').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});var v=(document.querySelector('input[name=visit]:checked')||{}).value||'';var ex=(v==='extraction_pain'||v==='extraction_no_pain');el('surgeryCard').style.display=ex?'block':'none';if(ex&&spad)setTimeout(function(){spad.fit();},0);}" +
+    "document.querySelectorAll('input[name=visit]').forEach(function(i){i.addEventListener('change',syncVisit);});" +
     "var meds=el('meds');function addmed(){var d=document.createElement('div');d.className='med-row';d.innerHTML='<input type=\"text\" list=\"medlist\" autocomplete=\"off\" placeholder=\"'+T.medNamePh+'\"><button type=\"button\">✕</button>';d.querySelector('button').onclick=function(){d.remove();};meds.appendChild(d);}el('addmed').onclick=addmed;" +
     // "Other" reveals typed medications; "No medications" is an answer ABOUT the
     // list, so it clears the ticks and any tick clears it.
     "function syncMedOther(){var on=checked('med').indexOf('other')>=0;el('medOtherWrap').style.display=on?'':'none';if(on&&!meds.children.length)addmed();}" +
     "document.querySelectorAll('#medchips input').forEach(function(i){i.addEventListener('change',function(){if(i.checked){if(i.id==='medications_none'){document.querySelectorAll('#medchips input[name=med]').forEach(function(o){o.checked=false;});}else{el('medications_none').checked=false;}}document.querySelectorAll('#medchips .chip').forEach(function(c){c.classList.toggle('on',c.querySelector('input').checked);});syncMedOther();});});" +
-    "el('major_surgery').addEventListener('change',function(){el('surgerySitesWrap').style.display=val('major_surgery')==='yes'?'':'none';});" +
+    "function syncSites(){el('surgerySitesWrap').style.display=val('major_surgery')==='yes'?'':'none';}el('major_surgery').addEventListener('change',syncSites);" +
     "function syncAllergy(){el('allergyListWrap').style.display=val('allergy_status')==='yes'?'':'none';el('allergyOtherWrap').style.display=checked('allergy').indexOf('other')>=0?'':'none';}" +
     "el('allergy_status').addEventListener('change',syncAllergy);document.querySelectorAll('#allergies input').forEach(function(i){i.addEventListener('change',syncAllergy);});" +
+    // A browser that puts the patient's earlier answers back (a reload, Back,
+    // a restored tab) sets them without any change event. Each section that
+    // follows an answer is therefore set once from the page as it loads, as
+    // the referral and City boxes are, and every chip lit from its tick — or a
+    // restored "Yes" or "Other" hid the very list or box that submitting then
+    // asked for, and the page scrolled to a question the patient could not see.
+    "document.querySelectorAll('.chip input').forEach(function(i){i.closest('.chip').classList.toggle('on',i.checked);});syncVisit();syncMedOther();syncSites();syncAllergy();" +
     "function otherMeds(){return Array.prototype.slice.call(meds.querySelectorAll('input')).map(function(i){return i.value.trim();}).filter(Boolean);}" +
     // The first unanswered history question, in the order the form asks it —
     // the walk-in form's order and rules exactly — as [question id, element id].
