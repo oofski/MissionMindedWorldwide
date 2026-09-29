@@ -137,6 +137,52 @@ function bpRechecksHtml(tr) {
   const rc = (tr && Array.isArray(tr.bp_rechecks)) ? tr.bp_rechecks : [];
   return rc.map((r) => bpHtml({ bp_systolic: r.bp_systolic, bp_diastolic: r.bp_diastolic }, 're-check')).join(' · ');
 }
+// Blood sugar and respiration — the Clearance band's BS and RESP, recorded at
+// Vitals since v0.0.4 and printed nowhere until v0.0.15. Empty when neither
+// was taken, so the vitals line of an older visit reads as it always did.
+function bsRespText(tr) {
+  const t = tr || {};
+  return [
+    t.glucose != null && t.glucose !== '' ? `BS ${esc(t.glucose)} mg/dL` : '',
+    t.respiration != null && t.respiration !== '' ? `RESP ${esc(t.respiration)}/min` : '',
+  ].filter(Boolean).join(' · ');
+}
+// "Health history reviewed by X · date" — who went through the medical history
+// with the patient at Vitals on this visit — or '' when nobody has yet.
+function reviewedText(p) {
+  const tr = (p && p.triage) || {};
+  if (!tr.history_reviewed_at && !tr.history_reviewed_by_name) return '';
+  return `Health history reviewed with the patient by ${tr.history_reviewed_by_name || '—'}${tr.history_reviewed_at ? ' · ' + fmtDate(tr.history_reviewed_at) : ''}`;
+}
+// The record's lock as getPatient reports it; a patient object built without
+// it (an older caller) reads the same from the treatment row, where a record
+// locked before v0.0.15 has only its completion stamp to say who locked it.
+function lockOf(p) {
+  if (p && p.lock) return p.lock;
+  const t = (p && p.treatment) || {};
+  return {
+    locked: !!t.locked,
+    locked_at: t.locked_at || (t.locked ? t.completed_at : null),
+    locked_by_name: t.locked_by_name || (t.locked ? p.completed_by_name : null),
+    history: Array.isArray(t.lock_history) ? t.lock_history : [],
+  };
+}
+// The Provider Sign-Off status. "Signed" used to be printed for any completed
+// visit, locked or not; since locking became optional (v1.2.1) those are two
+// different things, and a record amended after sign-off says so, with who
+// unlocked it, when and why — the printed record is where that is looked for.
+function signOffHtml(p) {
+  const t = p.treatment || {};
+  const lk = lockOf(p);
+  let status;
+  if (lk.locked) status = `Signed off &amp; locked ${fmtDate(lk.locked_at)}${lk.locked_by_name ? ' by ' + esc(lk.locked_by_name) : ''}`;
+  else if (t.completed_at) status = `Completed ${fmtDate(t.completed_at)} (not locked)`;
+  else status = 'Not yet finalized';
+  const amended = (lk.history || []).filter((h) => h && h.action === 'unlock')
+    .map((h) => `<div class="muted">Amended after sign-off — unlocked ${fmtDate(h.at)}${h.by ? ' by ' + esc(h.by) : ''}${h.reason ? ': ' + esc(h.reason) : ''}</div>`)
+    .join('');
+  return `<div class="muted">${status}</div>${amended}`;
+}
 
 const EXT_LABELS = {
   simple: 'Simple', impact_soft: 'Impact soft tissue', impact_bony: 'Impact part bony',
@@ -274,8 +320,8 @@ function progressNoteBody(p) {
     </table>
 
     <h2>Clinical Assessment</h2>
-    ${(tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null || tr.blood_thinner)
-      ? `<div class="box"><span class="label">Vitals: </span>${bpHtml(tr)}${bpRechecksHtml(tr) ? ' · ' + bpRechecksHtml(tr) : ''} · HR ${tr.heart_rate != null ? esc(tr.heart_rate) : '—'} · Blood thinners: ${esc(bloodThinnerLine(p))}</div>`
+    ${(tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null || tr.glucose != null || tr.respiration != null || tr.blood_thinner)
+      ? `<div class="box"><span class="label">Vitals: </span>${bpHtml(tr)}${bpRechecksHtml(tr) ? ' · ' + bpRechecksHtml(tr) : ''} · HR ${tr.heart_rate != null ? esc(tr.heart_rate) : '—'}${bsRespText(tr) ? ' · ' + bsRespText(tr) : ''} · Blood thinners: ${esc(bloodThinnerLine(p))}</div>`
       : ''}
     <div class="chips">${checklist}</div>
     <div class="box"><span class="label">Teeth of concern: </span>${(tr.teeth || []).map((x) => `<b>${esc(x)}</b>`).join(', ') || '<span class="muted">—</span>'}</div>
@@ -297,7 +343,7 @@ function progressNoteBody(p) {
       <div>
         <div class="label">Provider</div>
         <div class="val">${esc(t.provider_name || '—')}</div>
-        <div class="muted">${t.completed_at ? 'Signed ' + fmtDate(t.completed_at) : 'Not yet finalized'}</div>
+        ${signOffHtml(p)}
       </div>
       <div>
         ${t.provider_signature ? `<div class="sig"><img src="${imgSrc(t.provider_signature)}"/></div>` : '<span class="muted">No signature</span>'}
@@ -396,6 +442,7 @@ function fullPacketBody(p) {
     </table>
 
     <h2>Medical History</h2>
+    ${reviewedText(p) ? `<div class="muted">${esc(reviewedText(p))}</div>` : ''}
     <table class="grid">${gridRows(medCells)}</table>
     <div><span class="label">Medication allergies</span><div class="chips">${allergies}</div></div>
     <div><span class="label">Conditions</span><div class="chips">${conditions}</div></div>
@@ -498,14 +545,17 @@ function bloodThinnerLine(p) {
 // v1.2.0: the Vitals & Health block that was previously MISSING from the summary
 // PDF — EMT-entered vitals, the blood-thinner answer, the patient's medical
 // history, and the EMT's yes/no confirmations now attach to the record.
+// v0.0.15: Vitals no longer asks those four questions (it reviews the whole
+// history, and who did is printed); a visit that recorded them still prints
+// them, under the label they were printed under then.
 function healthBlock(p) {
   const tr = p.triage || {};
   const m = p.medical_history || {};
   // Blood thinner is passed through field() which escapes — build it RAW (no esc)
   // to avoid double-escaping a detail like "A & B". Vitals go through fieldRaw()
   // instead so a high blood-pressure reading can render red (bpHtml is pre-escaped).
-  const vitals = (tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null)
-    ? `${bpHtml(tr)}${bpRechecksHtml(tr) ? ' · ' + bpRechecksHtml(tr) : ''} · HR ${tr.heart_rate != null ? esc(tr.heart_rate) : '—'} bpm`
+  const vitals = (tr.bp_systolic != null || tr.bp_diastolic != null || tr.heart_rate != null || tr.glucose != null || tr.respiration != null)
+    ? `${bpHtml(tr)}${bpRechecksHtml(tr) ? ' · ' + bpRechecksHtml(tr) : ''} · HR ${tr.heart_rate != null ? esc(tr.heart_rate) : '—'} bpm${bsRespText(tr) ? ' · ' + bsRespText(tr) : ''}`
     : 'Not recorded';
   const thinner = bloodThinnerLine(p);
   // Read through the same display as the full packet (medicalLabels.js), so
@@ -532,6 +582,7 @@ function healthBlock(p) {
     ${unsure ? `<div><span class="label">Unsure — ask the patient</span> ${unsure}</div>` : ''}
     <div><span class="label">Medications</span> ${meds}</div>
     ${surgery ? `<div><span class="label">Major surgery (6 mo)</span> ${surgery}</div>` : ''}
+    ${reviewedText(p) ? `<div class="muted">${esc(reviewedText(p))}</div>` : ''}
     ${review.length ? `<div class="box"><span class="label">EMT review</span><br>${review.join(' · ')}</div>` : ''}`;
 }
 
