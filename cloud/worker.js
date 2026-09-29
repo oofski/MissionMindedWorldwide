@@ -182,8 +182,12 @@ async function handlePush(request, env) {
     // + device id), so this tie-break ("skip on <=") is identical to the client's
     // apply rule ("apply only when env > local") — server and client can never
     // diverge on an equal-timestamp tie.
+    // For an entity an older build may push without some columns, the stored
+    // copy's data comes back in the same read, for keepOmittedKeys below.
     const existing = await env.DB
-      .prepare('SELECT updated_at, deleted FROM sync_rows WHERE uid = ?')
+      .prepare(KEEPS_OMITTED_KEYS.has(row.entity)
+        ? 'SELECT updated_at, deleted, entity, data FROM sync_rows WHERE uid = ?'
+        : 'SELECT updated_at, deleted FROM sync_rows WHERE uid = ?')
       .bind(row.uid)
       .first();
 
@@ -213,7 +217,8 @@ async function handlePush(request, env) {
     // the list) still clears it. A deletion is never merged: a tombstone is
     // pushed with empty data precisely so the patient's details leave the
     // server, and a row coming back from deletion has nothing stored to keep.
-    const data = existing && !existing.deleted && !row.deleted ? await keepOmittedKeys(env, row.uid, row.entity, row.data) : row.data;
+    const data = existing && !existing.deleted && !row.deleted && KEEPS_OMITTED_KEYS.has(row.entity)
+      ? keepOmittedKeys(existing, row.entity, row.data) : row.data;
     const dataStr =
       typeof data === 'string' ? data : JSON.stringify(data);
 
@@ -246,18 +251,23 @@ async function handlePush(request, env) {
   return json({ ok: true, applied, skipped, time: nowIso() });
 }
 
+// The entities a newer build has added columns to, so that a push from an
+// older one can leave some out: the event (its City list), the triage row and
+// the treatment row, all in v0.0.15. Only these pay for reading the stored
+// copy back — every other entity's rows (x-ray images and consent signatures
+// among them) are stored as sent, as before. When a column is added to another
+// entity's SYNC_COLS in the app, that entity joins this list.
+const KEEPS_OMITTED_KEYS = new Set(['event', 'triage', 'treatment']);
+
 // The incoming data with every key it omits filled from the stored live copy
-// of the same row. The app always sends every column it knows (a column it has
-// no value for goes as null), so an omitted key only ever means "this build
-// does not have that column", never "remove it".
-async function keepOmittedKeys(env, uid, entity, incoming) {
+// of the same row (as read by the push's own lookup). The app always sends
+// every column it knows (a column it has no value for goes as null), so an
+// omitted key only ever means "this build does not have that column", never
+// "remove it".
+function keepOmittedKeys(stored, entity, incoming) {
   const next = parseData(incoming);
   if (!next || typeof next !== 'object' || Array.isArray(next)) return incoming;
-  const stored = await env.DB
-    .prepare('SELECT data FROM sync_rows WHERE uid = ? AND entity = ? AND deleted = 0')
-    .bind(uid, entity)
-    .first();
-  const prev = stored ? parseData(stored.data) : null;
+  const prev = stored && stored.entity === entity ? parseData(stored.data) : null;
   if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return incoming;
   const missing = Object.keys(prev).filter((k) => !(k in next));
   if (!missing.length) return incoming;

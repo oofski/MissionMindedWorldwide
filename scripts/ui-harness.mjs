@@ -4837,6 +4837,57 @@ async function main() {
       && sc3.lock.history.map((h) => h.action).join(',') === 'lock,unlock' && sc3.lock.locked_at === null && sc3.lock.locked_by_name === null
       && sc3.treatment.clinical_notes === 'Amended after the unlock: #3 was #4',
       'sync: an administrator\'s unlock made after the lock does lift it, its content applies, and the unlocked record no longer reports a current lock stamp');
+    // A LOCKED copy can be as stale: one from the first sign-off, before that
+    // unlock, from a laptop that never saw it. Taken whole because it said
+    // "locked", it erased the amendment and its unlock on every laptop — and
+    // the refusal above is exactly what re-pushes such a copy. Over the open
+    // amendment first, then over the amendment signed again.
+    const scFirst = { ...sc1Out.data };
+    const scTrail = (pt) => pt.lock.history.map((h) => h.action).join(',');
+    const scAt4 = scAt(4);
+    db.applyRemoteRows([{ ...scEnv, data: scFirst, updated_at: scAt4 }]);
+    const sc4 = db.getPatient(scP.id);
+    const sc4Out = scOut();
+    log(!sc4.treatment.locked && sc4.lock.amending && sc4.treatment.clinical_notes === 'Amended after the unlock: #3 was #4' && scTrail(sc4) === 'lock,unlock'
+      && sc4.lock.unlocked_by_name === 'Admin Elsewhere' && sc4.status === 'completed'
+      && !!sc4Out && Number(sc4Out.data.locked) === 0 && sc4Out.data.clinical_notes === 'Amended after the unlock: #3 was #4' && sc4Out.updated_at > scAt4 && sc4Out.updated_at < scAt(5),
+      'sync: a copy locked at the first sign-off does not undo an administrator\'s later unlock — the amendment stays open, and goes back up just above it');
+    // Nor does an UNLOCKED copy from a laptop that never saw the sign-off (a
+    // v0.0.14 one, or this build's) when it reaches the open amendment: it put
+    // the chart from before the sign-off in its place and cleared the unlock.
+    const scAt45 = scAt(4.5);
+    db.applyRemoteRows([{ ...scEnv, data: scOldLaptop, updated_at: scAt45 }]);
+    db.applyRemoteRows([{ ...scEnv, data: scNewStale, updated_at: scAt(4.6) }]);
+    const sc45 = db.getPatient(scP.id);
+    const sc45Out = scOut();
+    log(!sc45.treatment.locked && sc45.lock.amending && sc45.treatment.clinical_notes === 'Amended after the unlock: #3 was #4' && sc45.lock.unlocked_by_name === 'Admin Elsewhere'
+      && scTrail(sc45) === 'lock,unlock' && !!sc45Out && sc45Out.data.clinical_notes === 'Amended after the unlock: #3 was #4' && sc45Out.updated_at > scAt45,
+      'sync: nor does an unlocked copy saved before the sign-off replace the open amendment — it stays, unlocked, and goes back up');
+    db.saveTreatment(signInAdmin(), scP.id, { fillings: [{ tooth: '4', surfaces: ['O'] }], provider_name: 'Dr S', provider_signature: 'data:,s2', clinical_notes: 'Re-signed: the filling was on #4' }, 'lock');
+    const scRelocked = db.getPatient(scP.id);
+    const scAt5 = scAt(5);
+    db.applyRemoteRows([{ ...scEnv, data: scFirst, updated_at: scAt5 }]);
+    const sc5 = db.getPatient(scP.id);
+    const sc5Out = scOut();
+    const scAmended = (t) => !!t && Number(t.locked) === 1 && t.clinical_notes === 'Re-signed: the filling was on #4' && t.provider_signature === 'data:,s2'
+      && JSON.stringify(asJson(t.fillings)) === JSON.stringify([{ tooth: '4', surfaces: ['O'] }]);
+    log(scTrail(scRelocked) === 'lock,unlock,relock' && Date.parse(scRelocked.lock.locked_at) > Date.parse(scUnAt)
+      && scAmended(sc5.treatment) && sc5.lock.locked_at === scRelocked.lock.locked_at && scTrail(sc5) === 'lock,unlock,relock'
+      && !!sc5Out && scAmended(sc5Out.data) && sc5Out.updated_at > scAt5 && sc5Out.updated_at < scAt(6),
+      'sync: nor does it put the first chart and signature back over the amendment signed again — the re-signed record, its unlock and re-lock stay, and go back up');
+    // What does apply, a later unlock made on a laptop that only ever saw the
+    // first sign-off, keeps the entries of the trail it never saw: the trail
+    // is merged, and the merged row goes back up.
+    const scUn2 = new Date(Date.parse(scRelocked.lock.locked_at) + 60e3).toISOString();
+    const scAt6 = scAt(6);
+    db.applyRemoteRows([{ ...scEnv, updated_at: scAt6, data: { ...scFirst, locked: 0, unlocked_at: scUn2, unlocked_by_name: 'Admin Two', unlock_reason: 'Missing note',
+      lock_history: JSON.stringify([...JSON.parse(scFirst.lock_history), { action: 'unlock', at: scUn2, by: 'Admin Two', reason: 'Missing note' }]) } }]);
+    const sc6 = db.getPatient(scP.id);
+    const sc6Out = scOut();
+    log(!sc6.treatment.locked && sc6.lock.unlocked_by_name === 'Admin Two' && scTrail(sc6) === 'lock,unlock,relock,unlock'
+      && sc6.lock.history[1].by === 'Admin Elsewhere' && sc6.lock.history[3].by === 'Admin Two'
+      && !!sc6Out && asJson(sc6Out.data.lock_history).map((h) => h.action).join(',') === 'lock,unlock,relock,unlock' && sc6Out.updated_at > scAt6,
+      'sync: a later unlock from a laptop that never saw the amendment lifts the lock, and the trail keeps the amendment\'s unlock and re-lock alongside it');
 
     /* ---- a record locked before v0.0.15 ---- */
     const oldL = mkC('Olga', 'Oldlock', { route: 'dentist' });
@@ -5412,6 +5463,12 @@ async function main() {
     const bk1 = db.getPatient(bk.id);
     log(bkWhole(bk1) && trailOf(bk1) === 'lock',
       'restore: a backup taken mid-visit does not unlock a record signed off since, nor put the unsigned chart back — the lock, its trail and the signed record stay');
+    // Nor the rest of the visit around it: the patient went back "in
+    // treatment" under the signed, locked chart — no clinician could complete
+    // or lock it, and check-out never listed them.
+    const bk1Co = db.listPatients({}).find((x) => x.id === bk.id);
+    log(bkLocked.status === 'completed' && bk1.status === 'completed' && bk1.triage.status === 'completed' && bk1Co.status === 'completed' && bk1Co.locked,
+      'restore: and the patient stays where the signed record left them — completed, in the check-out queue — not back in treatment under a locked chart');
     // A backup from a build whose trail was empty for this record (or before
     // the trail existed) never wipes the one here; the two are merged.
     for (const empty of [null, '[]']) {
@@ -5433,6 +5490,20 @@ async function main() {
     const bk3 = db.getPatient(bk.id);
     log(bkAm.lock.amending && !bk3.treatment.locked && bk3.lock.amending && bk3.lock.unlocked_at === bkAm.lock.unlocked_at && trailOf(bk3) === 'lock,unlock',
       'restore: nor does a backup taken at sign-off lock again a record an administrator has since unlocked to amend');
+    // Nor, once that amendment is signed again, put the first sign-off back:
+    // its chart, signature and lock stamp, under a trail that still recorded
+    // the amendment — a record that printed the uncorrected chart as amended.
+    db.saveTreatment(docF(), bk.id, { fillings: [{ tooth: '14', surfaces: ['M', 'O', 'D'] }], provider_name: 'Dr Fixley', provider_signature: 'data:,bk2',
+      clinical_notes: 'Final: #14 MOD (amended)' }, 'lock');
+    const bkResigned = db.getPatient(bk.id);
+    db.importClinicBundle(signInAdmin(), bkSignedOff);
+    const bk3b = db.getPatient(bk.id);
+    const bk3bPdf = require('../src/main/pdf.js').buildHtml(bk3b, 'progress').replace(/<style>[\s\S]*?<\/style>/, ' ').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+    log(trailOf(bkResigned) === 'lock,unlock,relock' && bk3b.treatment.locked && bk3b.lock.locked_at === bkResigned.lock.locked_at
+      && bk3b.treatment.clinical_notes === 'Final: #14 MOD (amended)' && bk3b.treatment.provider_signature === 'data:,bk2'
+      && JSON.stringify(bk3b.treatment.fillings) === JSON.stringify([{ tooth: '14', surfaces: ['M', 'O', 'D'] }]) && trailOf(bk3b) === 'lock,unlock,relock'
+      && bk3b.status === 'completed' && /Final: #14 MOD \(amended\)/.test(bk3bPdf) && !/Final: #14 MO /.test(bk3bPdf),
+      'restore: nor does a backup from the first sign-off undo an amendment signed again — the corrected chart, its signature and re-lock stay, and it prints as corrected');
     // A backup that carries an unlock made after the lock here does lift it,
     // and its content applies — with both trails kept.
     if (!db.getPatient(bk.id).treatment.locked) db.lockRecord(signInAdmin(), bk.id);
@@ -5447,6 +5518,124 @@ async function main() {
     log(!bk4.treatment.locked && bk4.lock.unlocked_by_name === 'Admin Elsewhere' && bk4.treatment.clinical_notes === 'Final: #15 MO (was #14)'
       && trailOf(bk4) === 'lock,unlock,relock,unlock' && bk4.lock.history[3].by === 'Admin Elsewhere',
       'restore: a backup carrying an unlock made after the lock here does lift it, its content applies, and both trails are kept');
+    // A backup made before the chart existed at all, restored over a visit
+    // signed off, locked and checked out since: nothing in it can weigh
+    // against the lock, and the record stays as signed — the patient checked
+    // out, by whom, with the vitals the chart was signed against — while the
+    // contact details, which a locked record still lets check-out correct,
+    // are restored.
+    const cl = mkF('Cleo', 'dentist');
+    const bkPreChart = JSON.parse(JSON.stringify(db.exportClinicBundle(evR.id)));
+    db.saveVitals(emtF(), cl.id, { bp_systolic: '150', bp_diastolic: '95', heart_rate: '88' });
+    db.saveTreatment(docF(), cl.id, { extractions: [{ tooth: '30', type: 'simple' }], provider_name: 'Dr Fixley', provider_signature: 'data:,cl', clinical_notes: 'Extracted #30' }, 'lock');
+    const bkClSigned = JSON.parse(JSON.stringify(db.exportClinicBundle(evR.id)));
+    db.dismissPatient(signInAdmin(), cl.id);
+    db.updatePatient(signInAdmin(), cl.id, { phone: '5035559999' });
+    const clOut = db.getPatient(cl.id);
+    db.importClinicBundle(signInAdmin(), bkPreChart);
+    const clBack = db.getPatient(cl.id);
+    log(clOut.status === 'dismissed' && clBack.status === 'dismissed' && clBack.dismissed_at === clOut.dismissed_at && clBack.dismissed_by_name === clOut.dismissed_by_name
+      && clBack.treatment.locked && clBack.treatment.clinical_notes === 'Extracted #30' && String(clBack.triage.bp_systolic) === '150'
+      && clBack.triage.status === clOut.triage.status && clBack.phone === '5035550123',
+      'restore: a backup from before the chart existed leaves a visit signed off and checked out since as it is — stage, check-out and vitals — and restores its contact details');
+    // As does one taken at that very sign-off, before the check-out: the record
+    // here is under the same lock, so the backup has nothing newer to give it —
+    // it never puts a patient who has left back in the check-out queue.
+    db.importClinicBundle(signInAdmin(), bkClSigned);
+    const clBack2 = db.getPatient(cl.id);
+    log(clBack2.status === 'dismissed' && clBack2.dismissed_at === clOut.dismissed_at && clBack2.treatment.locked && clBack2.lock.locked_at === clOut.lock.locked_at,
+      'restore: nor does a backup of the same sign-off, taken before the patient checked out, put them back in the check-out queue');
+
+    /* ---- laptops and a cloud ---- */
+    // These seams only show when copies travel between laptops in the order a
+    // clinic's actually do. So each laptop here has its own database, and they
+    // push to and pull from a last-write-wins cloud (one row per uid, handed
+    // out in the order it was stored, as the Worker does). A separate process:
+    // the data layer holds one connection, so the laptops are opened in turn.
+    const { execFileSync: execSim } = await import('node:child_process');
+    const { fileURLToPath: toPathSim } = await import('node:url');
+    const simProbe = `
+      const os=require('os'),fs=require('fs'),path=require('path');
+      const db=require(process.argv[2]);
+      const root=fs.mkdtempSync(path.join(os.tmpdir(),'mmwsim-'));
+      const out={};
+      const world=(name)=>{
+        const cloud={seq:0,rows:new Map()};const cursor={};
+        const on=(who,fn)=>{db.close();const dir=path.join(root,name+'-'+who);const fresh=!fs.existsSync(dir);db.init(dir);if(fresh)db.setSetting('cloud_device_id','dev'+who);return fn();};
+        const push=(who)=>on(who,()=>{const s=db.collectSyncRows(5000);
+          for(const r of s.rows){const st=cloud.rows.get(r.uid);if(st&&String(r.updated_at)<=String(st.updated_at))continue;cloud.rows.set(r.uid,{...JSON.parse(JSON.stringify(r)),seq:++cloud.seq});}
+          db.markSynced(s.mark);});
+        const pull=(who)=>on(who,()=>{const from=cursor[who]||0;
+          db.applyRemoteRows([...cloud.rows.values()].filter((r)=>r.seq>from).sort((a,b)=>a.seq-b.seq).map(({seq,...r})=>JSON.parse(JSON.stringify(r))));
+          cursor[who]=cloud.seq;});
+        return {on,push,pull};
+      };
+      const pat=()=>db.listPatients({eventId:'all'}).find((x)=>x.first_name==='Amy');
+      const doc=()=>db.login('sim_doc','x');
+      const state=()=>{const g=db.getPatient(pat().id);return {status:g.status,locked:!!g.treatment.locked,amending:!!g.lock.amending,notes:g.treatment.clinical_notes,
+        fillings:JSON.stringify(g.treatment.fillings),sig:g.treatment.provider_signature||null,trail:g.lock.history.map((h)=>h.action).join(',')};};
+      const setup=(w)=>w.on('A',()=>{const a=db.login('admin','admin');const ev=db.createEvent(a,{name:'Sim Clinic',location:'X'});db.setActiveEvent(a,ev.id);
+        db.createUser(a,{username:'sim_doc',full_name:'Doc Sim',role:'doctor',password:'x'});
+        db.createUser(a,{username:'sim_hy',full_name:'Hy Sim',role:'hygienist',password:'x'});
+        const p=db.createPatient(a,{first_name:'Amy',last_name:'Sim',dob:'1980-01-01',gender:'female',phone:'5035550000',demographics:{},medical_history:{},
+          dental_history:{visit_type:'filling'},consents:[{type:'general',signer_name:'Amy',signature_png:'data:,x'}]});
+        db.saveVitals(a,p.id,{bp_systolic:'120',bp_diastolic:'80',heart_rate:'70'});db.routePatient(a,p.id,'both');
+        db.saveTreatment(doc(),p.id,{fillings:[{tooth:'14',surfaces:['M']}],provider_name:'Doc Sim',clinical_notes:'started'},false);});
+
+      /* An amendment against a laptop that only saw the first sign-off, and
+         one that never saw the sign-off at all. 'direct': the laptop with the
+         open amendment receives the stale copy itself, before anyone else. */
+      for (const variant of ['relock','open','direct']) {
+        const w=world(variant);
+        setup(w);w.push('A');w.pull('C');w.pull('D');
+        w.on('A',()=>db.saveTreatment(doc(),pat().id,{fillings:[{tooth:'14',surfaces:['M']}],provider_name:'Doc Sim',provider_signature:'data:,SIG1',clinical_notes:'Filled #14 M'},'lock'));
+        w.push('A');w.pull('C');
+        w.on('A',()=>{const id=pat().id;db.unlockRecord(db.login('admin','admin'),id,'Wrong tooth');
+          db.saveTreatment(doc(),id,{fillings:[{tooth:'15',surfaces:['M']}],provider_name:'Doc Sim',provider_signature:variant==='relock'?'data:,SIG2':null,
+            clinical_notes:'Amended: #15 M, not #14'},variant==='relock'?'lock':false);});
+        w.push('A');
+        w.on('D',()=>{const g=db.getPatient(pat().id);db.saveTreatment(doc(),g.id,{fillings:g.treatment.fillings,provider_name:'Doc Sim',clinical_notes:'started (offline laptop)'},false);});
+        w.push('D');
+        for (const who of variant==='direct'?['A','C','D','A','C','D']:['C','A','D','C','A','D']) { w.pull(who); w.push(who); }
+        out[variant]={A:w.on('A',state),C:w.on('C',state),D:w.on('D',state)};
+      }
+
+      /* A sign-off, and a laptop that saved the chart before it arrived. */
+      {
+        const w=world('stale');
+        setup(w);w.push('A');w.pull('B');
+        w.on('A',()=>db.saveTreatment(doc(),pat().id,{fillings:[{tooth:'14',surfaces:['M','O']}],provider_name:'Doc Sim',provider_signature:'data:,SIG',clinical_notes:'final'},'lock'));
+        w.push('A');
+        w.on('B',()=>{const g=db.getPatient(pat().id);const tx=g.treatment;
+          db.saveTreatment(db.login('sim_hy','x'),g.id,{fillings:tx.fillings,extractions:tx.extractions,anesthetic:tx.anesthetic,cleaning:{prophy:true},
+            other_procedures:tx.other_procedures,clinical_notes:tx.clinical_notes,provider_name:'Hy Sim',provider_signature:null,restorative:tx.restorative,services:tx.services},'cleaning');});
+        w.push('B');
+        for (const who of ['A','B','A','B']) { w.pull(who); w.push(who); }
+        out.stale={A:w.on('A',state),B:w.on('B',state)};
+        out.staleQueue=w.on('B',()=>db.listPatients({eventId:'all'}).filter((x)=>x.status==='completed').map((x)=>x.first_name));
+      }
+      db.close();fs.rmSync(root,{recursive:true,force:true});
+      process.stdout.write(JSON.stringify(out));
+    `;
+    const simFile = path.join(toPathSim(new URL('.', import.meta.url)), '.sync-sim-probe.cjs');
+    let sim;
+    try {
+      fs.writeFileSync(simFile, simProbe);
+      sim = JSON.parse(execSim(process.execPath, [simFile, toPathSim(new URL('../src/main/db.js', import.meta.url))], { encoding: 'utf8' }));
+    } finally {
+      fs.rmSync(simFile, { force: true });
+    }
+    const simAll = (v, pred) => Object.values(sim[v]).every(pred);
+    log(simAll('relock', (s) => s.status === 'completed' && s.locked && s.notes === 'Amended: #15 M, not #14' && s.fillings === JSON.stringify([{ tooth: '15', surfaces: ['M'] }])
+      && s.sig === 'data:,SIG2' && s.trail === 'lock,unlock,relock'),
+      'sync, three laptops: an amendment signed again survives a laptop that only saw the first sign-off re-pushing it over a stale copy — everywhere, with its unlock and re-lock');
+    log(simAll('open', (s) => s.status === 'completed' && !s.locked && s.amending && s.notes === 'Amended: #15 M, not #14' && s.trail === 'lock,unlock'),
+      'sync, three laptops: and an amendment still open is not locked again with the first chart');
+    log(simAll('direct', (s) => s.status === 'completed' && !s.locked && s.amending && s.notes === 'Amended: #15 M, not #14' && s.trail === 'lock,unlock'),
+      'sync, three laptops: nor replaced by the chart of a laptop that never saw the sign-off, when that copy reaches the amending laptop first');
+    log(simAll('stale', (s) => s.status === 'completed' && s.locked && s.notes === 'final' && s.sig === 'data:,SIG')
+      && JSON.stringify(sim.stale.B) === JSON.stringify(sim.stale.A) && sim.staleQueue.includes('Amy'),
+      'sync, two laptops: a laptop that saved the chart before the sign-off reached it ends with the signed record and the patient completed, in its check-out queue');
 
     /* ---- the online form, as a browser puts it back ---- */
     // A reload, Back or a restored tab refills the answers WITHOUT change

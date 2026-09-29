@@ -22,14 +22,32 @@ works locally and re-syncs when reconnected.
   edited from the chart as it stood before the lock, so NONE of it applies — not the
   sign-off columns, and not the notes, procedures, provider name or signature either:
   the signed record stays whole and is pushed back just above the stamp of the copy it
-  refused, so it wins everywhere. A clinic-backup restore applies the same rule, and
-  merges the backup's lock trail with the laptop's instead of replacing it.
+  refused, so it wins everywhere. A copy that arrives LOCKED is refused the same way
+  when the last lock or unlock it knows of (`locked_at` or `completed_at`, and
+  `unlocked_at`) comes before the last one the laptop holds — a copy from an earlier
+  sign-off, which would otherwise erase an administrator's unlock and the amendment
+  made after it (and re-signed, or still open). Of two sign-offs neither laptop knew
+  of, the later one stands. `lock_history` is never replaced by an arriving copy: the
+  two trails are merged (every entry once, in time order), and a merged row is pushed
+  back like any other the laptop did not take whole. A clinic-backup restore applies
+  the same rules; for a record whose signed chart it keeps, it also keeps what the lock
+  protects — the patient's stage and check-out, identity and histories, and the triage
+  row — and restores only the contact details.
+- **A stage that did not change is not stamped (v0.0.15, app side).** A save that leaves
+  a patient's `status` as it was changes nothing that syncs, so it no longer re-stamps
+  the patient row: a local-only stamp outranked, and so refused, a peer's newer copy
+  (a visit completed at another station stayed "in treatment" on the laptop that had
+  saved the chart before the sign-off arrived).
 - **An omitted key is not a cleared one (v0.0.15, Worker side).** The app always sends
   every column it knows, with `null` for one it has no value for, so a key missing from
   a pushed live row means only that the sender's build does not have that column. The
   Worker keeps such keys from the stored live copy of the row, so a laptop still on an
   older build cannot strip newer columns from the cloud copy (and from every laptop that
-  later pulls it). An explicit `null` still clears. Deletions are never merged: a
+  later pulls it). Only for the entities a newer build added columns to (`event`,
+  `triage`, `treatment`), and from the push's own stamp lookup, so it costs no extra
+  read; other rows (x-ray images, consent signatures) are stored as sent. When a column
+  is added to another entity, that entity joins the Worker's list. An explicit `null`
+  still clears. Deletions are never merged: a
   tombstone is pushed with `data: {}` precisely to scrub the patient's details from the
   server, and a row revived after a deletion holds exactly what the restore sent.
 

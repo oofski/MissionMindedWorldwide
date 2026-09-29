@@ -27,8 +27,10 @@ function check(name, cond) {
 function makeFakeD1() {
   const store = new Map(); // uid -> row object
   let seq = 0; // the server's delivery counter (sync_seq table)
+  const log = []; // every statement prepared, in order
 
   function prepare(sql) {
+    log.push(sql);
     return {
       _sql: sql,
       _binds: [],
@@ -38,23 +40,22 @@ function makeFakeD1() {
       },
       async first() {
         const s = this._sql;
-        if (/SELECT updated_at(, deleted)? FROM sync_rows WHERE uid = \?/.test(s)) {
+        // Push: the stored row's stamp and deletion flag — and, for an entity
+        // whose older builds omit columns, its entity and data in the same read.
+        const lookup = /^SELECT updated_at(, deleted)?(, entity, data)? FROM sync_rows WHERE uid = \?$/.exec(s);
+        if (lookup) {
           const uid = this._binds[0];
           const row = store.get(uid);
-          return row ? { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 } : null;
+          if (!row) return null;
+          const out = { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 };
+          if (lookup[2]) Object.assign(out, { entity: row.entity, data: row.data });
+          return out;
         }
         // Pre-registration: look up an event row by uid (must exist, not deleted).
         if (/SELECT data FROM sync_rows WHERE uid = \? AND entity = 'event' AND deleted = 0/.test(s)) {
           const uid = this._binds[0];
           const row = store.get(uid);
           return row && row.entity === 'event' && !row.deleted ? { data: row.data } : null;
-        }
-        // Push: the stored live copy of the same row, to keep what an older
-        // build's push leaves out.
-        if (/SELECT data FROM sync_rows WHERE uid = \? AND entity = \? AND deleted = 0/.test(s)) {
-          const [uid, entity] = this._binds;
-          const row = store.get(uid);
-          return row && row.entity === entity && !row.deleted ? { data: row.data } : null;
         }
         // v1.5.0 delivery counter: reserve the next sequence number.
         if (/INSERT INTO sync_seq .*ON CONFLICT\(id\) DO UPDATE SET v = v \+ 1 RETURNING v/.test(s)) {
@@ -130,7 +131,7 @@ function makeFakeD1() {
     };
   }
 
-  return { prepare, _store: store };
+  return { prepare, _store: store, _log: log };
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1065,24 @@ async function main() {
     const x1 = stored('tx-mixed').data;
     check('mixed fleet: an older laptop\'s treatment push (sent as a JSON string, too) keeps the referral, Restorative and the lock stamp and trail',
       x1.referral_out === '{"to":["oral_surgeon"]}' && x1.restorative === '{"crown":{"on":true}}' && x1.locked_by_name === 'Dr New' && x1.lock_history === trail);
+
+    // Keeping those keys costs no extra read: the stored copy comes back with
+    // the stamp lookup every push already makes, and only for the entities a
+    // newer build added columns to — an x-ray re-push never reads its stored
+    // image back.
+    const readsOf = async (rows) => {
+      const from = envM.DB._log.length;
+      const res = await push(rows);
+      return { res, reads: envM.DB._log.slice(from).filter((q) => /^\s*SELECT .* FROM sync_rows/.test(q)) };
+    };
+    const txRe = await readsOf([row('treatment', 'tx-mixed', '2026-09-01T11:06:00.000Z@old', { fillings: '[]', clinical_notes: 'Signed again', locked: 1 })]);
+    const x2 = stored('tx-mixed').data;
+    await push([row('xray', 'xr-mixed', '2026-09-01T11:07:00.000Z@new', { station: 'triage', image_png: 'data:image/png;base64,AAAA', note: null, created_at: '2026-09-01T11:07:00.000Z', tooth: '3' })]);
+    const xrRe = await readsOf([row('xray', 'xr-mixed', '2026-09-01T11:08:00.000Z@new', { station: 'triage', image_png: 'data:image/png;base64,AAAA', note: 'Bitewing', created_at: '2026-09-01T11:07:00.000Z', tooth: '3' })]);
+    check('mixed fleet: a re-pushed row is read once — the stored copy a treatment row keeps keys from comes with the stamp lookup, and an x-ray\'s image is never read back',
+      txRe.res.data.applied === 1 && txRe.reads.length === 1 && /entity, data/.test(txRe.reads[0])
+      && x2.clinical_notes === 'Signed again' && x2.lock_history === trail && x2.referral_out === '{"to":["oral_surgeon"]}'
+      && xrRe.res.data.applied === 1 && xrRe.reads.length === 1 && !/data/.test(xrRe.reads[0]) && stored('xr-mixed').data.note === 'Bitewing');
 
     // An upgraded laptop that has no value sends null, and null still clears.
     await push([row('triage', 't-mixed', '2026-09-01T10:10:00.000Z@new', { status: 'in_treatment', route: 'dentist', bp_systolic: '118',
