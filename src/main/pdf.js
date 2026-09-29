@@ -337,7 +337,7 @@ function fullPacketBody(p) {
 
     <h2>Medical History</h2>
     <table class="grid">${gridRows(medCells)}</table>
-    <div><span class="label">Medication allergies${md.allergyStatus ? ' — ' + esc(medicalLabels.ALLERGY_STATUS_LABELS[md.allergyStatus]) : ''}</span><div class="chips">${allergies}</div></div>
+    <div><span class="label">Medication allergies</span><div class="chips">${allergies}</div></div>
     <div><span class="label">Conditions</span><div class="chips">${conditions}</div></div>
     ${md.unsure.length ? `<div><span class="label">Unsure — ask the patient</span><div class="chips">${chips(md.unsure.map((c) => c.label), 'flag')}</div></div>` : ''}
     <div><span class="label">Current medications</span>
