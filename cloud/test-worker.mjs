@@ -27,8 +27,10 @@ function check(name, cond) {
 function makeFakeD1() {
   const store = new Map(); // uid -> row object
   let seq = 0; // the server's delivery counter (sync_seq table)
+  const log = []; // every statement prepared, in order
 
   function prepare(sql) {
+    log.push(sql);
     return {
       _sql: sql,
       _binds: [],
@@ -38,10 +40,16 @@ function makeFakeD1() {
       },
       async first() {
         const s = this._sql;
-        if (/SELECT updated_at(, deleted)? FROM sync_rows WHERE uid = \?/.test(s)) {
+        // Push: the stored row's stamp and deletion flag — and, for an entity
+        // whose older builds omit columns, its entity and data in the same read.
+        const lookup = /^SELECT updated_at(, deleted)?(, entity, data)? FROM sync_rows WHERE uid = \?$/.exec(s);
+        if (lookup) {
           const uid = this._binds[0];
           const row = store.get(uid);
-          return row ? { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 } : null;
+          if (!row) return null;
+          const out = { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 };
+          if (lookup[2]) Object.assign(out, { entity: row.entity, data: row.data });
+          return out;
         }
         // Pre-registration: look up an event row by uid (must exist, not deleted).
         if (/SELECT data FROM sync_rows WHERE uid = \? AND entity = 'event' AND deleted = 0/.test(s)) {
@@ -123,7 +131,7 @@ function makeFakeD1() {
     };
   }
 
-  return { prepare, _store: store };
+  return { prepare, _store: store, _log: log };
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1027,83 @@ async function main() {
     rows = (await pull()).data.rows.filter((r) => r.uid === 'p-sticky');
     check('v1.6.1: a deliberate restore is allowed to bring the record back',
       revive.data.applied === 1 && rows[0].deleted === 0 && rows[0].data.last_name === 'Again');
+  }
+
+  // --- v0.0.15: a laptop on an older build does not strip the newer columns ---
+  // The server used to store every push whole. A v0.0.14 laptop re-saving a
+  // triage or treatment row sends only the columns it knows, so the x-ray
+  // count, the Treatment Waiting stamp, glucose, the referral, the lock trail
+  // and the history-review stamp vanished from the cloud copy — and a laptop
+  // set up fresh or restored from the cloud never received them.
+  {
+    const envM = { CLINIC_KEY, DB: makeFakeD1() };
+    const push = (rows) => call(envM, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: 'd', rows } });
+    const stored = (uid) => { const r = envM.DB._store.get(uid); return r ? { ...r, data: JSON.parse(r.data) } : null; };
+    const pulled = async (uid) => (await call(envM, 'GET', '/v1/pull?since=0&limit=100', { auth: CLINIC_KEY })).data.rows.find((r) => r.uid === uid);
+    const row = (entity, uid, stamp, data, extra = {}) => ({ entity, uid, event_uid: entity === 'patient' ? 'e-mixed' : null,
+      patient_uid: entity === 'patient' ? null : 'p-mixed', deleted: 0, updated_at: stamp, data, ...extra });
+
+    // An upgraded laptop sends the whole triage row, the new columns included.
+    await push([row('triage', 't-mixed', '2026-09-01T10:00:00.000Z@new', { status: 'treatment_waiting', route: 'dentist', bp_systolic: '120',
+      xrays_taken: 2, treatment_waiting_at: '2026-09-01T09:58:00.000Z', treatment_waiting_by_name: 'Dr New', glucose: '110', respiration: '18',
+      history_reviewed_at: '2026-09-01T09:40:00.000Z', history_reviewed_by_name: 'Emt New' })]);
+    // Then a v0.0.14 laptop saves it later, knowing none of them.
+    const oldTri = await push([row('triage', 't-mixed', '2026-09-01T10:05:00.000Z@old', { status: 'in_treatment', route: 'dentist', bp_systolic: '118' })]);
+    const t1 = stored('t-mixed').data;
+    const t1Pulled = await pulled('t-mixed');
+    check('mixed fleet: an older laptop\'s triage push keeps the x-ray count, Treatment Waiting stamp, glucose, breathing rate and review stamp it does not know — and its own edit lands',
+      oldTri.data.applied === 1 && t1.status === 'in_treatment' && t1.bp_systolic === '118' && t1.xrays_taken === 2
+      && t1.treatment_waiting_at === '2026-09-01T09:58:00.000Z' && t1.treatment_waiting_by_name === 'Dr New' && t1.glucose === '110' && t1.respiration === '18'
+      && t1.history_reviewed_by_name === 'Emt New');
+    check('mixed fleet: so a laptop set up fresh pulls them', !!t1Pulled && t1Pulled.data.xrays_taken === 2 && t1Pulled.data.glucose === '110');
+
+    // The treatment row: the referral, Restorative and the lock trail.
+    const trail = JSON.stringify([{ action: 'lock', at: '2026-09-01T11:00:00.000Z', by: 'Dr New' }]);
+    await push([row('treatment', 'tx-mixed', '2026-09-01T11:00:00.000Z@new', { fillings: '[]', clinical_notes: 'Signed', locked: 1,
+      referral_out: '{"to":["oral_surgeon"]}', restorative: '{"crown":{"on":true}}', locked_at: '2026-09-01T11:00:00.000Z', locked_by_name: 'Dr New', lock_history: trail })]);
+    await push([row('treatment', 'tx-mixed', '2026-09-01T11:05:00.000Z@old', JSON.stringify({ fillings: '[]', clinical_notes: 'Signed', locked: 1 }))]);
+    const x1 = stored('tx-mixed').data;
+    check('mixed fleet: an older laptop\'s treatment push (sent as a JSON string, too) keeps the referral, Restorative and the lock stamp and trail',
+      x1.referral_out === '{"to":["oral_surgeon"]}' && x1.restorative === '{"crown":{"on":true}}' && x1.locked_by_name === 'Dr New' && x1.lock_history === trail);
+
+    // Keeping those keys costs no extra read: the stored copy comes back with
+    // the stamp lookup every push already makes, and only for the entities a
+    // newer build added columns to — an x-ray re-push never reads its stored
+    // image back.
+    const readsOf = async (rows) => {
+      const from = envM.DB._log.length;
+      const res = await push(rows);
+      return { res, reads: envM.DB._log.slice(from).filter((q) => /^\s*SELECT .* FROM sync_rows/.test(q)) };
+    };
+    const txRe = await readsOf([row('treatment', 'tx-mixed', '2026-09-01T11:06:00.000Z@old', { fillings: '[]', clinical_notes: 'Signed again', locked: 1 })]);
+    const x2 = stored('tx-mixed').data;
+    await push([row('xray', 'xr-mixed', '2026-09-01T11:07:00.000Z@new', { station: 'triage', image_png: 'data:image/png;base64,AAAA', note: null, created_at: '2026-09-01T11:07:00.000Z', tooth: '3' })]);
+    const xrRe = await readsOf([row('xray', 'xr-mixed', '2026-09-01T11:08:00.000Z@new', { station: 'triage', image_png: 'data:image/png;base64,AAAA', note: 'Bitewing', created_at: '2026-09-01T11:07:00.000Z', tooth: '3' })]);
+    check('mixed fleet: a re-pushed row is read once — the stored copy a treatment row keeps keys from comes with the stamp lookup, and an x-ray\'s image is never read back',
+      txRe.res.data.applied === 1 && txRe.reads.length === 1 && /entity, data/.test(txRe.reads[0])
+      && x2.clinical_notes === 'Signed again' && x2.lock_history === trail && x2.referral_out === '{"to":["oral_surgeon"]}'
+      && xrRe.res.data.applied === 1 && xrRe.reads.length === 1 && !/data/.test(xrRe.reads[0]) && stored('xr-mixed').data.note === 'Bitewing');
+
+    // An upgraded laptop that has no value sends null, and null still clears.
+    await push([row('triage', 't-mixed', '2026-09-01T10:10:00.000Z@new', { status: 'in_treatment', route: 'dentist', bp_systolic: '118',
+      xrays_taken: null, treatment_waiting_at: null, treatment_waiting_by_name: null, glucose: '110', respiration: '18',
+      history_reviewed_at: '2026-09-01T09:40:00.000Z', history_reviewed_by_name: 'Emt New' })]);
+    const t2 = stored('t-mixed').data;
+    check('mixed fleet: an explicit null from an upgraded laptop still clears the value',
+      t2.xrays_taken === null && t2.treatment_waiting_at === null && t2.treatment_waiting_by_name === null && t2.glucose === '110');
+
+    // A deletion is pushed with empty data so the patient's details leave the
+    // server. Nothing may be merged back into it, nor into a row brought back.
+    await push([row('patient', 'p-mixed', '2026-09-01T12:00:00.000Z@new', { first_name: 'Mia', last_name: 'Mixed', phone: '5035550100', dob: '1980-01-01' })]);
+    const del = await push([row('patient', 'p-mixed', '2026-09-01T12:05:00.000Z@new', {}, { deleted: 1 })]);
+    const d1 = stored('p-mixed');
+    const d1Pulled = await pulled('p-mixed');
+    check('mixed fleet: a deletion still scrubs the patient\'s details from the server — nothing is merged into a tombstone',
+      del.data.applied === 1 && d1.deleted === 1 && JSON.stringify(d1.data) === '{}' && d1Pulled.deleted === 1 && JSON.stringify(d1Pulled.data) === '{}');
+    await push([row('patient', 'p-mixed', '2026-09-01T12:10:00.000Z@new', { first_name: 'Mia', last_name: 'Mixed' }, { undelete: true })]);
+    const d2 = stored('p-mixed');
+    check('mixed fleet: a record restored after deletion holds exactly what the restore sent',
+      d2.deleted === 0 && JSON.stringify(Object.keys(d2.data).sort()) === JSON.stringify(['first_name', 'last_name']));
   }
 
   // --- v1.6.6: finishing a clinic must close its public pre-registration link ---
