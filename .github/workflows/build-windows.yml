@@ -226,36 +226,75 @@ jobs:
             > clinic, and the consent wording has not been through legal review. Do not
             > rely on it for patient records until it has.
 
-            ### New in this build
+            ### New in this build — Dr. Trinh's punch list
 
-            **Supplies — a new Admin tab that tracks what you actually have.**
-            Every clinic so far has run on somebody's memory of what went into
-            the van. This gives you one list: what is on hand, what it should be
-            reordered at, and how much this clinic has used. The screen opens on
-            what is wrong right now — what has run out, and what is at or below
-            its reorder level — with one tap to see only those.
+            **Before you install — read this.** Update **every** laptop to this
+            version together, and re-paste `cloud/worker.js` into Cloudflare
+            (docs/CLOUD_SETUP.md step 3) if you use the online pre-registration
+            link. Older laptops cannot show the new medical history or the
+            Treatment Waiting stage, and an old online form cannot submit.
 
-            **Counts come from a ledger, not a box you can overwrite.** You never
-            type "we have 40"; you record what moved — received, used, adjusted —
-            and the total is the sum of that. A recount is stored as a correction
-            alongside the original delivery, so at the end of the day the list can
-            answer *"did we use forty boxes, or leave them in the van?"*, which a
-            number somebody edited cannot. Every movement records who made it.
+            **Medical history is Dr. Trinh's form.** Every question is required
+            and answered from a dropdown or a checklist — nothing typed except
+            "Other". The 25 conditions are each Yes / No / Unsure (pregnancy also
+            Not applicable). Medication allergies start with No known allergies /
+            Yes / Unsure, then his 24-item list. Current medications are his
+            25-item checklist, with Other for anything unlisted. "Hospitalized in
+            the last 2 years" is now **major surgery in the past 6 months**, with
+            where. "Do you use tobacco" is now **Do you smoke?** Older records
+            keep showing exactly what was recorded.
 
-            **From the list, without opening anything:** −1 and +1 for the common
-            case of taking one off the shelf mid-clinic, plus search and the
-            out/low filters. Opening an item shows its full history.
+            **Step 3 asks the eight pain questions** (cold, hot, eating, toothache
+            at night, touching, clenching or grinding at night, waking with jaw
+            pain, lumps or sores). "When did you last see a dentist" and "What do
+            you need today" stay — they route the patient and trigger the
+            oral-surgery consent.
 
-            **A starter list is one click.** The anaesthetics and antibiotics in
-            it are MMW's own drug list; the rest is an ordinary portable dental
-            setup. Everything starts at zero with placeholder reorder levels —
-            nothing is counted as stocked until you record what you actually have.
+            **The survey moved to check-out.** Registration no longer has a
+            survey step (check-in is five steps). All 34 questions from Dr.
+            Trinh's survey are asked at check-out, as dropdowns; answers given at
+            an earlier registration are pre-filled for the patient to confirm.
 
-            Any clinical role can view supplies and record movements. Only an
-            administrator can add, edit or delete an item. Supply records are
-            clinic property, not patient data: clearing patient records at the end
-            of a clinic leaves the stock list intact, and the list syncs between
-            laptops like everything else.
+            **City is a dropdown.** Under Admin → Events, list the towns your
+            clinic serves; check-in and the online form then offer them, with
+            Other for anyone else. Leave the list empty and City stays a text box.
+
+            **Dentist is now Dental Triage.** Number of X-rays taken replaces the
+            X-ray station. **Move Patient to Treatment Waiting** parks an examined
+            patient for a treatment chair; the screen lists Dental Triage,
+            Treatment waiting and In treatment separately. Filling surfaces are
+            M, F, L, O, B. The anesthetic injection site is a dropdown. The
+            Services section is replaced by **Referral** (where to, how urgent,
+            tooth, reason).
+
+            **Vitals.** The EMT review questions are gone. The patient's health
+            history is open on the Vitals screen and can be edited there, or
+            marked "Reviewed with patient — no changes"; the record shows who
+            reviewed it.
+
+            **Patient information at every station.** Arrivals, Vitals, Dental
+            Triage, Hygienist, Check-out and Records all show the patient's
+            information and history, editable by role.
+
+            **Locking.** A signed-off record is read-only. An administrator can
+            **Unlock to amend** (a reason is required and kept) and **Lock** it
+            again, including finished visits that were never locked.
+
+            **Follow-up care instructions.** Check-out prints after-care matched
+            to what was actually done — extraction, surgical extraction,
+            fillings, cleaning, numbness, referral and more — in the patient's
+            language (English or Spanish), and it is added to the visit summary.
+
+            **Fixed along the way:** the dentist's Restorative and Services
+            entries never synced to other laptops and were wiped when a
+            hygienist saved; glucose and respiration never left the laptop they
+            were taken on; a laptop syncing an older copy could overwrite newer
+            work; the consent's after-hours number was a leftover Oregon number
+            and now reads MMW's (951) 317-4968.
+
+            **Waiting on MMW:** the injection-site list and anesthetic list are
+            placeholders until MMW's lists arrive, and the after-care wording is
+            a draft (marked on every sheet) until Dr. Trinh's templates replace it.
 
             ### Signing in
             Every install now comes with an administrator already set up:
