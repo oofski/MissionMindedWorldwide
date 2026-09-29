@@ -352,6 +352,15 @@ async function main() {
   log(await refusedFor('Pregnancy / Possible Pregnancy'), 'medical step refuses Next by name: the pregnancy row');
   setSel(condSel('pregnant'), 'na');
   log(await refusedFor('Current medications'), 'medical step refuses Next by name: medications');
+  // "No medications" is an answer ABOUT the list: it clears what is ticked,
+  // and ticking a medication clears it — on screen, not silently at save.
+  const litMeds = () => JSON.stringify($all('.chip-select--on', medGrid).map((b) => b.dataset.key));
+  chipOf(medGrid, 'warfarin').click();
+  chipOf(medGrid, 'none').click();
+  log(litMeds() === '["none"]', '"No medications" clears a medication already ticked, on screen');
+  chipOf(medGrid, 'aspirin').click();
+  log(litMeds() === '["aspirin"]', 'ticking a medication clears "No medications", on screen');
+  chipOf(medGrid, 'aspirin').click();
   chipOf(medGrid, 'warfarin').click();
   chipOf(medGrid, 'other').click();
   await tick();
@@ -2549,6 +2558,15 @@ async function main() {
       && same(ml.DENTAL_Q_LABELS, Object.fromEntries(st.DENTAL_QUESTIONS.map((q) => [q.key, q.short])))
       && same(ml.DENTAL_LEGACY_LABELS, Object.fromEntries(st.DENTAL_LEGACY.map((q) => [q.key, q.label]))),
     'v0.0.15: the main process agrees on the red flags, the 25 asked, and the Step 3 labels');
+    log(same(ml.ALLERGY_STATUS_LABELS, { nkda: enCat.nkda, yes: st.CATALOG.en.common.yes, unsure: enCat.unsure })
+      && /ALLERGY_STATUS = medicalLabels\.ALLERGY_STATUS_LABELS/.test(srcV('../src/main/clinicSheets.js')),
+    'v0.0.15: the spreadsheet words the allergy answer as the kiosk\'s own dropdown does (one copy, in medicalLabels.js)');
+    // The conditions are answered row by row now. A language still telling the
+    // patient to "select all that apply" above 25 dropdowns gives the wrong
+    // instruction; one without its own wording falls back to the English.
+    log(Object.values(st.CATALOG).every((c) => !(c.intake && c.intake.conditionsHint) || c.intake.conditionsHint !== c.intake.allergiesHint)
+      && /«Да», «Нет» или «Не уверен\(а\)»/.test(st.CATALOG.ru.intake.conditionsHint),
+    'v0.0.15: no language words the conditions as "select all that apply" any more');
     const dbSrcV = srcV('../src/main/db.js');
     log(/const VISIT_SPECIFIC_DENTAL_KEYS = Object\.keys\(require\('\.\/medicalLabels'\)\.DENTAL_Q_LABELS\)/.test(dbSrcV),
       'v0.0.15: a returning patient\'s new visit clears the Step 3 questions from the pinned list, not a copy of its own');
@@ -2580,7 +2598,7 @@ async function main() {
       'v0.0.15: the screens and the printed record read every history the same way (legacy, new, unsure, unknown keys, empty)');
     log(fixtures.every((f) => same(mhx.clinicalFlags(f), ml.clinicalFlags(f)) && mhx.firstMissingMedical(f) === ml.firstMissingMedical(f)),
       'v0.0.15: the red flags and the "what is still unanswered" rule are identical in both');
-    const dSub = (d) => ({ q: d.questions.map((q) => [q.key, q.short, q.value]), l: d.legacy, s: d.symptoms });
+    const dSub = (d) => ({ q: d.questions.map((q) => [q.key, q.short, q.value]), l: d.legacy });
     log([LEGACY_DH, V2_DH, {}].every((d) => same(dSub(mhx.dentalDisplay(d, 'en')), dSub(ml.dentalDisplay(d)))),
       'v0.0.15: the dental history reads the same on screen and in print');
 
@@ -2776,10 +2794,22 @@ async function main() {
 
     // ---- City: the event's own list ----
     const evC = db.createEvent(currentUser, { name: 'City List', cities: [' Sandy ', 'sandy', 'Boring', '', 'Other', 'Estacada  Heights'] });
+    // The list is cleaned in three places — the data layer when the admin saves
+    // it, the kiosk, and the Worker when it serves the online form — so all
+    // three are run over one messy list and must offer the same towns.
     const { eventCities: evCitiesR } = await import('../src/renderer/js/components/intakeSections.js');
-    log(evCitiesR({ cities: ['x'.repeat(90), ...Array.from({ length: 120 }, (_, i) => 'Town ' + i)] })[0].length === 80
-      && evCitiesR({ cities: Array.from({ length: 120 }, (_, i) => 'Town ' + i) }).length === 100,
-    'city: the kiosk cleans a list exactly as the data layer and the online form do (80 characters, 100 towns)');
+    const MESSY = [' Sandy ', 'sandy', 'Boring', '', 'Other', ' OTHER ', 'Estacada  Heights', 'x'.repeat(90),
+      ...Array.from({ length: 120 }, (_, i) => 'Town   ' + i)];
+    const kioskTowns = evCitiesR({ cities: MESSY });
+    const dbTowns = JSON.parse(db.createEvent(currentUser, { name: 'City Parity', cities: MESSY }).cities);
+    const workerC = (await import('../cloud/worker.js')).default;
+    const envC = { DB: { prepare() { return { bind() { return this; },
+      async first() { return { data: JSON.stringify({ name: 'Parity', active: 1, cities: JSON.stringify(MESSY) }) }; }, async run() { return {}; } }; } } };
+    const parityPage = await (await workerC.fetch(new Request('https://sync.example/checkin/evt-parity'), envC, {})).text();
+    const workerTowns = Array.from(new JSDOM(parityPage).window.document.querySelectorAll('#city option')).map((o) => o.value).filter((v) => v && v !== 'other');
+    log(same(kioskTowns, dbTowns) && same(kioskTowns, workerTowns) && kioskTowns.length === 100 && kioskTowns[3] === 'x'.repeat(80)
+      && same(kioskTowns.slice(0, 5), ['Sandy', 'Boring', 'Estacada Heights', 'x'.repeat(80), 'Town 0']),
+    'city: the data layer, the kiosk and the online form clean one messy list to the same towns (80 characters, 100 towns)');
     log(evC.cities === JSON.stringify(['Sandy', 'Boring', 'Estacada Heights']),
       'city: the list is stored trimmed, de-duplicated ignoring case, without blanks or "Other"');
     log(db.updateEvent(currentUser, evC.id, { name: 'City List' }).cities === evC.cities, 'city: an edit that does not mention the list keeps it');
@@ -2830,8 +2860,54 @@ async function main() {
       'city: Other with nothing typed is refused, by name');
     const s3 = demographicsSection({ ...baseDemo, demographics: { ...baseDemo.demographics, city: 'SANDY' } }, { cities });
     log(citySel(s3).value === 'Sandy', 'city: an old record in another case opens on the listed town');
-    const noList = Array.from(demographicsSection(baseDemo, { cities: [] }).node.querySelectorAll('label.field')).find((l) => /^City/.test(l.querySelector('.field-label').textContent));
+    const noListSec = demographicsSection(baseDemo, { cities: [] });
+    const noList = Array.from(noListSec.node.querySelectorAll('label.field')).find((l) => /^City/.test(l.querySelector('.field-label').textContent));
     log(!!noList.querySelector('input') && !noList.querySelector('select'), 'city: with no list, City stays a text box');
+    // A typed town is cleaned the way the online form cleans one, list or no list.
+    const longTown = '  Far   Away ' + 'x'.repeat(100);
+    const s5 = demographicsSection(baseDemo, { cities });
+    citySel(s5).value = 'other'; citySel(s5).dispatchEvent(new window.Event('change'));
+    setInput(otherIn(s5), longTown);
+    setInput(noList.querySelector('input'), longTown);
+    const cityGot = (sec) => (sec.collect() || { demographics: {} }).demographics.city;
+    log(cityGot(s5) === ('Far Away ' + 'x'.repeat(100)).slice(0, 80) && cityGot(noListSec) === cityGot(s5)
+      && otherIn(s5).maxLength === 80 && noList.querySelector('input').maxLength === 80,
+    'city: a typed town is stored as the online form stores it (one space, trimmed, at most 80 characters)');
+
+    // An answer from before a question was a dropdown — the online form stored
+    // "How did you hear about us?" as prose until v0.0.13 — or a key from a
+    // newer build's list opens as recorded, and is saved back exactly as it was.
+    const legacyDemo = { ...baseDemo, gender: 'F',
+      demographics: { ...baseDemo.demographics, city: 'Sandy', state: 'Ore.', referral: 'Facebook group', marital_status: 'Separated' } };
+    const s4 = demographicsSection(legacyDemo, { cities });
+    const selOf = (sec, re) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => re.test(l.querySelector('.field-label').textContent)).querySelector('select');
+    const shownIn = (sel) => sel.options[sel.selectedIndex].textContent;
+    log(shownIn(selOf(s4, /^How did you hear/)) === 'Facebook group (as recorded)' && shownIn(selOf(s4, /^Marital/)) === 'Separated (as recorded)'
+      && shownIn(selOf(s4, /^State/)) === 'Ore. (as recorded)' && shownIn(selOf(s4, /^Gender/)) === 'F (as recorded)',
+    'edit: an old free-text referral, marital status, state or gender opens showing what the record says (never a blank "—")');
+    const got4 = s4.collect();
+    log(!s4.isDirty() && !!got4 && got4.demographics.referral === 'Facebook group' && got4.demographics.marital_status === 'Separated'
+      && got4.demographics.state === 'Ore.' && got4.gender === 'F' && got4.demographics.future_key === 'kept',
+    'edit: saving without touching them keeps every one exactly as recorded — nothing reads as changed, nothing is erased');
+    const refSel4 = selOf(s4, /^How did you hear/); refSel4.value = 'flyer'; refSel4.dispatchEvent(new window.Event('change'));
+    const got4b = s4.collect();
+    log(s4.isDirty() && !!got4b && got4b.demographics.referral === 'flyer', 'edit: choosing a listed answer replaces the recorded one, and is noticed');
+    const s4b = demographicsSection({ ...legacyDemo, demographics: { ...legacyDemo.demographics, state: 'oregon', referral: 'flyer' } }, { cities });
+    log(selOf(s4b, /^State/).value === 'OR' && selOf(s4b, /^How did you hear/).value === 'flyer' && !Array.from(selOf(s4b, /^How did you hear/).options).some((o) => /as recorded/.test(o.textContent)),
+      'edit: a state typed out in full still opens on its code, and a listed answer adds no "as recorded" option');
+
+    // "Prefer not to answer" is about the race list, so it replaces it — on
+    // screen, not silently when saved — and any race chosen after clears it.
+    const raceSec = demographicsSection({ ...baseDemo, demographics: { ...baseDemo.demographics, city: 'Sandy' } }, { cities });
+    const raceGrid = Array.from(raceSec.node.querySelectorAll('.field')).find((f) => Array.from(f.children).some((c) => c.classList.contains('field-label') && /^Race and ethnicity/.test(c.textContent)));
+    const raceLit = () => Array.from(raceGrid.querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
+    raceGrid.querySelector('.chip-select[data-key="white"]').click();
+    raceGrid.querySelector('.chip-select[data-key="prefer_not"]').click();
+    const raceGot = () => (raceSec.collect() || { demographics: {} }).demographics.race;
+    const racePna = [raceLit(), raceGot()];
+    raceGrid.querySelector('.chip-select[data-key="asian"]').click();
+    log(same(racePna, [['prefer_not'], ['prefer_not']]) && same(raceLit(), ['asian']) && same(raceGot(), ['asian']),
+      'race: "Prefer not to answer" clears the other choices on screen, and a race chosen after it clears it');
     // And the kiosk itself, on an event with a list.
     const prevActive = db.getActiveEvent();
     db.setActiveEvent(currentUser, evC.id);
@@ -2868,17 +2944,35 @@ async function main() {
       && savedMh.conditions.includes('heart_murmur') && savedMh.conditions.includes('pain_mgmt') && savedMh.allergies.includes('articaine')
       && savedMh.medications.some((m) => m.name === 'Metformin' && m.dose === '500 mg' && m.reason === 'sugar'),
     'edit: saving an old record keeps every answer it had — retired questions, retired items and an old dose included');
-    // A free-text "last saw a dentist" from before the dropdown has to be
-    // chosen again from the list; the rest is filled in.
+    // A free-text "last saw a dentist" from before the dropdown opens as
+    // recorded — whoever edits the record sees what it says — and is kept
+    // unless they choose an answer from the list.
     const dSec = dentalHistorySection(LEGACY_DH);
     const dSels = Array.from(dSec.node.querySelectorAll('select'));
-    dSels[0].value = 'over_3_years';
+    log(dSels[0].value === 'Dr. Prior' && dSels[0].options[dSels[0].selectedIndex].textContent === 'Dr. Prior (as recorded)' && !dSec.isDirty(),
+      'edit: an old free-text last visit opens showing what it says, not a blank');
     dSels.slice(1).forEach((x) => { if (!x.value) x.value = 'no'; });
     const savedDh = dSec.collect();
-    log(!!savedDh && savedDh.gum_bleeding === 'yes' && savedDh.grinding === 'yes' && savedDh.visit_type === 'filling' && savedDh.pain_cold === 'no',
-      'edit: saving Step 3 keeps the old answers and the visit type it was not asked to change');
+    log(!!savedDh && savedDh.prior_dentist === 'Dr. Prior' && savedDh.gum_bleeding === 'yes' && savedDh.grinding === 'yes' && savedDh.visit_type === 'filling' && savedDh.pain_cold === 'no',
+      'edit: saving Step 3 keeps the old answers, the recorded last visit and the visit type it was not asked to change');
+    dSels[0].value = 'over_3_years';
+    log((dSec.collect() || {}).prior_dentist === 'over_3_years', 'edit: choosing from the list replaces the recorded last visit');
     const two = [medicalHistorySection({}), medicalHistorySection({})].map((x) => x.node.querySelector('datalist').id);
     log(two[0] !== two[1], 'edit: two forms open at once never share a datalist id');
+    // "No medications" is an answer about the list: it replaces the ticked and
+    // typed medications on screen and in what is saved, and a tick clears it.
+    const exSec = medicalHistorySection(V2_MH);
+    const exGrid = gridIn(exSec, /^Current medications/);
+    const exLit = () => Array.from(exGrid.querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
+    log(same(exLit(), ['warfarin', 'other']), 'edit: a record\'s checklist and typed medications open ticked');
+    exGrid.querySelector('.chip-select[data-key="none"]').click();
+    const exNone = exSec.collect();
+    log(same(exLit(), ['none']) && !!exNone && same(exNone.medications, []) && exNone.medications_none === true,
+      'edit: "No medications" clears the ticked and typed medications, on screen and in the saved history');
+    exGrid.querySelector('.chip-select[data-key="aspirin"]').click();
+    const exAsp = exSec.collect();
+    log(same(exLit(), ['aspirin']) && !!exAsp && same(exAsp.medications.map((x) => x.key), ['aspirin']) && exAsp.medications_none === undefined,
+      'edit: ticking a medication clears "No medications" again');
 
     // ---- a Spanish-speaking patient reads the whole step in Spanish ----
     i18nV.setLang('es');
@@ -2897,6 +2991,53 @@ async function main() {
     log(/¿Siente dolor al tomar agua fría\?/.test(dentalHistorySection({}).node.textContent)
       && Array.from(demographicsSection(baseDemo, { cities }).node.querySelectorAll('option')).some((o) => o.value === 'other' && o.textContent === 'Otra'),
     'es: Step 3 and the City list read in Spanish');
+    i18nV.setLang('en');
+
+    // ---- a Spanish-speaking patient checks in at the kiosk, start to finish ----
+    // The Sign & Submit review reads back what they ticked in their own
+    // language, while the record stores the canonical English name.
+    try {
+      const kes = renderKiosk({ navigate: () => {} }); document.body.append(kes);
+      for (let i = 0; i < 4; i++) await tick();
+      Array.from(kes.querySelectorAll('.lang-card')).find((c) => /Español/.test(c.textContent)).click();
+      for (let i = 0; i < 4; i++) await tick();
+      const T = i18nV.t;
+      const fieldOf = (label) => Array.from(kes.querySelectorAll('.kiosk-body label.field'))
+        .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
+      const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+      const nextStep = async () => { clickText(T('common.next'), kes); for (let i = 0; i < 3; i++) await tick(); };
+      put(T('intake.firstName'), 'Lucía'); put(T('intake.lastName'), 'Espanola'); put(T('intake.dob'), '1980-01-01');
+      put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+      const citySelEs = fieldOf(T('intake.city')).querySelector('select');
+      put(T('intake.city'), citySelEs ? citySelEs.options[1].value : 'Sandy');
+      put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+      await nextStep();
+      kes.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+      put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+      gridIn({ node: kes }, /^Medicamentos actuales/).querySelector('.chip-select[data-key="acetaminophen"]').click();
+      await nextStep();
+      const esDental = Array.from(kes.querySelectorAll('.kiosk-body select'));
+      esDental.forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+      kes.querySelectorAll('.kiosk-body .highlight-field button')[2].click();
+      await nextStep();
+      const esAgree = kes.querySelector('.big-check'); esAgree.checked = true; esAgree.dispatchEvent(new window.Event('change', { bubbles: true }));
+      kes.querySelector('.deemed-field .chip-btn').click();
+      put(T('intake.signerName'), 'Lucía Espanola');
+      await nextStep();
+      const esReview = kes.querySelector('.review') ? kes.querySelector('.review').textContent : '';
+      log(/Acetaminofén \(Tylenol\)/.test(esReview) && !/Acetaminophen/.test(esReview) && /Sin alergias conocidas/.test(esReview),
+        'es kiosk: the review reads back a ticked medication in Spanish, not the stored English name');
+      log(/General — firmado/.test(esReview) && !/signed/.test(esReview), 'es kiosk: the review says the consent is signed in Spanish too');
+      $all('.kiosk-nav button', kes).pop().click();
+      for (let i = 0; i < 4; i++) await tick();
+      const esP = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === 'Espanola');
+      const esMhK = esP ? db.getPatient(esP.id).medical_history : {};
+      log(!!kes.querySelector('.kiosk-thanks') && same((esMhK.medications || []).map((x) => [x.key, x.name]), [['acetaminophen', 'Acetaminophen (Tylenol)']]),
+        'es kiosk: a Spanish check-in submits, the medication stored under its canonical English name');
+      kes.remove();
+    } catch (e) {
+      log(false, 'es kiosk: a Spanish check-in could not be walked through: ' + e.message);
+    }
     i18nV.setLang('en');
 
     // ---- a returning patient: today's answers are asked again ----
@@ -2939,14 +3080,43 @@ async function main() {
     fset('first_name', 'Olivia'); fset('last_name', 'Online'); fset('dob', '1991-01-01'); fset('gender', 'female');
     fset('city', 'other'); fset('city_other', 'sandy'); fset('state', 'OR'); fset('emergency_name', 'K'); fset('emergency_phone', '5550001111');
     ftick('input[name=service][value=dental]'); ftick('input[name=visit][value=cleaning]');
+    // Phone is required online as it is at the kiosk, and asked in the kiosk's order.
+    const phoneRefusal = fsubmit();
+    log(phoneRefusal === 'Please enter a phone number.', 'online form (real page): a missing phone number is refused, by name, as at the kiosk');
+    fset('phone', '5035550100');
+    // "Prefer not to answer" replaces the race list on screen, as at the kiosk.
+    const raceOn = () => Array.from(fd.querySelectorAll('#race input:checked')).map((x) => x.value);
+    const raceLitOn = () => Array.from(fd.querySelectorAll('#race .chip.on input')).map((x) => x.value);
+    ftick('input[name=race][value=white]'); ftick('input[name=race][value=prefer_not]');
+    const pnaOnly = same(raceOn(), ['prefer_not']) && same(raceLitOn(), ['prefer_not']);
+    ftick('input[name=race][value=asian]');
+    log(pnaOnly && same(raceOn(), ['asian']) && same(raceLitOn(), ['asian']),
+      'online form (real page): "Prefer not to answer" clears the other races on screen, and a race chosen after clears it');
     fset('under_treatment', 'no');
     const firstRefusal = fsubmit();
     log(/every medical and dental history question: High Blood Pressure \(Hypertension\)/.test(firstRefusal),
       'online form (real page): a missing answer is refused naming the question, in the kiosk\'s order');
     fd.querySelectorAll('#conditions select').forEach((x) => { x.value = 'no'; });
     fset('cond_diabetes', 'yes'); fset('cond_pregnant', 'na');
-    ftick('input[name=med][value=metformin]'); ftick('input[name=med][value=other]');
+    // "No medications" clears the ticks, and a tick clears it — as at the kiosk.
+    const medOn = () => Array.from(fd.querySelectorAll('#medchips input:checked')).map((x) => x.name === 'med' ? x.value : x.id);
+    const medLit = () => Array.from(fd.querySelectorAll('#medchips .chip.on input')).map((x) => x.name === 'med' ? x.value : x.id);
+    ftick('input[name=med][value=warfarin]'); ftick('#medications_none');
+    const noneOnly = same(medOn(), ['medications_none']) && same(medLit(), ['medications_none']);
+    ftick('input[name=med][value=metformin]');
+    log(noneOnly && same(medOn(), ['metformin']) && same(medLit(), ['metformin']),
+      'online form (real page): "No medications" clears the ticked medications, and a tick clears it');
+    ftick('input[name=med][value=other]');
     fd.querySelector('#meds input').value = 'Fish oil';
+    // Worded as the kiosk words it: "Other" on both lists, and the typed
+    // allergy under a label of its own.
+    const chipText = (doc, name) => doc.querySelector('input[name=' + name + '][value=other]').closest('label').textContent;
+    const esPage = new JSDOM(await (await workerV.fetch(new Request('https://sync.example/checkin/evt-online?lang=es'), envV, {})).text()).window.document;
+    const allergyOtherLabel = fd.querySelector('label[for=allergies_other]');
+    log(chipText(fd, 'med') === st.CATALOG.en.common.other && chipText(fd, 'allergy') === st.CATALOG.en.common.other
+      && chipText(esPage, 'med') === st.CATALOG.es.common.other && chipText(esPage, 'allergy') === st.CATALOG.es.common.other
+      && !!allergyOtherLabel && allergyOtherLabel.textContent.startsWith(st.CATALOG.en.intake.allergyOther),
+    'online form (real page): "Other" and the typed-allergy label read exactly as at the kiosk, in English and Spanish');
     fset('major_surgery', 'no'); fset('tobacco', 'no'); fset('allergy_status', 'yes'); ftick('input[name=allergy][value=penicillin]');
     fset('prior_dentist', 'never');
     fd.querySelectorAll('select').forEach((x) => { if (st.DENTAL_QUESTIONS.some((q) => q.key === x.id)) x.value = 'no'; });
@@ -2962,8 +3132,15 @@ async function main() {
     const kioskSame = mhx.normalizeMedical({ under_treatment: 'no', condition_answers: { ...ANS, diabetes: 'yes', pregnant: 'na' }, conditions_other: '',
       medications: [{ key: 'metformin', name: 'Metformin (Glucophage)' }, { key: 'other', name: 'Fish oil' }], major_surgery: 'no', surgery_sites: [], tobacco: 'no',
       allergy_status: 'yes', allergies: ['penicillin'], allergies_other: '' });
-    const sortedJ = (o) => JSON.stringify(o, Object.keys(o).sort());
-    log(sortedJ(onlineMh) === sortedJ(kioskSame), 'online form (real page): stores exactly the history the kiosk stores for the same answers');
+    // Key order is not meaning, so both are compared with keys sorted at EVERY
+    // depth. (A replacer array would not do: it filters nested keys as well, so
+    // condition_answers and each medication row would compare as {}.)
+    const stableV = (v) => (Array.isArray(v) ? v.map(stableV)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stableV(v[k])])) : v);
+    const sortedJ = (o) => JSON.stringify(stableV(o));
+    log(sortedJ({ a: { x: 1 }, m: [{ key: 'warfarin' }] }) !== sortedJ({ a: { x: 2 }, m: [{ key: 'aspirin' }] })
+      && sortedJ(onlineMh) === sortedJ(kioskSame) && Object.keys(onlineMh.condition_answers).length === 25,
+    'online form (real page): stores exactly the history the kiosk stores for the same answers — every answer and medication compared');
     const evOn = db.getActiveEvent();
     db.applyRemoteRows([{ entity: 'patient', uid: 'online-v15-uid', event_uid: evOn.uid, patient_uid: null, deleted: 0, updated_at: '2099-05-05T00:00:00.000Z@prereg', data: onlineData }]);
     const onlineP = db.listPatients({}).find((x) => x.last_name === 'Online');

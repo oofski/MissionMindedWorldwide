@@ -166,6 +166,8 @@ const DENTAL_LEGACY_LABELS = {
 };
 
 const ANSWER_LABELS = { yes: 'Yes', no: 'No', unsure: 'Unsure', na: 'Not applicable' };
+// The allergy question's answer as the kiosk's own dropdown words it; the
+// spreadsheet's "Allergy status" column prints it from here.
 const ALLERGY_STATUS_LABELS = { nkda: 'No known drug allergies (NKDA)', yes: 'Yes', unsure: 'Unsure' };
 
 const HISTORY_VERSION = 2;
@@ -200,9 +202,13 @@ function isHistoryV2(mh) {
   return m.history_version === HISTORY_VERSION || Object.keys(asObject(m.condition_answers)).length > 0;
 }
 
-// Mirrors medicalHistory.js firstMissingMedical, for a main-process check of a
-// history arriving from an editor. (createPatient does not enforce it: a record
-// may legitimately be created with an empty history — a desk walk-in, a test.)
+// Mirrors medicalHistory.js firstMissingMedical. Nothing in the main process
+// calls it yet: it (and isHistoryV2) is exported for the v0.0.15 edit-through-
+// the-flow save (db.updatePatientSection), which must refuse an incomplete
+// history arriving from an editor by the kiosk's own rule — and the harness
+// runs it against the renderer's copy now, so the two cannot drift before then.
+// (createPatient does not enforce it: a record may legitimately be created
+// with an empty history — a desk walk-in, a test.)
 function firstMissingMedical(mh) {
   const m = mh || {};
   const yn = (v) => v === 'yes' || v === 'no';
@@ -308,19 +314,19 @@ function clinicalFlags(mh) {
   return uniq(flags);
 }
 
-// Mirrors the questions / legacy / symptoms parts of medicalHistory.js
-// dentalDisplay, by the short chart labels.
+// Mirrors the questions / legacy parts of medicalHistory.js dentalDisplay, by
+// the short chart labels.
 function dentalDisplay(dh) {
   const d = dh || {};
   const questions = Object.keys(DENTAL_Q_LABELS).map((key) => ({ key, short: DENTAL_Q_LABELS[key], value: d[key] || '' }));
   const legacy = Object.keys(DENTAL_LEGACY_LABELS).filter((k) => d[k] != null && d[k] !== '')
     .map((key) => ({ key, label: DENTAL_LEGACY_LABELS[key], value: d[key] }));
-  return { questions, legacy, symptoms: questions.filter((q) => q.value === 'yes').map((q) => q.short) };
+  return { questions, legacy };
 }
 
 module.exports = {
   CONDITION_LABELS, FLAG_CONDITIONS, INTAKE_CONDITIONS, ALLERGY_LABELS, MED_CHECKLIST_LABELS,
-  SURGERY_SITE_LABELS, DENTAL_Q_LABELS, DENTAL_LEGACY_LABELS, ANSWER_LABELS, ALLERGY_STATUS_LABELS,
+  SURGERY_SITE_LABELS, DENTAL_Q_LABELS, DENTAL_LEGACY_LABELS, ALLERGY_STATUS_LABELS,
   HISTORY_VERSION,
   conditionLabel, allergyLabel, surgerySiteLabel, answerLabel, isHistoryV2,
   firstMissingMedical, medicalDisplay, clinicalFlags, dentalDisplay,

@@ -202,8 +202,15 @@ async function handlePush(request, env) {
       continue;
     }
 
+    // An event row pushed by a laptop on an older build leaves out the columns
+    // that build does not know — v0.0.14 has no check-in City list. Stored
+    // whole, that push would take the list off the online form until an
+    // upgraded laptop happened to save the event again, so what the stored copy
+    // has and the incoming row does not carry is kept. An explicit null (an
+    // admin clearing the list) still clears it.
+    const data = row.entity === 'event' && existing ? await keepOmittedEventKeys(env, row.uid, row.data) : row.data;
     const dataStr =
-      typeof row.data === 'string' ? row.data : JSON.stringify(row.data);
+      typeof data === 'string' ? data : JSON.stringify(data);
 
     // Take the next delivery number. A row that is written LATE (a laptop that
     // was offline, or one whose clock is behind) still lands at the END of the
@@ -232,6 +239,25 @@ async function handlePush(request, env) {
   }
 
   return json({ ok: true, applied, skipped, time: nowIso() });
+}
+
+// The incoming event data with every key it omits filled from the stored live
+// copy. Events only: they are a handful of rows, so the extra read is nothing,
+// and they hold no patient data a deliberate omission might be meant to drop.
+async function keepOmittedEventKeys(env, uid, incoming) {
+  const next = parseData(incoming);
+  if (!next || typeof next !== 'object' || Array.isArray(next)) return incoming;
+  const stored = await env.DB
+    .prepare("SELECT data FROM sync_rows WHERE uid = ? AND entity = 'event' AND deleted = 0")
+    .bind(uid)
+    .first();
+  const prev = stored ? parseData(stored.data) : null;
+  if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return incoming;
+  const missing = Object.keys(prev).filter((k) => !(k in next));
+  if (!missing.length) return incoming;
+  const merged = { ...next };
+  missing.forEach((k) => { merged[k] = prev[k]; });
+  return merged;
 }
 
 async function handlePull(url, env) {
@@ -288,6 +314,13 @@ async function handlePull(url, env) {
 // Patient pre-registration (public)
 // ---------------------------------------------------------------------------
 
+// One town name as every copy stores it: runs of spaces made one, trimmed, at
+// most 80 characters. Mirrors cleanCityName in the app's intakeSections.js and
+// db.js sanitizeCities; the harness runs all three over the same names.
+function cleanCityName(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
 // The event's check-in City list (events.cities in the app: a JSON array of
 // names, travelling in the event row as a JSON string). Cleaned the way the app
 // cleans it — trimmed, "Other" dropped (the form adds its own), duplicates
@@ -302,7 +335,7 @@ function eventCities(raw) {
   const seen = new Set();
   const out = [];
   for (const c of list) {
-    const name = String(c == null ? '' : c).replace(/\s+/g, ' ').trim().slice(0, 80);
+    const name = cleanCityName(c);
     const fold = name.toLowerCase();
     if (!name || fold === 'other' || seen.has(fold)) continue;
     seen.add(fold);
@@ -368,9 +401,15 @@ async function handleCheckinPost(eventUid, request, env) {
   // it with "please answer every question" would name questions that page
   // never showed, so it is told plainly to reload instead. (Survey answers such
   // a page posts are simply ignored; the survey is asked at check-out now.)
-  if (body && typeof body === 'object' && !body.condition_answers
-    && ('hospitalized' in body || 'pregnancy' in body || 'gum_bleeding' in body)) {
-    return json({ ok: false, error: L.errReload }, 400);
+  //
+  // Pages from v0.0.15 on say which form they are (form_version), so the next
+  // change to the form can tell them apart by that alone. Older pages never
+  // sent one and are recognised by the questions only they posted.
+  if (body && typeof body === 'object') {
+    const stale = body.form_version != null
+      ? Number(body.form_version) !== FORM_VERSION
+      : (!body.condition_answers && ('hospitalized' in body || 'pregnancy' in body || 'gum_bleeding' in body));
+    if (stale) return json({ ok: false, error: L.errReload }, 400);
   }
 
   const clean = buildPreregPatient(body, ev.cities);
@@ -381,6 +420,9 @@ async function handleCheckinPost(eventUid, request, env) {
   if (!clean.gender) return json({ ok: false, error: esErr ? 'Por favor elija un género.' : 'Please choose a gender.' }, 400);
   if (!clean.demographics.city) return json({ ok: false, error: esErr ? 'Por favor ingrese su ciudad.' : 'Please enter your city.' }, 400);
   if (!clean.demographics.state) return json({ ok: false, error: esErr ? 'Por favor ingrese su estado.' : 'Please enter your state.' }, 400);
+  // Required at the kiosk, so required here: the phone number is how the
+  // clinic reaches a patient about a result or a follow-up.
+  if (!clean.phone) return json({ ok: false, error: L.errPhone }, 400);
   // An emergency contact is who the clinic calls if something goes wrong during
   // a procedure, so it is not optional.
   if (!clean.demographics.emergency_name) return json({ ok: false, error: esErr ? 'Por favor ingrese el nombre de un contacto de emergencia.' : 'Please enter an emergency contact name.' }, 400);
@@ -569,8 +611,8 @@ function buildPreregPatient(b, cities) {
   // was typed beside it (the admin may have cleared the list while the page
   // was open) — then the typed name is the town, never the word "other". In a
   // plain text box it is simply what the patient typed, as at the kiosk.
-  const otherPicked = b.city === 'other' && (cityList.length > 0 || !!s(b.city_other, 80));
-  const cityTyped = (otherPicked ? s(b.city_other, 80) : s(b.city, 80)).replace(/\s+/g, ' ');
+  const otherPicked = b.city === 'other' && (cityList.length > 0 || !!cleanCityName(b.city_other));
+  const cityTyped = cleanCityName(otherPicked ? b.city_other : b.city);
   const city = matchCity(cityTyped, cityList) || cityTyped;
 
   return {
@@ -662,6 +704,12 @@ function historyQuestion(id, L) {
 // but still accepts anything typed, because a patient on a drug outside this
 // hundred must still be recordable.
 const MED_OPTIONS = '<option value="Atorvastatin"></option><option value="Levothyroxine"></option><option value="Metformin"></option><option value="Amlodipine"></option><option value="Lisinopril"></option><option value="Albuterol"></option><option value="Losartan"></option><option value="Metoprolol"></option><option value="Rosuvastatin"></option><option value="Omeprazole"></option><option value="Gabapentin"></option><option value="Sertraline"></option><option value="Escitalopram"></option><option value="Semaglutide"></option><option value="Amphetamine/dextroamphetamine"></option><option value="Pantoprazole"></option><option value="Bupropion"></option><option value="Hydrochlorothiazide"></option><option value="Fluoxetine"></option><option value="Trazodone"></option><option value="Montelukast"></option><option value="Amoxicillin"></option><option value="Fluticasone"></option><option value="Tamsulosin"></option><option value="Apixaban"></option><option value="Simvastatin"></option><option value="Insulin glargine"></option><option value="Empagliflozin"></option><option value="Furosemide"></option><option value="Meloxicam"></option><option value="Hydrocodone/acetaminophen"></option><option value="Tirzepatide"></option><option value="Methylphenidate"></option><option value="Duloxetine"></option><option value="Prednisone"></option><option value="Carvedilol"></option><option value="Famotidine"></option><option value="Ibuprofen"></option><option value="Buspirone"></option><option value="Venlafaxine"></option><option value="Tramadol"></option><option value="Potassium chloride"></option><option value="Hydroxyzine"></option><option value="Allopurinol"></option><option value="Clopidogrel"></option><option value="Ergocalciferol (Vitamin D2)"></option><option value="Cetirizine"></option><option value="Ondansetron"></option><option value="Cyclobenzaprine"></option><option value="Spironolactone"></option><option value="Oxycodone"></option><option value="Estradiol"></option><option value="Aspirin"></option><option value="Glipizide"></option><option value="Zolpidem"></option><option value="Lamotrigine"></option><option value="Alprazolam"></option><option value="Citalopram"></option><option value="Pregabalin"></option><option value="Cholecalciferol (Vitamin D3)"></option><option value="Clonazepam"></option><option value="Azithromycin"></option><option value="Pravastatin"></option><option value="Valsartan"></option><option value="Ezetimibe"></option><option value="Diclofenac"></option><option value="Insulin lispro"></option><option value="Ethinyl estradiol/norethindrone"></option><option value="Propranolol"></option><option value="Latanoprost"></option><option value="Atenolol"></option><option value="Lisdexamfetamine"></option><option value="Doxycycline"></option><option value="Amoxicillin/clavulanate"></option><option value="Dulaglutide"></option><option value="Hydrochlorothiazide/lisinopril"></option><option value="Lorazepam"></option><option value="Fluticasone/salmeterol"></option><option value="Insulin aspart"></option><option value="Celecoxib"></option><option value="Finasteride"></option><option value="Quetiapine"></option><option value="Clonidine"></option><option value="Aripiprazole"></option><option value="Cephalexin"></option><option value="Alendronate"></option><option value="Topiramate"></option><option value="Tizanidine"></option><option value="Dapagliflozin"></option><option value="Oxycodone/acetaminophen"></option><option value="Hydrochlorothiazide/losartan"></option><option value="Olmesartan"></option><option value="Testosterone"></option><option value="Amitriptyline"></option><option value="Folic acid"></option><option value="Rivaroxaban"></option><option value="Fenofibrate"></option><option value="Triamcinolone"></option><option value="Paroxetine"></option><option value="Ferrous sulfate"></option>';
+
+// Which form the page is (posted as form_version). v0.0.15 is 2: Dr. Trinh's
+// medical history and Step 3. Change it whenever the questions change shape, so
+// a page opened before the change is told to reload rather than refused for
+// answers it never asked.
+const FORM_VERSION = 2;
 
 // Mirrors US_STATES in src/renderer/i18n/strings.js. A dropdown here as well as
 // on the walk-in form, and validated server-side: this endpoint is reachable
@@ -870,7 +918,7 @@ const I18N = {
     raceList: [['american_indian_alaska_native', 'American Indian or Alaska Native'], ['asian', 'Asian'], ['black_african_american', 'Black or African American'], ['hispanic_latino', 'Hispanic or Latino'], ['middle_eastern_north_african', 'Middle Eastern or North African'], ['native_hawaiian_pacific_islander', 'Native Hawaiian or Pacific Islander'], ['white', 'White'], ['prefer_not', 'Prefer not to answer']],
     allergies: 'Medication allergies', allergiesHint: 'Check all that apply', allergyOther: 'Other allergy (specify)',
     allergyQ: 'Do you have an allergy or serious reaction to any medication?', nkda: 'No known drug allergies (NKDA)',
-    conditions: 'Do you have any of these conditions?', condHint: 'Answer Yes, No or Unsure for each', conditionOther: 'Other condition (optional)', otherOpt: 'Other (type below)',
+    conditions: 'Do you have any of these conditions?', condHint: 'Answer Yes, No or Unsure for each', conditionOther: 'Other condition (optional)', otherOpt: 'Other',
     meds: 'Current medications', medsHint: 'Check every medication you take', medOther: 'Other medication (type the name)', addMed: '+ Add medication', noMeds: 'No medications', medNamePh: 'Medication',
     surgerySites: 'If so, where?',
     medHist: 'Medical History', dentHist: 'Dental History', priorDentist: 'When did you last see a dentist?', yes: 'Yes', no: 'No', unsure: 'Unsure', notApplicable: 'Not applicable', dash: '—',
@@ -881,7 +929,7 @@ const I18N = {
     submit: 'Submit pre-registration', submitting: 'Submitting…', footer: 'Mission Minded Worldwide — free dental care. Your information is shared only with the clinic team.',
     thankYou: 'Thank you, ', done: 'Your pre-registration and consent are complete. Please bring a photo ID — the front desk already has your information.',
     errName: 'Please enter your first and last name.', errDob: 'Please enter your date of birth.', errGender: 'Please choose a gender.',
-    errCity: 'Please enter your city.', errState: 'Please enter your state.',
+    errCity: 'Please enter your city.', errState: 'Please enter your state.', errPhone: 'Please enter a phone number.',
     errEmName: 'Please enter an emergency contact name.', errEmPhone: 'Please enter an emergency contact phone number.',
     errServices: 'Please choose at least one service.',
     errMedical: 'Please answer every medical and dental history question.',
@@ -909,7 +957,7 @@ const I18N = {
     raceList: [['american_indian_alaska_native', 'Indígena de América o nativo de Alaska'], ['asian', 'Asiático'], ['black_african_american', 'Negro o afroamericano'], ['hispanic_latino', 'Hispano o latino'], ['middle_eastern_north_african', 'De Medio Oriente o del norte de África'], ['native_hawaiian_pacific_islander', 'Nativo de Hawái o de las islas del Pacífico'], ['white', 'Blanco'], ['prefer_not', 'Prefiero no responder']],
     allergies: 'Alergias a medicamentos', allergiesHint: 'Marque todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
     allergyQ: '¿Tiene alergia o una reacción grave a algún medicamento?', nkda: 'Sin alergias conocidas a medicamentos (NKDA)',
-    conditions: '¿Tiene alguna de estas condiciones?', condHint: 'Responda Sí, No o No estoy seguro/a para cada una', conditionOther: 'Otra condición (opcional)', otherOpt: 'Otra (escriba abajo)',
+    conditions: '¿Tiene alguna de estas condiciones?', condHint: 'Responda Sí, No o No estoy seguro/a para cada una', conditionOther: 'Otra condición (opcional)', otherOpt: 'Otro',
     meds: 'Medicamentos actuales', medsHint: 'Marque todos los medicamentos que toma', medOther: 'Otro medicamento (escriba el nombre)', addMed: '+ Agregar medicamento', noMeds: 'Sin medicamentos', medNamePh: 'Medicamento',
     surgerySites: 'Si es así, ¿dónde?',
     medHist: 'Historial médico', dentHist: 'Historial dental', priorDentist: '¿Cuándo visitó al dentista por última vez?', yes: 'Sí', no: 'No', unsure: 'No estoy seguro/a', notApplicable: 'No aplica', dash: '—',
@@ -920,7 +968,7 @@ const I18N = {
     submit: 'Enviar pre-registro', submitting: 'Enviando…', footer: 'Mission Minded Worldwide — atención dental gratuita. Su información se comparte solo con el equipo de la clínica.',
     thankYou: 'Gracias, ', done: 'Su pre-registro y consentimiento están completos. Por favor traiga una identificación con foto — la recepción ya tiene su información.',
     errName: 'Por favor ingrese su nombre y apellido.', errDob: 'Por favor ingrese su fecha de nacimiento.', errGender: 'Por favor elija un género.',
-    errCity: 'Por favor ingrese su ciudad.', errState: 'Por favor ingrese su estado.',
+    errCity: 'Por favor ingrese su ciudad.', errState: 'Por favor ingrese su estado.', errPhone: 'Por favor ingrese un número de teléfono.',
     errEmName: 'Por favor ingrese el nombre de un contacto de emergencia.', errEmPhone: 'Por favor ingrese el teléfono del contacto de emergencia.',
     errServices: 'Elija al menos un servicio.',
     errMedical: 'Por favor responda todas las preguntas del historial médico y dental.',
@@ -1006,9 +1054,9 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     ? '<select id="city" autocomplete="address-level2"><option value="">' + htmlEscape(L.dash) + '</option>' +
       cityList.map((c) => '<option value="' + htmlEscape(c) + '">' + htmlEscape(c) + '</option>').join('') +
       '<option value="other">' + htmlEscape(L.otherCity) + '</option></select>'
-    : '<input type="text" id="city" autocomplete="address-level2">';
+    : '<input type="text" id="city" autocomplete="address-level2" maxlength="80">';
   const cityOther = cityList.length
-    ? '<div id="cityOtherWrap" style="display:none"><label>' + htmlEscape(L.cityOther) + ' <span class="req">*</span></label><input type="text" id="city_other"></div>'
+    ? '<div id="cityOtherWrap" style="display:none"><label>' + htmlEscape(L.cityOther) + ' <span class="req">*</span></label><input type="text" id="city_other" maxlength="80"></div>'
     : '';
 
   // Every single-choice history question is a dropdown with a blank first
@@ -1030,7 +1078,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
   const dentalYesNo = L.dentalYesNo.map(([k, l]) => selRow(k, l, ['yes', 'no'])).join('');
   const genConsent = '<h3>' + htmlEscape(L.generalTitle) + '</h3>' + (L.generalMode === 'ol' ? ('<ol>' + L.general.map((c) => '<li>' + htmlEscape(c) + '</li>').join('') + '</ol>') : L.general.map((c) => '<p>' + htmlEscape(c) + '</p>').join(''));
   const surConsent = '<h3>' + htmlEscape(L.surgeryTitle) + '</h3>' + L.surgeryText.map((c) => '<p>' + htmlEscape(c) + '</p>').join('');
-  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh };
+  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh };
   // The wording each refusal quotes, keyed like firstMissingHistory's ids, so
   // the page names the question it wants exactly as the server would.
   const Q = { under_treatment: medQ('under_treatment'), major_surgery: medQ('major_surgery'), tobacco: medQ('tobacco'),
@@ -1050,7 +1098,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     '<div><label>' + htmlEscape(L.last) + ' <span class="req">*</span></label><input type="text" id="last_name" autocomplete="family-name"></div></div>' +
     '<div class="row"><div><label>' + htmlEscape(L.dob) + ' <span class="req">*</span></label><input type="date" id="dob"></div>' +
     '<div><label>' + htmlEscape(L.gender) + ' <span class="req">*</span></label><select id="gender">' + L.gOpt.map(([v, t2]) => '<option value="' + htmlEscape(v) + '">' + htmlEscape(t2) + '</option>').join('') + '</select></div></div>' +
-    '<div class="row"><div><label>' + htmlEscape(L.phone) + '</label><input type="tel" id="phone" inputmode="numeric" autocomplete="tel"></div>' +
+    '<div class="row"><div><label>' + htmlEscape(L.phone) + ' <span class="req">*</span></label><input type="tel" id="phone" inputmode="numeric" autocomplete="tel"></div>' +
     '<div><label>' + htmlEscape(L.email) + '</label><input type="email" id="email" autocomplete="email"></div></div>' +
     '<label>' + htmlEscape(L.address) + '</label><input type="text" id="address" autocomplete="street-address">' +
     '<div class="row"><div><label>' + htmlEscape(L.city) + ' <span class="req">*</span></label>' + cityControl + '</div>' +
@@ -1090,7 +1138,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     '<option value="">' + htmlEscape(L.dash) + '</option><option value="nkda">' + htmlEscape(L.nkda) + '</option>' +
     '<option value="yes">' + htmlEscape(L.yes) + '</option><option value="unsure">' + htmlEscape(L.unsure) + '</option></select></div>' +
     '<div id="allergyListWrap" style="display:none"><p class="hint" style="margin:6px 0 4px">' + htmlEscape(L.allergiesHint) + '</p><div class="chips" id="allergies">' + allergyChips + '</div>' +
-    '<div id="allergyOtherWrap" style="display:none"><input type="text" id="allergies_other" placeholder="' + htmlEscape(L.allergyOther) + '" style="margin-top:8px"></div></div>' +
+    '<div id="allergyOtherWrap" style="display:none"><label for="allergies_other">' + htmlEscape(L.allergyOther) + ' <span class="req">*</span></label><input type="text" id="allergies_other"></div></div>' +
     '</div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.dentHist) + '</h2><label>' + htmlEscape(L.priorDentist) + ' <span class="req">*</span></label>' +
@@ -1125,6 +1173,9 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     "function el(id){return document.getElementById(id);}function val(id){var e=el(id);return e?e.value:'';}" +
     "function chipwire(id){document.querySelectorAll('#'+id+' .chip input').forEach(function(i){i.addEventListener('change',function(){i.closest('.chip').classList.toggle('on',i.checked);});});}" +
     "chipwire('services');chipwire('race');chipwire('sites');chipwire('allergies');" +
+    // "Prefer not to answer" is about the race list, so it replaces it — shown
+    // on the page as the walk-in form shows it, not reconciled silently on save.
+    "document.querySelectorAll('#race input').forEach(function(i){i.addEventListener('change',function(){if(!i.checked)return;var pna=i.value==='prefer_not';document.querySelectorAll('#race input').forEach(function(o){if(o!==i&&(pna||o.value==='prefer_not'))o.checked=false;o.closest('.chip').classList.toggle('on',o.checked);});});});" +
     "function syncRefOther(){el('referralOtherWrap').style.display=val('referral')==='other'?'':'none';}el('referral').addEventListener('change',syncRefOther);syncRefOther();" +
     // "Other" reveals a typed city, exactly as the referral question does.
     "function syncCityOther(){var w=el('cityOtherWrap');if(w)w.style.display=val('city')==='other'?'':'none';}el('city').addEventListener('change',syncCityOther);syncCityOther();" +
@@ -1161,6 +1212,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     "var fn=val('first_name').trim(),ln=val('last_name').trim();if(!fn||!ln){err.textContent=T.errName;window.scrollTo(0,0);return;}" +
     "if(!val('dob')){err.textContent=T.errDob;return;}if(!val('gender')){err.textContent=T.errGender;return;}" +
     "if(!val('city')){err.textContent=T.errCity;return;}if(val('city')==='other'&&!val('city_other').trim()){err.textContent=T.errCity;el('city_other').focus();return;}if(!val('state')){err.textContent=T.errState;return;}" +
+    "if(!val('phone').replace(/\\D/g,'')){err.textContent=T.errPhone;el('phone').focus();return;}" +
     "if(!val('emergency_name').trim()){err.textContent=T.errEmName;el('emergency_name').focus();return;}" +
     "if(!val('emergency_phone').trim()){err.textContent=T.errEmPhone;el('emergency_phone').focus();return;}" +
     "if(!checked('service').length){err.textContent=T.errServices;el('services').scrollIntoView({block:'center'});return;}" +
@@ -1177,7 +1229,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     "if(extraction&&!el('sagree').checked){err.textContent=T.errSurgery;return;}" +
     "if(extraction&&(!spad||!spad.data())){err.textContent=T.errSignSurgery;el('ssig').scrollIntoView({block:'center'});return;}" +
     "var ca={};CONDQ.forEach(function(k){ca[k]=val('cond_'+k);});var mk=checked('med'),none=el('medications_none').checked;" +
-    "var payload={form_version:2,first_name:fn,last_name:ln,dob:val('dob'),gender:val('gender'),phone:val('phone'),email:val('email'),language:LANG,address:val('address'),city:val('city'),city_other:val('city_other'),state:val('state'),emergency_name:val('emergency_name'),emergency_phone:val('emergency_phone')," +
+    "var payload={form_version:" + FORM_VERSION + ",first_name:fn,last_name:ln,dob:val('dob'),gender:val('gender'),phone:val('phone'),email:val('email'),language:LANG,address:val('address'),city:val('city'),city_other:val('city_other'),state:val('state'),emergency_name:val('emergency_name'),emergency_phone:val('emergency_phone')," +
     "services:checked('service'),referral:val('referral'),referral_other:val('referral_other')," +
     "visit_type:visit,race:checked('race')," +
     "under_treatment:val('under_treatment'),condition_answers:ca,conditions_other:val('conditions_other')," +

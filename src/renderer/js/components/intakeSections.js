@@ -38,9 +38,34 @@ let instanceSeq = 0;
 
 function showWhen(node, on) { node.style.display = on ? '' : 'none'; }
 
+// A stored answer the dropdown does not offer — typed before the question was a
+// dropdown ("Facebook group", "Dr. Prior"), or a key from a newer build's list —
+// becomes an option of its own, labelled as recorded and selected. forms.js
+// selectField otherwise lands on "—" for a value it does not know, and the next
+// save quietly erases an optional answer, or demands a required one again
+// without ever showing what the record said. Leaving it keeps it exactly as
+// stored; choosing a listed answer replaces it, knowingly.
+function withRecorded(options, stored) {
+  const value = stored == null ? '' : String(stored);
+  if (!value.trim() || options.some((o) => o.value === value)) return { options, value };
+  const note = L({ en: '(as recorded)', es: '(según el registro)' });
+  return { options: [...options, { value, label: `${value.trim()} ${note}` }], value };
+}
+function recordedSelect(label, options, stored, { required = false } = {}) {
+  const r = withRecorded(options, stored);
+  return selectField(label, r.options, { value: r.value, required });
+}
+
 /* ------------------------------------------------------------------ */
 /*  City                                                               */
 /* ------------------------------------------------------------------ */
+
+// One town name as every copy stores it — the admin's list (db.js
+// sanitizeCities), the Worker's, and a name typed at either form: runs of
+// spaces made one, trimmed, at most 80 characters.
+export function cleanCityName(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 80);
+}
 
 // The cities an event offers at check-in (events.cities: a JSON array of names
 // as the admin typed them). Tolerates the column arriving as a JSON string, an
@@ -59,7 +84,7 @@ export function eventCities(ev) {
   // Cleaned exactly as db.js sanitizeCities and the Worker clean it, so the
   // kiosk and the online form can never offer two spellings of one list.
   for (const c of list) {
-    const name = String(c == null ? '' : c).replace(/\s+/g, ' ').trim().slice(0, 80);
+    const name = cleanCityName(c);
     const fold = name.toLowerCase();
     if (!name || fold === 'other' || seen.has(fold)) continue;
     seen.add(fold);
@@ -107,12 +132,12 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
   const first = textField(t('intake.firstName'), { value: base.first_name, required: true });
   const last = textField(t('intake.lastName'), { value: base.last_name, required: true });
   const dob = textField(t('intake.dob'), { value: base.dob, type: 'date', required: true });
-  const gender = selectField(t('intake.gender'), [
+  const gender = recordedSelect(t('intake.gender'), [
     dash,
     { value: 'male', label: t('intake.genderM') },
     { value: 'female', label: t('intake.genderF') },
     { value: 'other', label: t('intake.genderO') },
-  ], { value: base.gender, required: true });
+  ], base.gender, { required: true });
   const phone = textField(t('intake.phone'), { value: base.phone, type: 'tel', required: true });
   const email = textField(t('intake.email'), { value: base.email, type: 'email' });
   const address = textField(t('intake.address'), { value: d.address });
@@ -123,41 +148,46 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
   // three places in the report). A stored value that is not on the list is
   // shown as Other with its text, never silently blanked: a select given an
   // unknown value quietly selects its first option and the next save wipes it.
+  // A typed name is cleaned the way the online form and the admin's list clean
+  // one (cleanCityName), so the same town typed at either form is one report row.
   const cityList = eventCities({ cities });
   let city; let cityOther = null; let cityOtherWrap = null; let getCity;
   if (!cityList.length) {
     city = textField(t('intake.city'), { value: d.city, required: true });
-    getCity = () => city.get();
+    city.input.maxLength = 80;
+    getCity = () => cleanCityName(city.get());
   } else {
     const listed = matchCity(d.city, cityList);
     city = selectField(t('intake.city'), [
       dash, ...cityList.map((c) => ({ value: c, label: c })), { value: 'other', label: t('intake.otherCity') },
     ], { value: listed || (text(d.city) ? 'other' : ''), required: true });
     cityOther = textField(t('intake.cityOther'), { value: listed ? '' : text(d.city), required: true });
+    cityOther.input.maxLength = 80;
     cityOtherWrap = el('div', { class: 'span-2' }, [cityOther.node]);
     const sync = () => showWhen(cityOtherWrap, city.get() === 'other');
     city.input.addEventListener('change', sync);
     sync();
     // A typed name that is really a listed town is stored in the listed
     // spelling, so "Other: sandy" still counts toward Sandy.
-    getCity = () => (city.get() === 'other' ? (matchCity(cityOther.get(), cityList) || cityOther.get().replace(/\s+/g, ' ')) : city.get());
+    getCity = () => (city.get() === 'other' ? (matchCity(cityOther.get(), cityList) || cleanCityName(cityOther.get())) : city.get());
   }
 
   // A dropdown, not a text box: "OR", "Oregon" and "ore" were landing in the
-  // city/state report as three different places.
-  const stateF = selectField(
+  // city/state report as three different places. An old answer that cannot be
+  // matched to a state unambiguously is shown as recorded rather than hidden.
+  const stateF = recordedSelect(
     t('intake.state'),
     [dash, ...US_STATES.map(([code, name]) => ({ value: code, label: `${name} (${code})` }))],
-    { value: normalizeState(d.state), required: true },
+    normalizeState(d.state) || d.state, { required: true },
   );
   const mailing = textField(t('intake.mailing'), { value: d.mailing_address });
-  const marital = selectField(t('intake.marital'), [
+  const marital = recordedSelect(t('intake.marital'), [
     dash,
     { value: 'single', label: t('intake.single') },
     { value: 'married', label: t('intake.married') },
     { value: 'divorced', label: t('intake.divorced') },
     { value: 'widowed', label: t('intake.widowed') },
-  ], { value: d.marital_status });
+  ], d.marital_status);
   const emName = textField(t('intake.emergencyName'), { value: d.emergency_name, required: true });
   const emPhone = textField(t('intake.emergencyPhone'), { value: d.emergency_phone, type: 'tel', required: true });
   // Phone numbers accept digits only, max 10.
@@ -192,10 +222,12 @@ export function demographicsSection(initial = {}, { staff = false, cities = [] }
   ]);
 
   // F4: referral as a dropdown of known sources; "Other" reveals a free-text field.
-  const referral = selectField(t('intake.referral'), [
+  // The online form stored this question's answer as prose until v0.0.13, so
+  // an older record's "Facebook group" is kept on screen as recorded.
+  const referral = recordedSelect(t('intake.referral'), [
     dash,
     ...referrals().map((r) => ({ value: r.key, label: r.label })),
-  ], { value: d.referral });
+  ], d.referral);
   // Race and ethnicity as ONE optional select-all question. Optional on
   // purpose and labelled as such: it is asked for grant reporting, and a
   // patient who does not want to answer must still get care.
@@ -551,10 +583,12 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
   // "Reason for today's visit" is gone: "What do you need today?" asks the
   // same thing as a countable choice, and the free-text box duplicated it in
   // prose nothing could report on.
-  const prior = selectField(
+  // A record from before this was a dropdown holds prose ("Dr. Prior", "2 yrs
+  // ago"); it opens as recorded, so whoever edits it sees what it says.
+  const prior = recordedSelect(
     t('intake.priorDentist'),
     [dash, ...priorDentistOptions().map((o) => ({ value: o.key, label: o.label }))],
-    { value: dh.prior_dentist, required: true },
+    dh.prior_dentist, { required: true },
   );
   const ynOpts = answerOpts(['yes', 'no']);
   const QUESTIONS = dentalQuestions().map((q) => ({

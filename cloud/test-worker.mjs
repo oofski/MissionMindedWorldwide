@@ -411,6 +411,8 @@ async function main() {
   const NO_CONDITIONS = Object.fromEntries(INTAKE_CONDITIONS.map((k) => [k, k === 'pregnant' ? 'na' : 'no']));
   const REQ = {
     form_version: 2,
+    // Required online since v0.0.15, as it always was at the kiosk.
+    phone: '5550002222',
     emergency_name: 'Kin Contact', emergency_phone: '5550001111',
     under_treatment: 'no', condition_answers: NO_CONDITIONS, medications_none: true,
     major_surgery: 'no', tobacco: 'no', allergy_status: 'nkda',
@@ -472,7 +474,14 @@ async function main() {
       major_surgery: 'yes', surgery_sites: ['knee'], tobacco: 'no',
       allergy_status: 'yes', allergies: ['penicillin', 'other'], allergies_other: 'shellfish',
     });
-    const sorted = (o) => JSON.stringify(o, Object.keys(o).sort());
+    // Key order is not meaning, so both sides are compared with their keys
+    // sorted at EVERY depth. (A replacer array would not do: it filters nested
+    // keys too, and condition_answers and each medication row compared as {}.)
+    const stable = (v) => (Array.isArray(v) ? v.map(stable)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v);
+    const sorted = (o) => JSON.stringify(stable(o));
+    check('the comparison below sees the answers and the medications themselves',
+      sorted({ a: { x: 1 }, m: [{ key: 'warfarin' }] }) !== sorted({ a: { x: 2 }, m: [{ key: 'aspirin' }] }));
     check('the online history is exactly what the walk-in form would store for the same answers', !!mh && sorted(mh) === sorted(expected));
     check('derived for the report and the flags: conditions = the Yes answers plus the typed one',
       !!mh && JSON.stringify(mh.conditions) === JSON.stringify(['diabetes', 'other']) && mh.conditions_other === 'Gout');
@@ -775,6 +784,14 @@ async function main() {
     const noKinPhone = await post({ ...full, emergency_phone: '' });
     check('POST /checkin without an emergency contact phone -> 400',
       noKinPhone.status === 400 && /emergency contact phone/i.test(noKinPhone.data.error));
+    // v0.0.15: the phone number is required online, as it always was at the
+    // kiosk — refused by name, in the kiosk's order (after City and State).
+    const noPhone = await post({ ...full, phone: '' });
+    check('POST /checkin without a phone number -> 400, naming it (required at the kiosk, so here)',
+      noPhone.status === 400 && /phone number/i.test(noPhone.data.error) && !/emergency/i.test(noPhone.data.error));
+    const noPhoneEs = await post({ ...full, language: 'es', phone: '(---)' });
+    check('... in Spanish, and punctuation alone is not a phone number',
+      noPhoneEs.status === 400 && /número de teléfono/.test(noPhoneEs.data.error));
     const noKinEs = await post({ ...full, language: 'es', emergency_name: '' });
     check('POST /checkin (es) without an emergency contact -> Spanish 400',
       noKinEs.status === 400 && /contacto de emergencia/i.test(noKinEs.data.error));
@@ -809,6 +826,9 @@ async function main() {
 
     // The form itself marks them required and blocks submit.
     const f = await getText('/checkin/evt-1');
+    check('the form marks the phone number required and blocks submit without one',
+      /Phone number <span class="req">\*<\/span><\/label><input type="tel" id="phone"/.test(f.text) && f.text.includes('T.errPhone'));
+    check('the page says which form it is, from the one constant the server checks', f.text.includes('var payload={form_version:2,'));
     check('the form marks the emergency contact required',
       /id="emergency_name"/.test(f.text) && /Emergency contact name <span class="req">\*<\/span>/.test(f.text) &&
       f.text.includes("if(!val('emergency_name')"));
@@ -831,6 +851,11 @@ async function main() {
       oldPage.status === 400 && /reload the page/i.test(oldPage.data.error));
     const oldPageEs = await post({ first_name: 'Vieja', last_name: 'Pagina', language: 'es', hospitalized: 'no', gum_bleeding: 'no' });
     check('... in Spanish too', oldPageEs.status === 400 && /cargar la página/i.test(oldPageEs.data.error));
+    // From v0.0.15 a page says which form it is; one that is not this form is
+    // told to reload however complete its answers look.
+    const otherForm = await post({ ...full, first_name: 'Other', last_name: 'Version', form_version: 3 });
+    check('a page that says it is a different form is told to reload the page',
+      otherForm.status === 400 && /reload the page/i.test(otherForm.data.error));
   }
 
   // --- Online parity: services, referral, no survey, the City list ---
@@ -941,6 +966,28 @@ async function main() {
       typedOther.status === 200 && (demoOf('Word') || {}).city === 'other');
     const blankOther = await cityPost({ first_name: 'Blank', last_name: 'Other', city: 'other', city_other: '' });
     check('"Other" with nothing typed is refused as a missing city', blankOther.status === 400 && /city/i.test(blankOther.data.error));
+    const longTown = '  Far   Away ' + 'x'.repeat(100);
+    await cityPost({ first_name: 'Long', last_name: 'Townname', city: 'other', city_other: longTown });
+    check('a typed town is stored cleaned as the kiosk cleans it (one space, trimmed, 80 characters)',
+      cityOf('Townname') === ('Far Away ' + 'x'.repeat(100)).slice(0, 80));
+    check('the online City boxes stop at 80 characters, as the kiosk\'s do',
+      /id="city_other" maxlength="80"/.test(cityForm.text) && /id="city" autocomplete="address-level2" maxlength="80"/.test(en.text));
+
+    // A laptop still on v0.0.14 knows nothing of the City list: when it saves
+    // the event, its row simply leaves the list out. That must not take the
+    // list off the online form (every station is meant to be upgraded first,
+    // but a straggler must not be able to undo an admin's list).
+    const pushEvent = (stamp, data) => call(env, 'POST', '/v1/push', { auth: CLINIC_KEY,
+      body: { device_id: 'old', rows: [{ entity: 'event', uid: 'evt-cities', event_uid: null, updated_at: stamp, data }] } });
+    const oldBuild = await pushEvent('2026-08-06T00:00:00.000Z', { name: 'Towns Clinic (renamed)', active: 1 });
+    const afterOld = await getText('/checkin/evt-cities');
+    check('an older laptop re-saving the event keeps the City list online, and its own change still lands',
+      oldBuild.data.applied === 1 && /<select id="city"/.test(afterOld.text) && /<option value="Boring">Boring<\/option>/.test(afterOld.text)
+      && afterOld.text.includes('Towns Clinic (renamed)'));
+    await pushEvent('2026-08-07T00:00:00.000Z', { name: 'Towns Clinic', active: 1, cities: null });
+    const cleared = await getText('/checkin/evt-cities');
+    check('an admin clearing the list (an explicit empty value) still clears it online',
+      /<input type="text" id="city"/.test(cleared.text) && !/id="city_other"/.test(cleared.text));
   }
 
   // --- v1.6.1: a deletion is sticky in the cloud ---

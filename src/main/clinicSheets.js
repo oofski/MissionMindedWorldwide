@@ -37,7 +37,8 @@ const j = (v, fallback) => {
 // an export a funder or a clinician reads is just a leak.
 const yn = (v) => medicalLabels.answerLabel(v);
 const GENDER = { male: 'Male', female: 'Female', other: 'Other' };
-const ALLERGY_STATUS = { nkda: 'NKDA', yes: 'Yes', unsure: 'Unsure' };
+// The allergy answer in the words the kiosk offers it (medicalLabels.js).
+const ALLERGY_STATUS = medicalLabels.ALLERGY_STATUS_LABELS;
 
 function ageFrom(dob) {
   if (!dob) return '';

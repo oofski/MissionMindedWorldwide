@@ -46,35 +46,6 @@ export function selectField(label, options, { value = '', required = false } = {
   return { node, get: () => sel.value, set: (v) => { sel.value = v; }, input: sel };
 }
 
-// Yes/No toggle (returns 'yes' | 'no' | '').
-//
-// `naText` adds a third choice, returning 'na'. It is for a question that a
-// required form must still let everyone answer honestly — where neither Yes nor
-// No is true of the patient, rather than where the patient would rather not say.
-export function yesNo(label, { value = '', yesText = 'Yes', noText = 'No', naText = '' } = {}) {
-  let val = value;
-  const btns = [];
-  const mkBtn = (v, txt) => {
-    const b = el('button', {
-      type: 'button',
-      class: 'chip-btn' + (val === v ? ' chip-btn--on' : ''),
-      onClick: () => { val = val === v ? '' : v; sync(); },
-    }, [txt]);
-    btns.push([v, b]);
-    return b;
-  };
-  const row = [mkBtn('yes', yesText), mkBtn('no', noText)];
-  if (naText) row.push(mkBtn('na', naText));
-  function sync() {
-    btns.forEach(([v, b]) => b.classList.toggle('chip-btn--on', val === v));
-  }
-  const node = el('div', { class: 'field' }, [
-    el('span', { class: 'field-label' }, [label]),
-    el('div', { class: 'chip-row' }, row),
-  ]);
-  return { node, get: () => val, set: (v) => { val = v; sync(); } };
-}
-
 // Multi-select chip grid from [{key,label,flag?}].
 //
 // `set()` repaints the chips as well as the selection, so a caller enforcing a

@@ -289,7 +289,6 @@ export function clinicalFlags(mh) {
  *   questions  Dr. Trinh's eight, always listed (an older record reads "—" on
  *              them: they were not asked, which is the truth)
  *   legacy     the questions asked before v0.0.15 — ONLY those this record has
- *   symptoms   short labels of the questions answered Yes
  */
 export function dentalDisplay(dh, lang = 'en') {
   const d = dh || {};
@@ -300,7 +299,6 @@ export function dentalDisplay(dh, lang = 'en') {
   return {
     questions,
     legacy,
-    symptoms: questions.filter((q) => q.value === 'yes').map((q) => q.short),
     need: visit ? pick(visit, lang) : '',
     priorDentist: prior ? pick(prior, lang) : (d.prior_dentist ? String(d.prior_dentist) : ''),
     reason: d.reason || '',

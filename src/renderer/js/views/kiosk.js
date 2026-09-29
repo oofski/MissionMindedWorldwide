@@ -1,6 +1,6 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpeaking, priorDentistLabel, routeForVisitType, answerLabel } from '../i18n.js';
+import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpeaking, priorDentistLabel, routeForVisitType, answerLabel, medChecklist } from '../i18n.js';
 import { textField } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
 import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, matchCity } from '../components/intakeSections.js';
@@ -358,6 +358,10 @@ export function renderKiosk(ctx) {
     // those they were unsure of, and every medication — the things a dentist
     // acts on, so the things worth a second look.
     const md = medicalDisplay(data.medical_history, getLang());
+    // A checklist medication is STORED under its canonical English name (the
+    // blood-thinner rules read it), but the patient ticked it in their own
+    // language and confirms it in that language; a typed one reads as typed.
+    const medLabel = new Map(medChecklist().map((x) => [x.key, x.label]));
     const allergyText = md.allergyStatus === 'nkda' ? t('intake.nkda')
       : md.allergyStatus === 'unsure' ? t('intake.unsure')
         : md.allergies.map((a) => a.label).join(', ');
@@ -375,7 +379,7 @@ export function renderKiosk(ctx) {
         row(t('intake.allergiesTitle'), allergyText),
         row(t('intake.conditionsTitle'), md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? t('common.none') : '')),
         md.unsure.length ? row(t('intake.unsure'), md.unsure.map((c) => c.label).join(', ')) : null,
-        row(t('intake.medsTitle'), md.medsNone ? t('intake.noMeds') : md.meds.map((x) => x.name).join(', ')),
+        row(t('intake.medsTitle'), md.medsNone ? t('intake.noMeds') : md.meds.map((x) => medLabel.get(x.key) || x.name).join(', ')),
         row(t('intake.majorSurgery'), md.surgery === 'yes' && md.surgerySites.length
           ? `${answerLabel('yes')} — ${md.surgerySites.join(', ')}` : answerLabel(md.surgery)),
         row(t('intake.tobacco'), answerLabel(md.smoke)),
@@ -387,7 +391,9 @@ export function renderKiosk(ctx) {
             : routeForVisitType(dh.visit_type) === 'dentist' ? L({ en: 'Dentist', es: 'Dentista', ru: 'Стоматолог' })
             : ''
         ),
-        row(t('intake.s_consent'), data.consents.map((c) => c.type === 'general' ? 'General — signed' : 'Oral Surgery — signed').join(' · ')),
+        row(t('intake.s_consent'), data.consents.map((c) => (c.type === 'general'
+          ? L({ en: 'General — signed', es: 'General — firmado', ru: 'Общее — подписано' })
+          : L({ en: 'Oral Surgery — signed', es: 'Cirugía oral — firmado', ru: 'Операция — подписано' }))).join(' · ')),
       ]),
     ]);
     return { title: t('intake.s_review'), node, collect: () => true };
