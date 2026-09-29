@@ -192,7 +192,7 @@ function progressNoteBody(p) {
       });
   const anesthetic = anesEntries.join('') || '<span class="muted">None</span>';
   const cleaning = Object.entries(t.cleaning || {})
-    .filter(([k, v]) => v && k !== 'quad_detail')
+    .filter(([k, v]) => v && k !== 'quad_detail' && k !== 'teeth')
     .map(([k]) => `<span>${esc(CLEAN_LABELS[k] || k)}${k === 'quad_deep_scaling' && t.cleaning.quad_detail ? ' (' + esc(t.cleaning.quad_detail) + ')' : ''}</span>`)
     .join('') || '<span class="muted">None</span>';
   const checklist = Object.entries(tr.checklist || {})
@@ -458,7 +458,7 @@ function summaryBody(p) {
   }).join('') || '<span class="muted">None</span>';
 
   const cleaning = Object.entries(t.cleaning || {})
-    .filter(([k, v]) => v && k !== 'quad_detail')
+    .filter(([k, v]) => v && k !== 'quad_detail' && k !== 'teeth')
     .map(([k]) => `<span>${esc(CLEAN_LABELS[k] || k)}${k === 'quad_deep_scaling' && t.cleaning.quad_detail ? ' (' + esc(t.cleaning.quad_detail) + ')' : ''}</span>`)
     .join('') || '<span class="muted">None</span>';
 

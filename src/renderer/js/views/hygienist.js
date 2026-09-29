@@ -124,11 +124,15 @@ export function renderHygienist(ctx, params = {}) {
 
     // Build a full treatment payload that PRESERVES the doctor's fillings/
     // extractions/anesthetic and only rewrites the cleaning + sign-off fields.
+    // Restorative and Services are carried through too: leaving them out used
+    // to wipe the dentist's denture and pulpotomy entries on every save here.
     function buildPayload() {
       return {
         fillings: tx.fillings || [],
         extractions: tx.extractions || [],
         anesthetic: tx.anesthetic || [],
+        restorative: tx.restorative || {},
+        services: tx.services || {},
         other_procedures: tx.other_procedures || null,
         cleaning: { ...cleanState, teeth: [...teeth], quad_detail: quadDetail.value.trim() },
         clinical_notes: notes.value.trim() || tx.clinical_notes || null,

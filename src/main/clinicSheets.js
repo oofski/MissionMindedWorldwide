@@ -111,7 +111,8 @@ function clinicSheets(bundle) {
       p.last_name, p.first_name,
       extractions.length, extractions.map((e) => e.tooth).filter(Boolean).join(', '),
       fillings.length, fillings.map((f) => [f.tooth, (f.surfaces || []).join(',')].filter(Boolean).join(' ')).filter(Boolean).join(', '),
-      cleaning && Object.keys(cleaning).length ? 'Yes' : '',
+      // 'teeth' and 'quad_detail' are notes on a cleaning, not one.
+      Object.entries(cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail') ? 'Yes' : '',
       anes.map((x) => [x.agent, x.carps && x.carps + ' carp(s)', x.tooth && 'tooth ' + x.tooth].filter(Boolean).join(' ')).join('; '),
       t.other_procedures, t.clinical_notes, t.provider_name, t.completed_at,
       t.locked ? 'Signed off' : '',

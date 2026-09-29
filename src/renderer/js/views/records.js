@@ -375,7 +375,9 @@ function treatmentSummary(p) {
   const parts = [];
   if ((tx.fillings || []).length) parts.push(`${tx.fillings.length} filling(s)`);
   if ((tx.extractions || []).length) parts.push(`${tx.extractions.length} extraction(s)`);
-  if (Object.values(tx.cleaning || {}).some(Boolean)) parts.push('cleaning');
+  // The teeth tapped on the chart and the quadrant note are not a cleaning —
+  // every dentist save stores teeth: [], which used to read as one here.
+  if (Object.entries(tx.cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail')) parts.push('cleaning');
   return parts.join(', ') || 'See provider';
 }
 

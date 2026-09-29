@@ -1274,7 +1274,10 @@ function patientHistory(patientId) {
     let summary = [];
     if (tx) {
       const f = safeJson(tx.fillings, []).length, x = safeJson(tx.extractions, []).length;
-      const c = Object.values(safeJson(tx.cleaning, {})).some(Boolean);
+      // The report's own rule: the teeth tapped on the chart and the quadrant
+      // note are not a cleaning. Every dentist save stores teeth: [], which is
+      // truthy, so the old test called every prior visit a cleaning.
+      const c = didCleaning(tx);
       if (f) summary.push(`${f} filling(s)`);
       if (x) summary.push(`${x} extraction(s)`);
       if (c) summary.push('cleaning');
@@ -2116,6 +2119,14 @@ function saveTreatment(actor, patientId, data, finalize) {
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
   const lock = finalize === true || finalize === 'lock';
   const complete = lock || finalize === 'complete';
+  // Restorative and Services are written only by the dentist's screen. Every
+  // other writer — the hygienist's cleaning save, a USB import of an older
+  // file — leaves them out, and a key left out must mean "leave it alone", not
+  // "wipe it": each hygienist save after the dentist used to erase the
+  // dentist's denture, crown and pulpotomy entries.
+  const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
+  const restorative = has('restorative') ? JSON.stringify(d.restorative || {}) : ((existing && existing.restorative) || '{}');
+  const services = has('services') ? JSON.stringify(d.services || {}) : ((existing && existing.services) || '{}');
   if (existing) {
     db.prepare(
       `UPDATE treatments SET fillings=?, extractions=?, cleaning=?, anesthetic=?,
@@ -2128,8 +2139,8 @@ function saveTreatment(actor, patientId, data, finalize) {
       JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}),
       JSON.stringify(d.anesthetic || []),
-      JSON.stringify(d.restorative || {}),
-      JSON.stringify(d.services || {}),
+      restorative,
+      services,
       d.other_procedures || null,
       d.clinical_notes || null,
       d.provider_name || null,
@@ -2148,7 +2159,7 @@ function saveTreatment(actor, patientId, data, finalize) {
     ).run(
       patientId, JSON.stringify(d.fillings || []), JSON.stringify(d.extractions || []),
       JSON.stringify(d.cleaning || {}), JSON.stringify(d.anesthetic || []),
-      JSON.stringify(d.restorative || {}), JSON.stringify(d.services || {}),
+      restorative, services,
       d.other_procedures || null, d.clinical_notes || null, d.provider_name || null,
       d.provider_signature || null, lock ? 1 : 0,
       complete ? (actor ? actor.id : null) : null, complete ? now() : null
@@ -2878,7 +2889,11 @@ const SYNC_COLS = {
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
   patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
   triage: ['complaint', 'flags', 'checklist', 'teeth', 'teeth_notes', 'notes', 'xray_count', 'xray_station', 'assigned_to', 'status', 'triage_signature', 'triage_signer_name', 'triaged_at', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'vitals_at', 'blood_thinner', 'blood_thinner_detail', 'route', 'routed_at', 'emt_review', 'emt_signed_off', 'bp_rechecks', 'triaged_by_name', 'vitals_by_name', 'routed_by_name'],
-  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name'],
+  // restorative and services were added as columns in v0.0.4 but never listed
+  // here, so the dentist's denture, crown and pulpotomy entries lived only on
+  // the laptop that entered them and were dropped by every clinic restore.
+  treatment: ['fillings', 'extractions', 'cleaning', 'anesthetic', 'other_procedures', 'clinical_notes', 'provider_name', 'provider_signature', 'locked', 'completed_at', 'completed_by_name',
+    'restorative', 'services'],
   // deemed_consent was added as a column and written by both consent paths, but
   // never listed here — so the HIV/Hepatitis answer a patient gives has been
   // silently dropped on every sync and every USB clinic restore since it shipped.
