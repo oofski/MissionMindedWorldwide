@@ -257,12 +257,18 @@ export function renderRecords(ctx, params = {}) {
     } catch (e) { toast(e.message, 'error'); }
   }
 
-  function screenDisplay(p) {
+  async function screenDisplay(p) {
+    // Whether the chart is care done is the printed record's rule
+    // (aftercare.careStage), read through the one channel that carries it, so
+    // this screen and the patient's Visit Summary say the same thing. Should
+    // that fail, only a completed visit is taken as treated.
+    const stage = await api.aftercareGet(p.id, 'en').then((ac) => ac.stage)
+      .catch(() => (p.status === 'completed' || (p.treatment && p.treatment.completed_at) ? 'treated' : 'not_treated'));
     const big = el('div', { class: 'screen-display' }, [
       el('div', { class: 'sd-name' }, [`${p.first_name} ${p.last_name}`]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['DOB']), el('b', {}, [p.dob || '—'])]),
       el('div', { class: 'sd-row' }, [el('span', {}, ['Event']), el('b', {}, [p.event ? p.event.name : '—'])]),
-      el('div', { class: 'sd-row' }, [el('span', {}, ['Treatment']), el('b', {}, [treatmentSummary(p)])]),
+      el('div', { class: 'sd-row' }, [el('span', {}, ['Treatment']), el('b', {}, [treatmentSummary(p, stage)])]),
       // MMW's number — the one the after-care sheet prints (src/main/aftercare.js
       // CONTACT) and the harness pins. Until v0.0.15 this showed an Oregon
       // number left over from the clinic the app was first built for. It is a
@@ -296,7 +302,13 @@ function languageLabel(code) {
   return l ? l.native : (code || 'English');
 }
 
-function treatmentSummary(p) {
+// What the patient photographs as their treatment. A visit not completed at a
+// treatment chair (stage 'not_treated': waiting for one, or checked out while
+// the record placed them before one) lists its chart as not confirmed, as the
+// Visit Summary heads it and the Previous visits table lists it
+// (db.patientHistory) — never as treatment given, and never as "not done",
+// which the record cannot know either.
+function treatmentSummary(p, stage) {
   const tx = p.treatment || {};
   const parts = [];
   if ((tx.fillings || []).length) parts.push(`${tx.fillings.length} filling(s)`);
@@ -304,7 +316,13 @@ function treatmentSummary(p) {
   // The teeth tapped on the chart and the quadrant note are not a cleaning —
   // every dentist save stores teeth: [], which used to read as one here.
   if (Object.entries(tx.cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail')) parts.push('cleaning');
-  if (hasReferralOut(tx.referral_out)) parts.push('referred');
+  const referred = hasReferralOut(tx.referral_out);
+  // A referral is written at Dental Triage when it is made, so it is not part
+  // of what the chart leaves unconfirmed.
+  if (stage === 'not_treated' && parts.length) {
+    return `Charted, not confirmed as done: ${parts.join(', ')}${referred ? '; referred' : ''}`;
+  }
+  if (referred) parts.push('referred');
   return parts.join(', ') || 'See provider';
 }
 

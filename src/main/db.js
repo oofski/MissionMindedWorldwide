@@ -1603,6 +1603,10 @@ function addConsent(patientId, c) {
   );
 }
 
+// Before a chart's summary when the visit was not completed at a treatment
+// chair — the Records screen display says the same (records.js).
+const UNCONFIRMED_PREFIX = 'Charted, not confirmed as done: ';
+
 // Prior visits for the same person (matched by name + DOB) across all events —
 // the returning-patient / continuity-of-care history.
 function patientHistory(patientId) {
@@ -1616,8 +1620,8 @@ function patientHistory(patientId) {
      ORDER BY pt.created_at DESC`
   ).all(patientId, p.first_name, p.last_name, p.dob, p.dob);
   return rows.map((r) => {
-    const tr = db.prepare("SELECT checklist FROM triage WHERE patient_id = ?").get(r.id);
-    const tx = db.prepare('SELECT fillings, extractions, cleaning FROM treatments WHERE patient_id = ?').get(r.id);
+    const tr = db.prepare('SELECT status FROM triage WHERE patient_id = ?').get(r.id);
+    const tx = db.prepare('SELECT fillings, extractions, cleaning, completed_at FROM treatments WHERE patient_id = ?').get(r.id);
     let summary = [];
     if (tx) {
       const f = safeJson(tx.fillings, []).length, x = safeJson(tx.extractions, []).length;
@@ -1629,7 +1633,16 @@ function patientHistory(patientId) {
       if (x) summary.push(`${x} extraction(s)`);
       if (c) summary.push('cleaning');
     }
-    return { id: r.id, event_name: r.event_name, created_at: r.created_at, status: r.status, summary: summary.join(', ') || '—' };
+    // A visit not completed at a treatment chair (the printed record's rule,
+    // aftercare.careStage 'not_treated') lists its chart as not confirmed —
+    // the same words as its Visit Summary — never as treatment given.
+    const unconfirmed = summary.length && require('./aftercare').careStage({
+      status: r.status, treatment: tx, triage: tr || null,
+    }) === 'not_treated';
+    return {
+      id: r.id, event_name: r.event_name, created_at: r.created_at, status: r.status,
+      summary: summary.length ? (unconfirmed ? UNCONFIRMED_PREFIX : '') + summary.join(', ') : '—',
+    };
   });
 }
 
@@ -2320,10 +2333,13 @@ function listPatients({ eventId, search } = {}) {
       locked: !!(tx && tx.locked),
       amending: isAmending(tx, pt.status),
       lockable: canLockRecord(tx, pt.status),
-      // A cleaning is on the chart (the report's own rule, didCleaning). The
-      // hygienist's queue marks a patient waiting for a treatment chair with
-      // it: finishing their cleaning leaves them waiting, and in that queue.
-      cleaning_recorded: didCleaning(tx),
+      // A cleaning is on the chart (the report's own rule, didCleaning) —
+      // whoever put it there: the hygienist's save, or Dental Triage charting
+      // one as planned. The row cannot tell which, so this says "on the
+      // chart", never "done". The hygienist's queue marks a patient waiting
+      // for a treatment chair with it, as something to check before starting:
+      // finishing their cleaning leaves them waiting, and in that queue.
+      cleaning_on_chart: didCleaning(tx),
     };
   });
 }
@@ -2768,9 +2784,23 @@ function xraysTakenValue(v) {
 // as parking them does (markTreatmentWaiting). Signing off and locking would
 // shut the dentist out of the record, so it waits for them too. For every
 // other patient the two are the plain 'complete' and 'lock'.
+//
+// 'cleaning_waiting' is the station's button for a patient it SHOWED as
+// waiting for a chair ("Save cleaning — patient still waiting for a chair").
+// A chart does not refresh while it is open, so by the click a dentist on
+// another station may have taken the patient into a chair, or the desk checked
+// them out. Sent as 'cleaning_complete', that click completed the whole visit
+// of a patient sitting in a treatment chair. This intent can never complete
+// or lock anything: still waiting, it is the save above; in a chair now, it
+// is a plain progress save (they stay in treatment, and the station is told);
+// anywhere else, nothing is written and the station is told why.
 function hygienistFinalize(actor, patientId, finalize) {
-  if (finalize !== 'cleaning_complete' && finalize !== 'cleaning_lock') return finalize;
+  if (finalize !== 'cleaning_complete' && finalize !== 'cleaning_lock' && finalize !== 'cleaning_waiting') return finalize;
   const cur = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+  if (finalize === 'cleaning_waiting' && !(cur && cur.status === 'treatment_waiting')) {
+    if (cur && cur.status === 'in_treatment') return 'cleaning';
+    throw new Error(`This patient is no longer waiting for a treatment chair (${cur ? require('./dentalLabels').statusLabel(cur.status) : 'not found'}) — that changed after their chart was opened here. Nothing was saved: go back to the list and open them again.`);
+  }
   if (!(cur && cur.status === 'treatment_waiting')) return finalize === 'cleaning_lock' ? 'lock' : 'complete';
   if (finalize === 'cleaning_lock') {
     throw new Error('This patient is waiting for a treatment chair at Dental Triage, so the record cannot be signed off and locked from the cleaning station yet — their dental treatment is not done. Save the cleaning; the treating dentist completes the visit.');
@@ -2797,6 +2827,9 @@ function saveTreatment(actor, patientId, data, finalize) {
   //                 for a treatment chair keeps their place (see below)
   //   'cleaning_complete' / 'cleaning_lock' -> v0.0.15: the hygienist's
   //                 complete and sign-off (see hygienistFinalize)
+  //   'cleaning_waiting' -> v0.0.15: the hygienist's save for a patient the
+  //                 station showed as waiting for a chair — never completes
+  //                 (see hygienistFinalize)
   //   'complete' -> mark the visit done (status completed) but NOT locked/editable
   //   'lock'/true-> mark done AND lock the record read-only (optional sign-off)
   finalize = hygienistFinalize(actor, patientId, finalize);

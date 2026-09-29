@@ -541,8 +541,11 @@ const TRIAGE_NOT_YET_TREATED = ['waiting', 'ready', 'triaged', 'treatment_waitin
  *                  as the work is done, and is what has been charted so far
  *   'not_treated'  not yet at a chair (NOT_YET_TREATED), or checked out from
  *                  anywhere before one (TRIAGE_NOT_YET_TREATED on the triage
- *                  row) — the patient left with the row a plan, and nothing on
- *                  it was done
+ *                  row) — the row is read as a plan, and after-care for it is
+ *                  held back. That is a rule for what to withhold, not a
+ *                  finding that nothing was done (see Limits): the printed
+ *                  record heads such a chart "not confirmed as performed"
+ *                  (pdf.js chartHeading), never "not performed"
  *   'none'         no treatment row at all
  * Check-out is not proof of treatment: the desk can check out anyone past
  * Vitals, and an administrator anyone at all.
@@ -560,9 +563,9 @@ const TRIAGE_NOT_YET_TREATED = ['waiting', 'ready', 'triaged', 'treatment_waitin
  * taken into treatment, then sent back by an administrator and checked out
  * from there without the visit being completed, reads as not treated, because
  * the move resets the triage row and nothing else records that work began.
- * (The hygienist's "Mark cleaning complete" for a patient waiting for a chair
- * keeps them waiting — db.saveTreatment 'cleaning_complete' — so a completed
- * visit is never a cleaning finished around a chart nobody treated.)
+ * (The hygienist's station never completes the visit of a patient waiting for
+ * a chair — db.hygienistFinalize keeps them waiting — so a completed visit is
+ * never a cleaning finished around a chart nobody treated.)
  */
 function careStage(p) {
   const patient = p || {};

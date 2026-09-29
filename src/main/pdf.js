@@ -12,8 +12,9 @@
  *                   patient's language (src/main/aftercare.js)
  * 'summary' and 'full' end with the after-care page too, once the patient has
  * been at a treatment chair and there is care to describe (see
- * aftercare.careStage and appendToRecord): a Dental Triage chart is a plan, not
- * care done. An unknown format prints the Progress Note, as it always has.
+ * aftercare.careStage and appendToRecord): a chart for a visit not completed at
+ * a treatment chair is not confirmed as care done, and the record says so
+ * (chartHeading). An unknown format prints the Progress Note, as it always has.
  */
 
 const { BrowserWindow } = require('electron');
@@ -302,18 +303,28 @@ const OREGON_CONSENT =
   'liable for any injury, death or other loss arising out of the provision of these services, unless the injury, ' +
   'death or other loss results from gross negligence.';
 
-// The heading over the charted procedures for a patient who has not reached a
-// treatment chair — waiting for one, or checked out before one
-// (aftercare.careStage 'not_treated'). The chart is Dental Triage's plan, not
-// care done: the check-out screen and the after-care sheet both say nothing on
-// it was done, and the record must not list it as performed. The chart itself
-// still prints, so the plan is on file for the next visit.
-const PLANNED_HEADING = 'Planned — not performed';
+// The heading over the charted procedures when the visit was not completed at
+// a treatment chair (aftercare.careStage 'not_treated': waiting for a chair,
+// or checked out while the record still placed them before one). The row
+// cannot say whether that chart is care done or a plan, and careStage leans to
+// "not treated" on purpose, to hold back after-care: a cleaning the hygienist
+// did for a patient waiting for a chair, and treatment given before an
+// administrator sent the patient back and they left, both land here. So the
+// record says only what is known: the chart is not confirmed as performed. It
+// never says "not performed", which in those cases is false, and never
+// "performed", which for a patient who left before a chair is false. The chart
+// still prints in full, so a plan is on file for the next visit and care that
+// was done is not lost from the record.
+const UNCONFIRMED_HEADING = 'Charted — not confirmed as performed';
+const UNCONFIRMED_NOTE = 'This visit was not completed at a treatment chair, so the chart below is not confirmed as care done — it may be planned care.';
+function chartHeading(p, doneHeading) {
+  if (aftercare.careStage(p) !== 'not_treated') return `<h2>${doneHeading}</h2>`;
+  return `<h2>${UNCONFIRMED_HEADING}</h2><div class="muted">${UNCONFIRMED_NOTE}</div>`;
+}
 
 function progressNoteBody(p, lang) {
   const t = p.treatment || {};
   const tr = p.triage || {};
-  const heading = aftercare.careStage(p) === 'not_treated' ? PLANNED_HEADING : 'Treatment Provided';
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
   const extractions = (t.extractions || []).map((e) => {
     if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
@@ -350,7 +361,7 @@ function progressNoteBody(p, lang) {
     ${tr.notes ? `<div class="box"><span class="label">Assessment notes</span><br>${esc(tr.notes)}</div>` : ''}
     <div class="box"><span class="label">X-rays taken: </span>${esc(taken)} · <span class="label">Images uploaded: </span>${esc(images)}${tr.xray_station ? ' · X-ray station ' + esc(tr.xray_station) + ' (recorded earlier)' : ''}</div>
 
-    <h2>${heading}</h2>
+    ${chartHeading(p, 'Treatment Provided')}
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
@@ -661,7 +672,6 @@ function healthBlock(p) {
 
 function summaryBody(p) {
   const t = p.treatment || {};
-  const heading = aftercare.careStage(p) === 'not_treated' ? PLANNED_HEADING : 'Procedures Performed';
 
   const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
 
@@ -687,7 +697,7 @@ function summaryBody(p) {
 
     ${healthBlock(p)}
 
-    <h2>${heading}</h2>
+    ${chartHeading(p, 'Procedures Performed')}
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>

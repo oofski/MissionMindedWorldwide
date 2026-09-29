@@ -419,8 +419,9 @@ function register(getMainWindow) {
   handle('inventory:delete', ({ id }) => db.deleteInventoryItem(currentUser, id));
   handle('inventory:chairUsage', ({ eventId } = {}) => db.inventoryChairUsage(eventId));
   // finalize may be false, 'waiting' (v0.0.15: move to Treatment Waiting),
-  // 'cleaning' / 'cleaning_complete' / 'cleaning_lock' (v0.0.15: the
-  // hygienist's save, complete and sign-off), 'complete' (mark done, no lock),
+  // 'cleaning' / 'cleaning_complete' / 'cleaning_lock' / 'cleaning_waiting'
+  // (v0.0.15: the hygienist's save, complete, sign-off, and save for a patient
+  // waiting for a chair), 'complete' (mark done, no lock),
   // or 'lock'/true — pass it through so each mode reaches the data layer. Same
   // roles, so no new channel was needed.
   handle('treatment:save', ({ patientId, data, finalize }) =>
