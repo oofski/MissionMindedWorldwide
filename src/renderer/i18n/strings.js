@@ -22,39 +22,61 @@ export const REFERRALS = [
   { key: 'other', en: 'Other', es: 'Otro', ru: 'Другое' },
 ];
 
-// Medical-history checklist (the 28 conditions). `flag:true` items raise a
-// clinical alert in triage.
+// Medical-history conditions. `flag:true` items raise a clinical alert for the
+// dentist; `intake` (default true) marks the ones asked at check-in.
+//
+// The intake set is Dr. Trinh's top-25 form (v0.0.15), in his order and in his
+// wording, each answered Yes / No / Unsure. Eighteen keys are the ones the
+// older 30-item checklist already used for the same thing, so a record taken
+// before this change still reads under the new label with no migration.
+//
+// The keys his form retired stay below with intake:false and their OLD label
+// and flag. A record that ticked "Heart murmur" must still show "Heart murmur"
+// on every screen and export, and a kept report that counted it must still be
+// able to name it — dropping the entry would hide a logged condition.
 export const CONDITIONS = [
-  { key: 'heart_disease', flag: true, en: 'Heart disease', es: 'Enfermedad del corazón' },
-  { key: 'high_bp', flag: true, en: 'High blood pressure', es: 'Presión arterial alta' },
-  { key: 'heart_murmur', flag: true, en: 'Heart murmur', es: 'Soplo cardíaco' },
-  { key: 'pacemaker', flag: true, en: 'Pacemaker', es: 'Marcapasos' },
-  { key: 'artificial_valve', flag: true, en: 'Artificial heart valve', es: 'Válvula cardíaca artificial' },
-  { key: 'rheumatic_fever', flag: false, en: 'Rheumatic fever', es: 'Fiebre reumática' },
-  { key: 'diabetes', flag: true, en: 'Diabetes', es: 'Diabetes' },
+  { key: 'high_bp', flag: true, en: 'High Blood Pressure (Hypertension)', es: 'Presión arterial alta (hipertensión)' },
+  { key: 'diabetes', flag: true, en: 'Diabetes – Type 1 or Type 2', es: 'Diabetes – tipo 1 o tipo 2' },
+  { key: 'heart_disease', flag: true, en: 'Heart Disease / Coronary Artery Disease', es: 'Enfermedad del corazón / enfermedad de las arterias coronarias' },
+  { key: 'heart_attack', flag: true, en: 'Heart Attack / Myocardial Infarction', es: 'Ataque al corazón / infarto de miocardio' },
+  { key: 'stroke', flag: true, en: 'Stroke / TIA', es: 'Derrame cerebral / accidente isquémico transitorio (AIT)' },
+  { key: 'high_cholesterol', flag: false, en: 'High Cholesterol', es: 'Colesterol alto' },
   { key: 'asthma', flag: false, en: 'Asthma', es: 'Asma' },
-  { key: 'tuberculosis', flag: true, en: 'Tuberculosis', es: 'Tuberculosis' },
-  { key: 'hepatitis', flag: true, en: 'Hepatitis', es: 'Hepatitis' },
-  { key: 'hiv', flag: true, en: 'HIV / AIDS', es: 'VIH / SIDA' },
-  { key: 'kidney', flag: false, en: 'Kidney disease', es: 'Enfermedad renal' },
-  { key: 'liver', flag: false, en: 'Liver disease', es: 'Enfermedad del hígado' },
-  { key: 'thyroid', flag: false, en: 'Thyroid problems', es: 'Problemas de tiroides' },
-  { key: 'cancer', flag: false, en: 'Cancer', es: 'Cáncer' },
-  { key: 'epilepsy', flag: true, en: 'Epilepsy / seizures', es: 'Epilepsia / convulsiones' },
-  { key: 'stroke', flag: true, en: 'Stroke', es: 'Derrame cerebral' },
-  { key: 'anemia', flag: false, en: 'Anemia', es: 'Anemia' },
-  { key: 'bleeding', flag: true, en: 'Bleeding disorder / bleeds easily', es: 'Trastorno hemorrágico / sangra fácilmente' },
-  { key: 'blood_thinners', flag: true, en: 'Takes blood thinners', es: 'Toma anticoagulantes' },
-  { key: 'arthritis', flag: false, en: 'Arthritis', es: 'Artritis' },
-  { key: 'glaucoma', flag: false, en: 'Glaucoma', es: 'Glaucoma' },
-  { key: 'ulcers', flag: false, en: 'Stomach ulcers', es: 'Úlceras estomacales' },
-  { key: 'respiratory', flag: false, en: 'Respiratory problems', es: 'Problemas respiratorios' },
-  { key: 'mental_health', flag: false, en: 'Mental health condition', es: 'Condición de salud mental' },
-  { key: 'latex', flag: true, en: 'Latex allergy', es: 'Alergia al látex' },
-  { key: 'anesthesia_reaction', flag: true, en: 'Reaction to anesthesia', es: 'Reacción a la anestesia' },
-  { key: 'pregnant', flag: true, en: 'Currently pregnant', es: 'Actualmente embarazada' },
-  { key: 'pain_mgmt', flag: false, en: 'Pain management program', es: 'Programa de manejo del dolor' },
-  { key: 'weight_mgmt', flag: false, en: 'Weight management program', es: 'Programa de manejo de peso' },
+  { key: 'copd', flag: false, en: 'COPD / Emphysema / Chronic Lung Disease', es: 'EPOC / enfisema / enfermedad pulmonar crónica' },
+  { key: 'kidney', flag: false, en: 'Kidney Disease / Kidney Failure', es: 'Enfermedad renal / insuficiencia renal' },
+  // Absorbs the retired "Hepatitis" item, which was a red flag, so this is one too.
+  { key: 'liver', flag: true, en: 'Liver Disease / Hepatitis', es: 'Enfermedad del hígado / hepatitis' },
+  { key: 'thyroid', flag: false, en: 'Thyroid Disease', es: 'Enfermedad de la tiroides' },
+  { key: 'cancer', flag: false, en: 'Cancer / History of Cancer', es: 'Cáncer / antecedentes de cáncer' },
+  { key: 'epilepsy', flag: true, en: 'Seizures / Epilepsy', es: 'Convulsiones / epilepsia' },
+  { key: 'bleeding', flag: true, en: 'Bleeding Disorder / Excessive Bleeding', es: 'Trastorno de sangrado / sangrado excesivo' },
+  { key: 'blood_clot', flag: true, en: 'Blood Clot / DVT / Pulmonary Embolism', es: 'Coágulo de sangre / TVP / embolia pulmonar' },
+  { key: 'anemia', flag: false, en: 'Anemia / Blood Disorder', es: 'Anemia / trastorno de la sangre' },
+  { key: 'arthritis', flag: false, en: 'Arthritis / Rheumatoid Arthritis', es: 'Artritis / artritis reumatoide' },
+  // Flagged: bisphosphonates for bone loss are an extraction risk (MRONJ).
+  { key: 'osteoporosis', flag: true, en: 'Osteoporosis / Bone Disease', es: 'Osteoporosis / enfermedad de los huesos' },
+  { key: 'ulcers', flag: false, en: 'GERD / Acid Reflux / Stomach Ulcers', es: 'ERGE / reflujo ácido / úlceras estomacales' },
+  { key: 'mental_health', flag: false, en: 'Depression / Anxiety / Other Mental Health Condition', es: 'Depresión / ansiedad / otra condición de salud mental' },
+  { key: 'sleep_apnea', flag: false, en: 'Sleep Apnea', es: 'Apnea del sueño' },
+  { key: 'tuberculosis', flag: true, en: 'Tuberculosis (TB) / History of TB', es: 'Tuberculosis (TB) / antecedentes de TB' },
+  { key: 'hiv', flag: true, en: 'HIV/AIDS', es: 'VIH/SIDA' },
+  { key: 'autoimmune', flag: false, en: 'Autoimmune / Immune System Disorder', es: 'Enfermedad autoinmune / trastorno del sistema inmunitario' },
+  // The one question that is not about everyone who sits down at the kiosk, so
+  // it alone also accepts "Not applicable" ("when applicable" on his form).
+  { key: 'pregnant', flag: true, en: 'Pregnancy / Possible Pregnancy (when applicable)', es: 'Embarazo / posible embarazo (cuando aplique)' },
+  // Retired from check-in (v0.0.15). Old labels and flags, kept for display.
+  { key: 'heart_murmur', flag: true, en: 'Heart murmur', es: 'Soplo cardíaco', intake: false },
+  { key: 'pacemaker', flag: true, en: 'Pacemaker', es: 'Marcapasos', intake: false },
+  { key: 'artificial_valve', flag: true, en: 'Artificial heart valve', es: 'Válvula cardíaca artificial', intake: false },
+  { key: 'rheumatic_fever', flag: false, en: 'Rheumatic fever', es: 'Fiebre reumática', intake: false },
+  { key: 'hepatitis', flag: true, en: 'Hepatitis', es: 'Hepatitis', intake: false },
+  { key: 'blood_thinners', flag: true, en: 'Takes blood thinners', es: 'Toma anticoagulantes', intake: false },
+  { key: 'glaucoma', flag: false, en: 'Glaucoma', es: 'Glaucoma', intake: false },
+  { key: 'respiratory', flag: false, en: 'Respiratory problems', es: 'Problemas respiratorios', intake: false },
+  { key: 'latex', flag: true, en: 'Latex allergy', es: 'Alergia al látex', intake: false },
+  { key: 'anesthesia_reaction', flag: true, en: 'Reaction to anesthesia', es: 'Reacción a la anestesia', intake: false },
+  { key: 'pain_mgmt', flag: false, en: 'Pain management program', es: 'Programa de manejo del dolor', intake: false },
+  { key: 'weight_mgmt', flag: false, en: 'Weight management program', es: 'Programa de manejo de peso', intake: false },
 ];
 
 // The local anaesthetics MMW carries, with the concentrations on the carpule.
@@ -193,34 +215,137 @@ export const MEDICATIONS = [
   { key: 'ferrous_sulfate', rank: 100, name: 'Ferrous sulfate' },
 ];
 
-// Allergies offered at check-in.
+// Medication allergies offered at check-in.
 //
-// Ordered by what this clinic actually puts in a patient — every local
-// anaesthetic and every antibiotic on MMW's dental drug list is here, because
-// those are the allergies that change what a provider may safely give someone
-// on the day. The general ones follow.
+// Dr. Trinh's list (v0.0.15), in his order, behind the question "Do you have an
+// allergy or serious reaction to any medication?" — NKDA / Yes / Unsure, with
+// this checklist asked only on Yes.
+//
+// Seven keys carry over from the list before it because they mean the same
+// thing; azithromycin, tylenol and lidocaine are relabelled to the wider class
+// his list names. `nsaids` is deliberately NOT reused for "Ibuprofen / Naproxen
+// / NSAIDs": its old label named Aspirin too, which is now its own item, and an
+// old aspirin allergy must never read as if aspirin were not covered.
+//
+// Retired entries stay with intake:false and their OLD label, so an older
+// record that logged one still displays it — never hide a logged allergy. Every
+// anaesthetic the clinic carries (ANESTHETICS above) is among them, so an
+// articaine allergy recorded last year is still on the chart at the chair.
 export const ALLERGIES = [
-  // Local anaesthetics — the five MMW carries.
-  { key: 'lidocaine', en: 'Lidocaine', es: 'Lidocaína' },
-  { key: 'articaine', en: 'Articaine', es: 'Articaína' },
-  { key: 'mepivacaine', en: 'Mepivacaine', es: 'Mepivacaína' },
-  { key: 'bupivacaine', en: 'Bupivacaine', es: 'Bupivacaína' },
-  { key: 'prilocaine', en: 'Prilocaine', es: 'Prilocaína' },
-  // Antibiotics — the five MMW carries. Penicillin stays first of these: it is
-  // the allergy patients most often know they have.
   { key: 'penicillin', en: 'Penicillin', es: 'Penicilina' },
   { key: 'amoxicillin', en: 'Amoxicillin', es: 'Amoxicilina' },
-  { key: 'amoxicillin_clavulanate', en: 'Amoxicillin + clavulanate', es: 'Amoxicilina + clavulanato' },
+  { key: 'ampicillin', en: 'Ampicillin', es: 'Ampicilina' },
+  { key: 'cephalosporins', en: 'Cephalosporins', es: 'Cefalosporinas' },
+  { key: 'sulfa', en: 'Sulfa antibiotics', es: 'Antibióticos de sulfa' },
+  { key: 'azithromycin', en: 'Azithromycin / Erythromycin / Clarithromycin', es: 'Azitromicina / eritromicina / claritromicina' },
   { key: 'clindamycin', en: 'Clindamycin', es: 'Clindamicina' },
-  { key: 'azithromycin', en: 'Azithromycin', es: 'Azitromicina' },
-  // General.
+  { key: 'metronidazole', en: 'Metronidazole', es: 'Metronidazol' },
+  { key: 'doxycycline', en: 'Doxycycline / tetracyclines', es: 'Doxiciclina / tetraciclinas' },
+  { key: 'fluoroquinolones', en: 'Ciprofloxacin / Levofloxacin', es: 'Ciprofloxacino / levofloxacino' },
+  { key: 'aspirin', en: 'Aspirin', es: 'Aspirina' },
+  { key: 'ibuprofen_nsaids', en: 'Ibuprofen / Naproxen / NSAIDs', es: 'Ibuprofeno / naproxeno / AINEs' },
+  { key: 'tylenol', en: 'Acetaminophen / Tylenol', es: 'Acetaminofén / Tylenol' },
   { key: 'codeine', en: 'Codeine', es: 'Codeína' },
-  { key: 'erythromycin', en: 'Erythromycin', es: 'Eritromicina' },
-  { key: 'nsaids', en: 'NSAIDs (Ibuprofen, Aspirin)', es: 'AINEs (Ibuprofeno, Aspirina)' },
-  { key: 'tylenol', en: 'Tylenol (Acetaminophen)', es: 'Tylenol (Acetaminofén)' },
-  // Legacy: no longer offered at check-in, but kept so an older record that
-  // recorded a Novocain allergy still displays it (never hide a logged allergy).
+  { key: 'hydrocodone', en: 'Hydrocodone', es: 'Hidrocodona' },
+  { key: 'oxycodone', en: 'Oxycodone', es: 'Oxicodona' },
+  { key: 'morphine', en: 'Morphine', es: 'Morfina' },
+  { key: 'lidocaine', en: 'Lidocaine / local anesthetic', es: 'Lidocaína / anestésico local' },
+  { key: 'general_anesthetic', en: 'General anesthetic', es: 'Anestesia general' },
+  { key: 'anticonvulsant', en: 'Anticonvulsant', es: 'Anticonvulsivo' },
+  { key: 'bp_medication', en: 'Blood pressure medication', es: 'Medicamento para la presión arterial' },
+  { key: 'diuretic', en: 'Diuretic', es: 'Diurético' },
+  { key: 'diabetes_medication', en: 'Insulin / diabetes medication', es: 'Insulina / medicamento para la diabetes' },
+  { key: 'steroid', en: 'Steroid / corticosteroid', es: 'Esteroide / corticosteroide' },
+  // Retired from check-in (v0.0.15, and Novocain in v1.4.8). Kept for display.
+  { key: 'articaine', en: 'Articaine', es: 'Articaína', intake: false },
+  { key: 'mepivacaine', en: 'Mepivacaine', es: 'Mepivacaína', intake: false },
+  { key: 'bupivacaine', en: 'Bupivacaine', es: 'Bupivacaína', intake: false },
+  { key: 'prilocaine', en: 'Prilocaine', es: 'Prilocaína', intake: false },
+  { key: 'amoxicillin_clavulanate', en: 'Amoxicillin + clavulanate', es: 'Amoxicilina + clavulanato', intake: false },
+  { key: 'erythromycin', en: 'Erythromycin', es: 'Eritromicina', intake: false },
+  { key: 'nsaids', en: 'NSAIDs (Ibuprofen, Aspirin)', es: 'AINEs (Ibuprofeno, Aspirina)', intake: false },
   { key: 'novocain', en: 'Novocain', es: 'Novocaína', intake: false },
+];
+
+// The medication checklist on Dr. Trinh's form, in his order. `en` is the
+// CANONICAL name, and it is what is stored as medications[].name whatever the
+// patient's language: the blood-thinner rules in medFlags.js, db.js and pdf.js
+// match on that stored name, and all three recognise Aspirin, Warfarin,
+// Apixaban and Clopidogrel from it. `es` is only what a Spanish-speaking
+// patient reads while ticking. Anything not listed goes under "Other", typed,
+// with MEDICATIONS above as suggestions.
+export const MED_CHECKLIST = [
+  { key: 'atorvastatin', en: 'Atorvastatin (Lipitor)', es: 'Atorvastatina (Lipitor)' },
+  { key: 'amlodipine', en: 'Amlodipine (Norvasc)', es: 'Amlodipino (Norvasc)' },
+  { key: 'lisinopril', en: 'Lisinopril (Zestril/Prinivil)', es: 'Lisinopril (Zestril/Prinivil)' },
+  { key: 'losartan', en: 'Losartan (Cozaar)', es: 'Losartán (Cozaar)' },
+  { key: 'metformin', en: 'Metformin (Glucophage)', es: 'Metformina (Glucophage)' },
+  { key: 'levothyroxine', en: 'Levothyroxine (Synthroid)', es: 'Levotiroxina (Synthroid)' },
+  { key: 'omeprazole', en: 'Omeprazole (Prilosec)', es: 'Omeprazol (Prilosec)' },
+  { key: 'gabapentin', en: 'Gabapentin (Neurontin)', es: 'Gabapentina (Neurontin)' },
+  { key: 'hydrochlorothiazide', en: 'Hydrochlorothiazide (HCTZ)', es: 'Hidroclorotiazida (HCTZ)' },
+  { key: 'metoprolol', en: 'Metoprolol', es: 'Metoprolol' },
+  { key: 'rosuvastatin', en: 'Rosuvastatin (Crestor)', es: 'Rosuvastatina (Crestor)' },
+  { key: 'aspirin', en: 'Aspirin', es: 'Aspirina' },
+  { key: 'ibuprofen', en: 'Ibuprofen (Advil/Motrin)', es: 'Ibuprofeno (Advil/Motrin)' },
+  { key: 'acetaminophen', en: 'Acetaminophen (Tylenol)', es: 'Acetaminofén (Tylenol)' },
+  { key: 'albuterol', en: 'Albuterol (Ventolin/ProAir)', es: 'Albuterol / salbutamol (Ventolin/ProAir)' },
+  { key: 'insulin', en: 'Insulin', es: 'Insulina' },
+  { key: 'glipizide', en: 'Glipizide', es: 'Glipizida' },
+  { key: 'furosemide', en: 'Furosemide (Lasix)', es: 'Furosemida (Lasix)' },
+  { key: 'pantoprazole', en: 'Pantoprazole (Protonix)', es: 'Pantoprazol (Protonix)' },
+  { key: 'sertraline', en: 'Sertraline (Zoloft)', es: 'Sertralina (Zoloft)' },
+  { key: 'escitalopram', en: 'Escitalopram (Lexapro)', es: 'Escitalopram (Lexapro)' },
+  { key: 'prednisone', en: 'Prednisone', es: 'Prednisona' },
+  { key: 'warfarin', en: 'Warfarin (Coumadin)', es: 'Warfarina (Coumadin)' },
+  { key: 'apixaban', en: 'Apixaban (Eliquis)', es: 'Apixabán (Eliquis)' },
+  { key: 'clopidogrel', en: 'Clopidogrel (Plavix)', es: 'Clopidogrel (Plavix)' },
+];
+
+// "Major surgery in the past 6 months? If so, where" — the body sites on Dr.
+// Trinh's form. At least one is required when the answer is Yes.
+export const SURGERY_SITES = [
+  { key: 'knee', en: 'Knee', es: 'Rodilla' },
+  { key: 'elbow', en: 'Elbow', es: 'Codo' },
+  { key: 'hip', en: 'Hip', es: 'Cadera' },
+  { key: 'neck', en: 'Neck', es: 'Cuello' },
+  { key: 'heart', en: 'Heart', es: 'Corazón' },
+  { key: 'leg', en: 'Leg', es: 'Pierna' },
+  { key: 'arm', en: 'Arm', es: 'Brazo' },
+  { key: 'lung', en: 'Lung', es: 'Pulmón' },
+  { key: 'kidney', en: 'Kidney', es: 'Riñón' },
+  { key: 'liver', en: 'Liver', es: 'Hígado' },
+];
+
+// Step 3 (dental history): Dr. Trinh's eight Yes/No questions, in his order.
+// `short` is the label clinicians read on the chart, the printed record and the
+// spreadsheet. The prior-dentist dropdown and the "What do you need today?"
+// scale stay on the step as they were — they drive routing and the surgery
+// consent, and nothing in his list replaces them.
+//
+// `sores` reuses the old key: "Any sores or lumps in your mouth?" asked the same
+// thing. Grinding does NOT — "at night" narrows it, and an old daytime clencher's
+// Yes must not print as a night grinder — so it is `grinding_night`, and the old
+// answer keeps its own row (DENTAL_LEGACY).
+export const DENTAL_QUESTIONS = [
+  { key: 'pain_cold', en: 'Any pain when drinking cold water?', es: '¿Siente dolor al tomar agua fría?', short: 'Pain with cold water' },
+  { key: 'pain_hot', en: 'Any pain when drinking hot water?', es: '¿Siente dolor al tomar agua caliente?', short: 'Pain with hot water' },
+  { key: 'pain_eating', en: 'Any pain when eating?', es: '¿Siente dolor al comer?', short: 'Pain when eating' },
+  { key: 'toothache_night', en: 'Does the toothache wake you up at night?', es: '¿El dolor de muelas lo despierta por la noche?', short: 'Toothache wakes them at night' },
+  { key: 'pain_touch', en: 'Any pain upon touching?', es: '¿Siente dolor al tocar la zona?', short: 'Pain on touch' },
+  { key: 'grinding_night', en: 'Do you clench or grind your teeth at night?', es: '¿Aprieta o rechina los dientes por la noche?', short: 'Clenches / grinds at night' },
+  { key: 'jaw_pain_waking', en: 'Do you wake up with jaw pain?', es: '¿Se despierta con dolor de mandíbula?', short: 'Wakes with jaw pain' },
+  { key: 'sores', en: 'Do you notice any lump or sores in your mouth?', es: '¿Nota algún bulto o llaga en la boca?', short: 'Lump or sores in mouth' },
+];
+
+// The dental questions asked before v0.0.15. No longer asked, never written,
+// but an older record keeps showing its answers under these labels.
+export const DENTAL_LEGACY = [
+  { key: 'gum_bleeding', label: 'Gums bleed' },
+  { key: 'jaw_injury', label: 'Head/neck/jaw injury' },
+  { key: 'grinding', label: 'Clenching / grinding' },
+  { key: 'post_extraction_bleeding', label: 'Bleeding after extraction' },
+  { key: 'ortho', label: 'Orthodontic history' },
 ];
 
 // What the patient needs today — chosen on a 1–4 scale at check-in. Options 1 and
@@ -351,7 +476,7 @@ const en = {
     firstName: 'First name', lastName: 'Last name', dob: 'Date of birth', gender: 'Gender',
     genderM: 'Male', genderF: 'Female', genderO: 'Other',
     phone: 'Phone number', email: 'Email', address: 'Home address', mailing: 'Mailing address (if different)',
-    city: 'City', state: 'State',
+    city: 'City', state: 'State', cityOther: 'Please type your city', otherCity: 'Other',
     marital: 'Marital status', single: 'Single', married: 'Married', divorced: 'Divorced', widowed: 'Widowed',
     children: 'Children by age group', child0: '0–5 yrs', child6: '6–12 yrs', child13: '13–17 yrs', child18: '18+ yrs',
     emergencyName: 'Emergency contact name', emergencyPhone: 'Emergency contact phone',
@@ -359,11 +484,18 @@ const en = {
     // medical
     vitalsTitle: 'Vitals', bp: 'Blood pressure', bpSys: 'Systolic', bpDia: 'Diastolic', hr: 'Heart rate (bpm)',
     underTreatment: 'Are you currently under a doctor’s care?', hospitalized: 'Hospitalized in the last 2 years?',
-    tobacco: 'Do you use tobacco?', pregnancy: 'Pregnant, nursing, or taking contraceptives?',
-    pregnancyNA: 'Not applicable',
-    allergiesTitle: 'Medication allergies', allergiesHint: 'Select all that apply', allergyOther: 'Other allergy (specify)',
-    conditionsTitle: 'Do you have any of these conditions?', conditionsHint: 'Select all that apply', conditionOther: 'Other condition (specify)',
+    // `hospitalized` and `pregnancy` are no longer asked (v0.0.15: major surgery
+    // and the pregnancy row of the conditions table replace them); kept so the
+    // wording an older record was answered under can still be named.
+    tobacco: 'Do you smoke?', pregnancy: 'Pregnant, nursing, or taking contraceptives?',
+    pregnancyNA: 'Not applicable', unsure: 'Unsure',
+    majorSurgery: 'Major surgery within the past 6 months?', surgerySites: 'If so, where?',
+    allergiesTitle: 'Medication allergies', allergiesHint: 'Check all that apply', allergyOther: 'Other allergy (specify)',
+    allergyQuestion: 'Do you have an allergy or serious reaction to any medication?',
+    nkda: 'No known drug allergies (NKDA)',
+    conditionsTitle: 'Do you have any of these conditions?', conditionsHint: 'Answer Yes, No or Unsure for each', conditionOther: 'Other condition (optional)',
     medsTitle: 'Current medications', medName: 'Medication', medDose: 'Dose', medReason: 'Reason', addMed: 'Add medication',
+    medsHint: 'Check every medication you take', medOther: 'Other medication (type the name)', noMeds: 'No medications',
     // dental
     reason: 'Reason for today’s visit', goals: 'Your long-term dental goals',
     priorDentist: 'When did you last see a dentist?',
@@ -463,18 +595,22 @@ const es = {
     firstName: 'Nombre', lastName: 'Apellido', dob: 'Fecha de nacimiento', gender: 'Género',
     genderM: 'Masculino', genderF: 'Femenino', genderO: 'Otro',
     phone: 'Teléfono', email: 'Correo electrónico', address: 'Dirección', mailing: 'Dirección postal (si es diferente)',
-    city: 'Ciudad', state: 'Estado',
+    city: 'Ciudad', state: 'Estado', cityOther: 'Escriba su ciudad', otherCity: 'Otra',
     marital: 'Estado civil', single: 'Soltero/a', married: 'Casado/a', divorced: 'Divorciado/a', widowed: 'Viudo/a',
     children: 'Hijos por grupo de edad', child0: '0–5 años', child6: '6–12 años', child13: '13–17 años', child18: '18+ años',
     emergencyName: 'Nombre del contacto de emergencia', emergencyPhone: 'Teléfono de emergencia',
     referral: '¿Cómo se enteró de nosotros?', referralOther: 'Por favor especifique',
     vitalsTitle: 'Signos vitales', bp: 'Presión arterial', bpSys: 'Sistólica', bpDia: 'Diastólica', hr: 'Frecuencia cardíaca (lpm)',
     underTreatment: '¿Está bajo el cuidado de un médico actualmente?', hospitalized: '¿Hospitalizado en los últimos 2 años?',
-    tobacco: '¿Usa tabaco?', pregnancy: '¿Embarazada, amamantando o usando anticonceptivos?',
-    pregnancyNA: 'No aplica',
-    allergiesTitle: 'Alergias a medicamentos', allergiesHint: 'Seleccione todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
-    conditionsTitle: '¿Tiene alguna de estas condiciones?', conditionsHint: 'Seleccione todas las que apliquen', conditionOther: 'Otra condición (especifique)',
+    tobacco: '¿Fuma?', pregnancy: '¿Embarazada, amamantando o usando anticonceptivos?',
+    pregnancyNA: 'No aplica', unsure: 'No estoy seguro/a',
+    majorSurgery: '¿Cirugía mayor en los últimos 6 meses?', surgerySites: 'Si es así, ¿dónde?',
+    allergiesTitle: 'Alergias a medicamentos', allergiesHint: 'Marque todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
+    allergyQuestion: '¿Tiene alergia o una reacción grave a algún medicamento?',
+    nkda: 'Sin alergias conocidas a medicamentos (NKDA)',
+    conditionsTitle: '¿Tiene alguna de estas condiciones?', conditionsHint: 'Responda Sí, No o No estoy seguro/a para cada una', conditionOther: 'Otra condición (opcional)',
     medsTitle: 'Medicamentos actuales', medName: 'Medicamento', medDose: 'Dosis', medReason: 'Motivo', addMed: 'Agregar medicamento',
+    medsHint: 'Marque todos los medicamentos que toma', medOther: 'Otro medicamento (escriba el nombre)', noMeds: 'Sin medicamentos',
     reason: 'Motivo de la visita de hoy', goals: 'Sus metas dentales a largo plazo',
     priorDentist: '¿Cuándo visitó al dentista por última vez?',
     gumBleeding: '¿Le sangran las encías?', sores: '¿Llagas o bultos en la boca?',
@@ -541,7 +677,9 @@ const bzj = {
     phone: 'Fone numba', email: 'Email', address: 'Hoam adres', mailing: 'Mailin adres (if difrent)',
     reason: 'Wai yu kom tudeh', goals: 'Yu lang-taim dental goal',
     allergiesTitle: 'Medisin alaji', allergiesHint: 'Pick aala weh aplai',
-    conditionsTitle: 'Yu hav eni a dehnya kandishan?', conditionsHint: 'Pick aala weh aplai',
+    // No conditionsHint: "pick all that apply" no longer describes the list,
+    // which is answered row by row since v0.0.15, so English shows until translated.
+    conditionsTitle: 'Yu hav eni a dehnya kandishan?',
     reviewTitle: 'Chek & sain', reviewHint: 'Pleez chek yu inafamayshan, den sain dong dehndeh.',
     signerName: 'Print naym a di persn weh di sain',
     thanks: 'Taanks! Yu chek-in don kompleet.', thanksSub: 'Pleez gi bak di divais to di frant desk.',
@@ -578,7 +716,9 @@ const nya = {
     phone: 'Foni', email: 'Imelo', address: 'Adiresi ya kunyumba', mailing: 'Adiresi yotumizira (ngati ndi yosiyana)',
     reason: 'Chifukwa cha ulendo wa lero', goals: 'Zolinga zanu za mano zanthawi yayitali',
     allergiesTitle: 'Maantibayotiki / mankhwala oyambitsa allergy', allergiesHint: 'Sankhani zonse zogwirizana',
-    conditionsTitle: 'Kodi muli ndi imodzi mwa matenda awa?', conditionsHint: 'Sankhani zonse zogwirizana',
+    // No conditionsHint: "choose all that apply" no longer describes the list,
+    // which is answered row by row since v0.0.15, so English shows until translated.
+    conditionsTitle: 'Kodi muli ndi imodzi mwa matenda awa?',
     reviewTitle: 'Wunikani & sayinani', reviewHint: 'Chonde wunikani zambiri zanu, kenako sayinani pansipa.',
     signerName: 'Dzina losindikiza la amene akusayina',
     thanks: 'Zikomo! Kulembetsa kwanu kwatha.', thanksSub: 'Chonde bwezerani chipangizo ku desiki yakutsogolo.',
@@ -614,16 +754,17 @@ const ru = {
     firstName: 'Имя', lastName: 'Фамилия', dob: 'Дата рождения', gender: 'Пол',
     genderM: 'Мужской', genderF: 'Женский', genderO: 'Другой',
     phone: 'Телефон', email: 'Эл. почта', address: 'Домашний адрес', mailing: 'Почтовый адрес (если отличается)',
+    cityOther: 'Укажите ваш город', otherCity: 'Другой',
     marital: 'Семейное положение', single: 'Холост/не замужем', married: 'В браке', divorced: 'В разводе', widowed: 'Вдовец/вдова',
     children: 'Дети по возрастным группам', child0: '0–5 лет', child6: '6–12 лет', child13: '13–17 лет', child18: '18+ лет',
     emergencyName: 'Контактное лицо на случай ЧП', emergencyPhone: 'Телефон контактного лица',
     referral: 'Как вы узнали о нас?', referralOther: 'Уточните, пожалуйста',
     vitalsTitle: 'Показатели', bp: 'Артериальное давление', bpSys: 'Систолическое', bpDia: 'Диастолическое', hr: 'Пульс (уд/мин)',
     underTreatment: 'Находитесь ли вы сейчас под наблюдением врача?', hospitalized: 'Госпитализация за последние 2 года?',
-    tobacco: 'Употребляете ли вы табак?', pregnancy: 'Беременность, кормление или приём контрацептивов?',
-    pregnancyNA: 'Не применимо',
+    tobacco: 'Вы курите?', pregnancy: 'Беременность, кормление или приём контрацептивов?',
+    pregnancyNA: 'Не применимо', unsure: 'Не уверен(а)', noMeds: 'Нет лекарств',
     allergiesTitle: 'Аллергия на лекарства', allergiesHint: 'Выберите все подходящие', allergyOther: 'Другая аллергия (укажите)',
-    conditionsTitle: 'Есть ли у вас какие-либо из этих заболеваний?', conditionsHint: 'Выберите все подходящие', conditionOther: 'Другое заболевание (укажите)',
+    conditionsTitle: 'Есть ли у вас какие-либо из этих заболеваний?', conditionsHint: 'Ответьте «Да», «Нет» или «Не уверен(а)» на каждый пункт', conditionOther: 'Другое заболевание (необязательно)',
     medsTitle: 'Принимаемые лекарства', medName: 'Лекарство', medDose: 'Доза', medReason: 'Причина', addMed: 'Добавить лекарство',
     reason: 'Причина сегодняшнего визита', goals: 'Ваши долгосрочные стоматологические цели',
     priorDentist: 'Когда вы последний раз были у стоматолога?',

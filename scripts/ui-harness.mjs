@@ -288,61 +288,102 @@ async function main() {
   clickText('Next');
   await tick();
 
-  // Step: Medical history — pick an allergy + a condition + a yes/no
+  // Step: Medical history — Dr. Trinh's form (v0.0.15): every single-choice
+  // question a dropdown, every list a set of chips, all of it required.
   log(/Medical|Historia/i.test($('.kiosk-step-label').textContent), 'on medical history step');
-  const chips = $all('.kiosk-body .chip-select');
-  log(chips.length > 0, 'medical step has condition/allergy chips (' + chips.length + ')');
-  // v1.4.8: allergies offer Lidocaine + Articaine, and no longer Novocain.
-  const chipText = chips.map((c) => c.textContent).join(' | ');
-  log(/Lidocaine/i.test(chipText) && /Articaine/i.test(chipText), 'allergies offer Lidocaine + Articaine at check-in');
-  log(!/Novocain/i.test(chipText), 'allergies no longer offer Novocain at check-in');
+  const selIn = (re) => {
+    const lbl = $all('.kiosk-body label.field').find((l) => re.test(((l.querySelector('.field-label') || {}).textContent || '').trim()));
+    return lbl ? lbl.querySelector('select') : null;
+  };
+  const setSel = (sel, v) => { sel.value = v; sel.dispatchEvent(new window.Event('change', { bubbles: true })); };
+  const condSel = (k) => $(`.kiosk-body .tri-row[data-key="${k}"] select`);
+  // A chip grid is found by its own label, because the allergy and medication
+  // lists share keys (aspirin, other) and a bare data-key would hit the wrong one.
+  const gridBy = (re) => $all('.kiosk-body .field').find((f) => {
+    const kids = Array.from(f.children);
+    return kids.some((c) => c.classList.contains('chip-grid')) && kids.some((c) => c.classList.contains('field-label') && re.test(c.textContent));
+  });
+  const chipOf = (grid, key) => grid && grid.querySelector(`.chip-select[data-key="${key}"]`);
+  const lastToast = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+  const escRe = (s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const stillMedical = () => /Medical|Historia/i.test($('.kiosk-step-label').textContent);
+  const refusedFor = async (name) => { clickText('Next'); await tick(); return stillMedical() && escRe(name).test(lastToast()); };
+
+  const triRows = $all('.kiosk-body .tri-row');
+  log(triRows.length === 25 && triRows.every((r) => r.querySelector('select')),
+    'the 25 conditions are each a dropdown (' + triRows.length + ')');
+  log(triRows.map((r) => r.dataset.key).join(',') === 'high_bp,diabetes,heart_disease,heart_attack,stroke,high_cholesterol,asthma,copd,kidney,liver,thyroid,cancer,epilepsy,bleeding,blood_clot,anemia,arthritis,osteoporosis,ulcers,mental_health,sleep_apnea,tuberculosis,hiv,autoimmune,pregnant',
+    'the conditions are asked in Dr. Trinh\'s order');
+  const optsOf = (sel) => Array.from(sel.options).map((o) => o.textContent).join('|');
+  log(optsOf(condSel('diabetes')) === '—|Yes|No|Unsure', 'each condition offers —, Yes, No, Unsure');
+  log(optsOf(condSel('pregnant')) === '—|Yes|No|Unsure|Not applicable',
+    'only the pregnancy row adds Not applicable (a man or a child can answer it truthfully)');
+  log(/Pregnancy \/ Possible Pregnancy/.test(triRows[24].textContent) && /Seizures \/ Epilepsy/.test(triRows[12].textContent),
+    'the conditions carry Dr. Trinh\'s own wording');
   // v1.4.9: allergies / conditions / medications are required (labels marked *).
   log(/Medication allergies\s*\*/.test($('.kiosk-body').textContent), 'v1.4.9: allergies marked required (*)');
-  // click a known allergy (Penicillin) and a condition (Diabetes)
-  const pen = chips.find((c) => /Penicillin/i.test(c.textContent)); if (pen) pen.click();
-  const dia = chips.find((c) => /Diabet/i.test(c.textContent)); if (dia) dia.click();
-  // The four yes/no questions are now REQUIRED, the same as the online form has
-  // always required them. Each refusal has to NAME the question: the step is a
-  // column of near-identical Yes/No rows, and "please complete this step" is how
-  // a patient gives up on a form.
-  const ynRow = (re) => $all('.kiosk-body .field')
-    .find((f) => f.querySelector('.chip-row') && re.test(((f.querySelector('.field-label') || {}).textContent || '')));
-  const answerYn = (re, txt) => {
-    const f = ynRow(re);
-    const b = f && Array.from(f.querySelectorAll('.chip-btn')).find((x) => txt.test(x.textContent));
-    if (b) b.click();
-    return !!b;
-  };
-  const lastToast = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
-  // The exact wording each refusal has to quote back, so a generic "please
-  // complete this step" could not pass this check.
-  const MED_Q = [
-    [/under a doctor/i, 'Are you currently under a doctor\u2019s care?'],
-    [/Hospitalized/i, 'Hospitalized in the last 2 years?'],
-    [/tobacco/i, 'Do you use tobacco?'],
-    [/Pregnant/i, 'Pregnant, nursing, or taking contraceptives?'],
-  ];
-  // Pregnancy is the one question here that is not about most of the people who
-  // sit down at this screen, so it carries a third answer rather than staying
-  // optional — a man or a child can answer it truthfully, and a "No" keeps
-  // meaning "this patient could be, and is not".
-  log(!!ynRow(/Pregnant/i) && ynRow(/Pregnant/i).querySelectorAll('.chip-btn').length === 3
-    && /Not applicable/i.test(ynRow(/Pregnant/i).textContent),
-    'the pregnancy question offers Not applicable alongside Yes and No');
-  log(MED_Q.slice(0, 3).every(([re]) => ynRow(re) && ynRow(re).querySelectorAll('.chip-btn').length === 2),
-    'the other three medical questions stay a plain Yes / No');
-  // Refused one question at a time, each refusal naming the question it wants.
-  for (const [re, name] of MED_Q) {
-    clickText('Next'); await tick();
-    log(/Medical|Historia/i.test($('.kiosk-step-label').textContent) && new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(lastToast()),
-      'medical step refuses Next by name: ' + name);
-    log(answerYn(re, re === MED_Q[3][0] ? /Not applicable/i : /^(Yes|No)$/i),
-      'the medical question can be answered: ' + name);
-  }
-  // v1.4.9: with allergies + conditions answered but MEDICATIONS not, Next is blocked.
-  clickText('Next'); await tick();
-  log(/Medical|Historia/i.test($('.kiosk-step-label').textContent), 'v1.4.9: medical step blocks Next until medications are answered');
-  const noMeds = $('.kiosk-body .big-check'); if (noMeds) { noMeds.checked = true; noMeds.dispatchEvent(new window.Event('change', { bubbles: true })); }
+  const gateSel = selIn(/allergy or serious reaction/i);
+  log(!!gateSel && optsOf(gateSel) === '—|No known drug allergies (NKDA)|Yes|Unsure',
+    'the allergy question is a dropdown: NKDA, Yes or Unsure');
+  const allergyGrid = gridBy(/^Medication allergies/);
+  log(!!allergyGrid && allergyGrid.parentElement.style.display === 'none', 'the allergy checklist waits for a Yes');
+  const allergyChipText = allergyGrid ? allergyGrid.textContent : '';
+  log(/Sulfa antibiotics/.test(allergyChipText) && /Lidocaine \/ local anesthetic/.test(allergyChipText) && /Ibuprofen \/ Naproxen \/ NSAIDs/.test(allergyChipText)
+    && allergyGrid.querySelectorAll('.chip-select').length === 25,
+    'the allergy checklist is Dr. Trinh\'s 24 plus Other');
+  log(!/Articaine|Novocain/i.test(allergyChipText), 'retired allergies (Articaine, Novocain) are no longer offered at check-in');
+  const medGrid = gridBy(/^Current medications/);
+  log(!!medGrid && medGrid.querySelectorAll('.chip-select').length === 27 && !!chipOf(medGrid, 'warfarin') && !!chipOf(medGrid, 'none'),
+    'medications are his 25 as chips, plus Other and No medications');
+  log(!!selIn(/^Major surgery within the past 6 months/) && !!selIn(/^Do you smoke\?/) && !!selIn(/under a doctor/),
+    'major surgery, smoking and doctor\'s care are dropdowns');
+  log(!selIn(/Hospitalized/i) && !/Hospitalized in the last 2 years/.test($('.kiosk-body').textContent),
+    'the hospitalization question is gone (major surgery replaces it)');
+
+  // Refused one question at a time, in the order the form asks them, and each
+  // refusal names the question it wants.
+  log(await refusedFor('Are you currently under a doctor’s care?'), 'medical step refuses Next by name: under a doctor’s care');
+  setSel(selIn(/under a doctor/), 'no');
+  log(await refusedFor('High Blood Pressure (Hypertension)'), 'medical step refuses Next by name: the first unanswered condition');
+  triRows.forEach((r) => setSel(r.querySelector('select'), 'no'));
+  setSel(condSel('diabetes'), 'yes');
+  setSel(condSel('bleeding'), 'unsure');
+  setSel(condSel('pregnant'), '');
+  log(await refusedFor('Pregnancy / Possible Pregnancy'), 'medical step refuses Next by name: the pregnancy row');
+  setSel(condSel('pregnant'), 'na');
+  log(await refusedFor('Current medications'), 'medical step refuses Next by name: medications');
+  // "No medications" is an answer ABOUT the list: it clears what is ticked,
+  // and ticking a medication clears it — on screen, not silently at save.
+  const litMeds = () => JSON.stringify($all('.chip-select--on', medGrid).map((b) => b.dataset.key));
+  chipOf(medGrid, 'warfarin').click();
+  chipOf(medGrid, 'none').click();
+  log(litMeds() === '["none"]', '"No medications" clears a medication already ticked, on screen');
+  chipOf(medGrid, 'aspirin').click();
+  log(litMeds() === '["aspirin"]', 'ticking a medication clears "No medications", on screen');
+  chipOf(medGrid, 'aspirin').click();
+  chipOf(medGrid, 'warfarin').click();
+  chipOf(medGrid, 'other').click();
+  await tick();
+  log(await refusedFor('Other medication'), 'ticking Other without typing a name is refused, by name');
+  const otherMedInput = $('.kiosk-body .med-row input');
+  log(!!otherMedInput && /^mmw-med-list-\d+$/.test(otherMedInput.getAttribute('list') || ''),
+    'a typed medication still suggests from the clinic\'s 100 (per-form datalist)');
+  setInput(otherMedInput, 'Fish oil');
+  log(await refusedFor('Major surgery within the past 6 months?'), 'medical step refuses Next by name: major surgery');
+  setSel(selIn(/^Major surgery/), 'yes');
+  log(await refusedFor('If so, where?'), 'a Yes to major surgery requires where');
+  chipOf(gridBy(/^If so, where/), 'knee').click();
+  log(await refusedFor('Do you smoke?'), 'medical step refuses Next by name: Do you smoke?');
+  setSel(selIn(/^Do you smoke/), 'no');
+  log(await refusedFor('Do you have an allergy or serious reaction to any medication?'), 'medical step refuses Next by name: the allergy question');
+  setSel(gateSel, 'yes');
+  log(allergyGrid.parentElement.style.display !== 'none', 'a Yes reveals the allergy checklist');
+  log(await refusedFor('Medication allergies'), 'a Yes to allergies requires at least one ticked');
+  chipOf(allergyGrid, 'penicillin').click();
+  chipOf(allergyGrid, 'other').click();
+  log(await refusedFor('Other allergy'), 'an Other allergy requires the name typed');
+  const allergyOtherInput = $all('.kiosk-body label.field').find((l) => /Other allergy/.test(l.textContent)).querySelector('input');
+  setInput(allergyOtherInput, 'Latex gloves');
   clickText('Next');
   await tick();
 
@@ -363,8 +404,19 @@ async function main() {
   await tick();
   log(/Dental/i.test($('.kiosk-step-label').textContent), 'C2: Next is refused while a dental answer is missing');
   if (priorSel) { priorSel.value = 'about_2_years'; priorSel.dispatchEvent(new window.Event('change', { bubbles: true })); }
-  // Answer every Yes/No on the step.
-  $all('.kiosk-body .chip-row').forEach((row) => { const b = row.querySelector('.chip-btn'); if (b) b.click(); });
+  // Step 3 is Dr. Trinh's eight questions, each a Yes / No dropdown.
+  const DENT_Q = ['Any pain when drinking cold water?', 'Any pain when drinking hot water?', 'Any pain when eating?',
+    'Does the toothache wake you up at night?', 'Any pain upon touching?', 'Do you clench or grind your teeth at night?',
+    'Do you wake up with jaw pain?', 'Do you notice any lump or sores in your mouth?'];
+  const dentSels = DENT_Q.map((q) => selIn(escRe(q)));
+  log(dentSels.every((x) => x && optsOf(x) === '—|Yes|No'), 'Step 3 asks Dr. Trinh\'s eight questions, each a Yes / No dropdown');
+  log(!/Do your gums bleed|braces or orthodontics|History of bleeding after a tooth/i.test($('.kiosk-body').textContent),
+    'Step 3 no longer asks the six questions it replaced');
+  for (let i = 0; i < DENT_Q.length; i++) {
+    clickText('Next'); await tick();
+    log(/Dental/i.test($('.kiosk-step-label').textContent) && escRe(DENT_Q[i]).test(lastToast()), 'dental step refuses Next by name: ' + DENT_Q[i]);
+    setSel(dentSels[i], i === 0 ? 'yes' : 'no');
+  }
   // v1.4.9: choose a visit type on the required 1–4 scale. Pick 3 = Filling so no
   // surgery consent is added (keeps this drive on the existing review path).
   const vrange = $('.visit-range');
@@ -403,29 +455,22 @@ async function main() {
   // derived from what the patient said they need on the dental step.
   log(!$('.route-card'), 'C3: the standalone dentist/hygienist chooser is gone from intake');
 
-  // The demographic half of the grant survey is asked at the END OF
-  // REGISTRATION now; the twelve questions about the visit itself stay at
-  // check-out, where they can actually be answered.
-  const surveyStep = $('.survey-inline');
-  log(!!surveyStep, 'the registration survey step is part of the wizard');
-  log(!!surveyStep && surveyStep.querySelectorAll('.survey-q').length === 22,
-    'registration asks the 22 questions answerable before treatment (' + (surveyStep ? surveyStep.querySelectorAll('.survey-q').length : 0) + ')');
-  log(!!surveyStep && !/rate the quality of care/i.test(surveyStep.textContent),
-    'registration does NOT ask the patient to rate care they have not received yet');
-  log(!!surveyStep && !surveyStep.querySelector('input[type=text]') && !surveyStep.querySelector('textarea'),
-    'every registration survey question is a choice — nothing is typed');
-  // Answer two of them, leave the rest blank: every question is optional.
-  const sqs = $all('.survey-inline .survey-q');
-  const pickIn = (q, re) => { const b = Array.from(q.querySelectorAll('.survey-opt')).find((x) => re.test(x.textContent)); if (b) b.click(); return !!b; };
-  log(pickIn(sqs[0], /^Yes/), 'a registration survey answer can be chosen');
-  const hh = sqs.find((q) => /How many people live in your household/i.test(q.textContent));
-  log(!!hh && pickIn(hh, /^4$/), 'household size can be answered');
-  clickText('Next');
-  await tick();
-
+  // "Step 5 — remove entire step" (v0.0.15): registration asks no survey
+  // question any more; the whole grant survey is asked at check-out. So the
+  // consent step leads straight to Sign & Submit, and a Filling visit is five
+  // steps: About You, Medical, Dental, Consent, Sign & Submit.
+  log(!$('.survey-inline') && !$('.kiosk-body .survey-q'), 'registration no longer carries a survey step');
   // Now should be Review (may_need_extraction was not 'yes')
   const onReview = /Sign|Review|Firmar|Send|Submit/i.test($('.kiosk-step-label') ? $('.kiosk-step-label').textContent : '');
   log(!!$('.review') || onReview, 'reached review/sign step');
+  log(/Step 5 of 5/.test($('.kiosk-step-label').textContent), 'the consent step leads straight to Sign & Submit (5 steps on a filling visit)');
+  const reviewTxt = $('.review') ? $('.review').textContent : '';
+  log(!/Community questions/.test(reviewTxt), 'the review no longer reports "community questions"');
+  log(/Penicillin/.test(reviewTxt) && /Latex gloves/.test(reviewTxt), 'the review reads back the allergies, a typed-in one included');
+  log(/Diabetes/.test(reviewTxt) && /Unsure/.test(reviewTxt) && /Bleeding Disorder/.test(reviewTxt),
+    'the review reads back the conditions answered Yes and those the patient was unsure of');
+  log(/Warfarin \(Coumadin\)/.test(reviewTxt) && /Fish oil/.test(reviewTxt), 'the review reads back every medication');
+  log(/Knee/.test(reviewTxt) && /Sandy, OR/.test(reviewTxt), 'the review reads back the surgery site and the town');
   // Submit
   const submitBtn = $all('.kiosk-nav button').find((b) => /Submit|Send|Enviar/i.test(b.textContent)) || $all('.kiosk-nav button').pop();
   submitBtn.click();
@@ -439,33 +484,40 @@ async function main() {
   log(!!created, 'patient persisted (' + (created ? created.first_name + ' ' + created.last_name : 'NONE') + ')');
   if (created) {
     const full = db.getPatient(created.id);
+    const mhK = full.medical_history;
     log(full.first_name === 'Maria', 'demographics captured: first_name=' + full.first_name);
-    log((full.medical_history.allergies || []).includes('penicillin'), 'medical allergies captured: ' + JSON.stringify(full.medical_history.allergies));
-    log((full.medical_history.conditions || []).includes('diabetes'), 'medical conditions captured: ' + JSON.stringify(full.medical_history.conditions));
+    log(mhK.history_version === 2 && mhK.allergy_status === 'yes', 'the history is stored as Dr. Trinh\'s form (history_version 2)');
+    log((mhK.allergies || []).includes('penicillin') && (mhK.allergies || []).includes('other') && mhK.allergies_other === 'Latex gloves',
+      'medical allergies captured: ' + JSON.stringify(mhK.allergies) + ' + ' + mhK.allergies_other);
+    log((mhK.conditions || []).includes('diabetes') && !(mhK.conditions || []).includes('none'),
+      'medical conditions captured (derived from the Yes answers): ' + JSON.stringify(mhK.conditions));
+    log(Object.keys(mhK.condition_answers || {}).length === 25 && mhK.condition_answers.bleeding === 'unsure',
+      'every one of the 25 conditions carries its own answer, Unsure included');
+    log(JSON.stringify((mhK.medications || []).map((x) => [x.key, x.name])) === JSON.stringify([['warfarin', 'Warfarin (Coumadin)'], ['other', 'Fish oil']]),
+      'medications are stored by checklist key with the canonical name, a typed one as Other');
+    log(mhK.major_surgery === 'yes' && JSON.stringify(mhK.surgery_sites) === '["knee"]', 'major surgery and its site are stored');
     // C2: reason is no longer collected; the closed last-dental-visit answer is
     // what the step now has to capture.
     log(full.dental_history.reason === undefined, 'C2: no reason is stored for a new patient');
-    // The registration half of the survey travelled with the patient.
-    const regSv = db.getExitSurvey(created.id);
-    log(!!regSv && regSv.registration_status === 'completed',
-      'survey: the registration half is recorded against the patient at check-in');
-    log(!!regSv && regSv.answers.first_time === 'yes' && regSv.answers.household_size === '4',
-      'survey: the answers given during registration are stored');
-    log(!!regSv && !regSv.exit_status,
-      'survey: the check-out half is still outstanding, so check-out will still ask');
+    // Registration files no survey row at all: check-out creates it, asking
+    // all 34 questions.
+    log(db.getExitSurvey(created.id) == null, 'survey: registration files no survey row (check-out asks the whole survey)');
     log(full.dental_history.prior_dentist === 'about_2_years',
       'C2: the last-dental-visit answer is stored as a code, not prose (' + full.dental_history.prior_dentist + ')');
-    log(['gum_bleeding', 'sores', 'jaw_injury', 'grinding', 'post_extraction_bleeding', 'ortho']
-      .every((k) => full.dental_history[k] === 'yes' || full.dental_history[k] === 'no'),
-      'C2: every dental yes/no question is answered on a submitted record');
+    log(['pain_cold', 'pain_hot', 'pain_eating', 'toothache_night', 'pain_touch', 'grinding_night', 'jaw_pain_waking', 'sores']
+      .every((k) => full.dental_history[k] === 'yes' || full.dental_history[k] === 'no') && full.dental_history.pain_cold === 'yes',
+      'every Step 3 question is answered on a submitted record');
+    log(['gum_bleeding', 'jaw_injury', 'grinding', 'post_extraction_bleeding', 'ortho'].every((k) => full.dental_history[k] === undefined),
+      'the retired Step 3 questions are not written for a new patient');
     // The walk-in record now carries the same complete history the online form
     // has always insisted on — a blank is not a "no", and the dentist reads
     // these before deciding whether it is safe to treat.
-    log(['under_treatment', 'hospitalized', 'tobacco']
-      .every((k) => full.medical_history[k] === 'yes' || full.medical_history[k] === 'no'),
-      'every medical yes/no question is answered on a submitted record');
-    log(full.medical_history.pregnancy === 'na',
-      'a "Not applicable" pregnancy answer is stored as an answer, not left blank (' + full.medical_history.pregnancy + ')');
+    log(['under_treatment', 'major_surgery', 'tobacco']
+      .every((k) => mhK[k] === 'yes' || mhK[k] === 'no') && mhK.hospitalized === undefined && mhK.pregnancy === undefined,
+      'every medical yes/no question is answered on a submitted record (and the retired ones are not written)');
+    log(mhK.condition_answers.pregnant === 'na',
+      'a "Not applicable" pregnancy answer is stored as an answer, not left blank (' + mhK.condition_answers.pregnant + ')');
+    log(full.demographics.city === 'Sandy', 'the town is stored as typed when the event has no city list');
     // C3: the station was derived from the visit type, with nobody asked.
     log(full.triage && full.triage.route === 'dentist',
       'C3: choosing Filling routed the patient to the dentist automatically');
@@ -474,7 +526,7 @@ async function main() {
     // v1.2.0: patient chose a provider at check-in; vitals are NOT collected here.
     log(full.triage && full.triage.route === 'dentist', 'A4: check-in provider choice stored (route=' + (full.triage && full.triage.route) + ')');
     log(full.status === 'checked_in', 'B1: new check-in stays checked_in (EMT queue only)');
-    log(full.medical_history.bp_systolic == null, 'A2: vitals NOT collected at patient check-in');
+    log(mhK.bp_systolic == null, 'A2: vitals NOT collected at patient check-in');
 
     // ---- Render the clinician views and check history appears ----
     currentUser = signInAdmin();
@@ -486,10 +538,11 @@ async function main() {
     await tick(); await tick();
     const recText = recRoot.textContent;
     log(/About 2 years ago/i.test(recText), 'C2: the records view shows the last-dental-visit answer as a readable label');
-    log(/Not applicable/i.test(recText),
+    log(/Pregnancy[^]*Not applicable/i.test(recText) && !/>na</.test(recRoot.innerHTML),
       'records view reads a not-applicable pregnancy answer back in words, not as the stored code');
     log(/Diabetes/i.test(recText), 'records view shows condition');
-    log(/Penicillin/i.test(recText), 'records view shows allergy');
+    log(/Penicillin/i.test(recText) && /Latex gloves/.test(recText), 'records view shows allergy, a typed-in one included');
+    log(/Pain with cold water/.test(recText), 'records view shows the Step 3 answers by their chart labels');
   }
 
   // ---- Smoke render the other views to catch runtime errors ----
@@ -769,11 +822,15 @@ async function main() {
     log(db.getPatient(cp.id).status === 'completed', 'v1.4.7: once the general consent is signed, the dentist can document + complete the visit');
   }
 
-  // ---- v1.4.8: allergy list — Lidocaine + Articaine in, Novocain out (but a
-  //               legacy Novocain allergy still shows on old records). ----
+  // ---- v1.4.8: allergy list — Novocain out (but a legacy Novocain allergy
+  //               still shows on old records). v0.0.15: Dr. Trinh's list
+  //               replaces it; Lidocaine stays (as "local anesthetic"),
+  //               Articaine is retired the same way Novocain was. ----
   {
     const al = (await import('../src/renderer/js/i18n.js')).allergies();
-    log(al.some((a) => a.key === 'lidocaine' && a.intake) && al.some((a) => a.key === 'articaine' && a.intake), 'v1.4.8: Lidocaine + Articaine are offered as check-in allergies');
+    const art = al.find((a) => a.key === 'articaine');
+    log(al.some((a) => a.key === 'lidocaine' && a.intake && /local anesthetic/i.test(a.label)) && !!art && art.intake === false && art.label === 'Articaine',
+      'v0.0.15: Lidocaine (local anesthetic) is offered at check-in; a logged Articaine allergy still resolves by its old name');
     const nov = al.find((a) => a.key === 'novocain');
     log(!!nov && nov.intake === false && /Novocain/i.test(nov.label), 'v1.4.8: a legacy Novocain allergy still resolves for display but is not offered at check-in');
   }
@@ -783,8 +840,10 @@ async function main() {
     const cs = (await import('../src/renderer/js/i18n.js')).conditions();
     const pain = cs.find((c) => c.key === 'pain_mgmt');
     const weight = cs.find((c) => c.key === 'weight_mgmt');
-    log(!!pain && /pain management/i.test(pain.label) && pain.flag !== true, 'health history: "Pain management program" is offered as a condition checkbox (not a red flag)');
-    log(!!weight && /weight management/i.test(weight.label) && weight.flag !== true, 'health history: "Weight management program" is offered as a condition checkbox (not a red flag)');
+    // v0.0.15: no longer asked (Dr. Trinh's 25 replace the checklist), but a
+    // record that ticked them must still name them.
+    log(!!pain && /pain management/i.test(pain.label) && pain.flag !== true && pain.intake === false, 'health history: "Pain management program" still resolves for display on an older record (retired, not a red flag)');
+    log(!!weight && /weight management/i.test(weight.label) && weight.flag !== true && weight.intake === false, 'health history: "Weight management program" still resolves for display on an older record (retired, not a red flag)');
     // A patient can check them and they persist on the record.
     currentUser = signInAdmin();
     const hp = db.createPatient(currentUser, { first_name: 'Pat', last_name: 'Hh', demographics: {}, medical_history: { conditions: ['pain_mgmt', 'weight_mgmt'] }, dental_history: {}, consents: [] });
@@ -2411,7 +2470,683 @@ async function main() {
     // offers the third answer; the online one has to accept it.
     const wSrc = require('node:fs').readFileSync(new URL('../cloud/worker.js', import.meta.url), 'utf8');
     log(/v === 'na'/.test(wSrc), 'na: the online form counts "Not applicable" as answered');
-    log(/id === 'pregnancy' \?/.test(wSrc), 'na: and offers it on the pregnancy question only');
+    // v0.0.15: the pregnancy question is the pregnancy row of the conditions
+    // table, and it alone carries the fourth answer — offered and accepted.
+    log(/k === 'pregnant' \? \['na'\]/.test(wSrc) && /k === 'pregnant' && v === 'na'/.test(wSrc),
+      'na: and offers and accepts it on the pregnancy row only');
+  }
+
+  /* ===== v0.0.15 intake — Dr. Trinh's history, Step 3, City, no survey =====
+     The medical history became Dr. Trinh's form (25 conditions answered Yes /
+     No / Unsure, an allergy gate, a medication checklist, major surgery, "Do
+     you smoke?"), Step 3 became his eight questions, City became the event's
+     own list, and the survey left registration. Every record taken before this
+     is still on disk, in the cloud and in backups, so each check below looks at
+     an OLD record and a NEW one side by side: an old record must still read
+     truthfully everywhere it did (an unticked box is "not reported", never
+     "No"), and a new one must read the same on every screen and export. */
+  {
+    currentUser = signInAdmin();
+    const fsV = require('node:fs');
+    const srcV = (rel) => fsV.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const st = await import('../src/renderer/i18n/strings.js');
+    const mhx = await import('../src/renderer/js/medicalHistory.js');
+    const ml = require('../src/main/medicalLabels.js');
+    const i18nV = await import('../src/renderer/js/i18n.js');
+    i18nV.setLang('en');
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+    // ---- the catalogues: his lists, in his order, retired entries kept ----
+    const INTAKE_25 = ['high_bp', 'diabetes', 'heart_disease', 'heart_attack', 'stroke', 'high_cholesterol', 'asthma', 'copd',
+      'kidney', 'liver', 'thyroid', 'cancer', 'epilepsy', 'bleeding', 'blood_clot', 'anemia', 'arthritis', 'osteoporosis',
+      'ulcers', 'mental_health', 'sleep_apnea', 'tuberculosis', 'hiv', 'autoimmune', 'pregnant'];
+    const intakeConds = st.CONDITIONS.filter((c) => c.intake !== false);
+    log(same(intakeConds.map((c) => c.key), INTAKE_25), 'v0.0.15: check-in asks Dr. Trinh\'s 25 conditions, in his order');
+    log(same(intakeConds.filter((c) => c.flag).map((c) => c.key),
+      ['high_bp', 'diabetes', 'heart_disease', 'heart_attack', 'stroke', 'liver', 'epilepsy', 'bleeding', 'blood_clot', 'osteoporosis', 'tuberculosis', 'hiv', 'pregnant']),
+    'v0.0.15: the red-flag conditions are the agreed set (liver absorbs hepatitis; osteoporosis for bone drugs)');
+    const RETIRED_C = ['heart_murmur', 'pacemaker', 'artificial_valve', 'rheumatic_fever', 'hepatitis', 'blood_thinners', 'glaucoma',
+      'respiratory', 'latex', 'anesthesia_reaction', 'pain_mgmt', 'weight_mgmt'];
+    log(RETIRED_C.every((k) => { const c = st.CONDITIONS.find((x) => x.key === k); return c && c.intake === false && c.en && c.es; })
+      && st.CONDITIONS.find((c) => c.key === 'heart_murmur').en === 'Heart murmur' && st.CONDITIONS.find((c) => c.key === 'hepatitis').flag === true,
+    'v0.0.15: every retired condition still resolves, under its OLD name and flag, for the records that hold it');
+    log(st.CONDITIONS.every((c) => /^[a-z_]+$/.test(c.key) && c.en && c.es), 'v0.0.15: every condition is translated into Spanish');
+    const intakeAll = st.ALLERGIES.filter((a) => a.intake !== false).map((a) => a.key);
+    log(same(intakeAll, ['penicillin', 'amoxicillin', 'ampicillin', 'cephalosporins', 'sulfa', 'azithromycin', 'clindamycin', 'metronidazole',
+      'doxycycline', 'fluoroquinolones', 'aspirin', 'ibuprofen_nsaids', 'tylenol', 'codeine', 'hydrocodone', 'oxycodone', 'morphine',
+      'lidocaine', 'general_anesthetic', 'anticonvulsant', 'bp_medication', 'diuretic', 'diabetes_medication', 'steroid']),
+    'v0.0.15: the allergy checklist is Dr. Trinh\'s 24, in his order');
+    log(['articaine', 'mepivacaine', 'bupivacaine', 'prilocaine', 'amoxicillin_clavulanate', 'erythromycin', 'nsaids', 'novocain']
+      .every((k) => { const a = st.ALLERGIES.find((x) => x.key === k); return a && a.intake === false; })
+      && st.ALLERGIES.find((a) => a.key === 'nsaids').en === 'NSAIDs (Ibuprofen, Aspirin)',
+    'v0.0.15: retired allergies keep their old names — an old "NSAIDs (Ibuprofen, Aspirin)" still says aspirin');
+    log(st.MED_CHECKLIST.length === 25 && st.MED_CHECKLIST.every((m) => m.key && m.en && m.es) && st.MEDICATIONS.length === 100,
+      'v0.0.15: his 25-medication checklist, with the 100-drug list kept for "Other"');
+    log(same(st.SURGERY_SITES.map((x) => x.key), ['knee', 'elbow', 'hip', 'neck', 'heart', 'leg', 'arm', 'lung', 'kidney', 'liver']),
+      'v0.0.15: major surgery offers his ten body sites');
+    log(same(st.DENTAL_QUESTIONS.map((q) => q.key), ['pain_cold', 'pain_hot', 'pain_eating', 'toothache_night', 'pain_touch', 'grinding_night', 'jaw_pain_waking', 'sores'])
+      && st.DENTAL_QUESTIONS.every((q) => q.en && q.es && q.short),
+    'v0.0.15: Step 3 is his eight questions (grinding at night is a NEW key; sores reuses the old one)');
+
+    // ---- the copies, pinned: online form, main-process labels, data layer ----
+    const wSrcV = srcV('../cloud/worker.js');
+    const pairs = (name) => {
+      const m = wSrcV.match(new RegExp('const ' + name + ' = \\[([\\s\\S]*?)\\n\\];'));
+      return m ? Array.from(m[1].matchAll(/\['([a-z_]+)', '((?:[^'\\]|\\.)*)'\]/g)).map((x) => [x[1], x[2]]) : null;
+    };
+    const expect = (list, lang) => list.map((x) => [x.key, x[lang]]);
+    log(same(pairs('FORM_CONDITIONS'), expect(intakeConds, 'en')) && same(pairs('FORM_CONDITIONS_ES'), expect(intakeConds, 'es')),
+      'v0.0.15: the online form asks the same 25 conditions, same order, same words (English and Spanish)');
+    const intakeAllergyItems = st.ALLERGIES.filter((a) => a.intake !== false);
+    log(same(pairs('FORM_ALLERGIES'), expect(intakeAllergyItems, 'en')) && same(pairs('FORM_ALLERGIES_ES'), expect(intakeAllergyItems, 'es')),
+      'v0.0.15: the online form offers the same allergy list, word for word, in both languages');
+    log(same(pairs('FORM_MED_CHECKLIST'), expect(st.MED_CHECKLIST, 'en')) && same(pairs('FORM_MED_CHECKLIST_ES'), expect(st.MED_CHECKLIST, 'es')),
+      'v0.0.15: the online medication checklist stores the same canonical names');
+    log(same(pairs('FORM_SURGERY_SITES'), expect(st.SURGERY_SITES, 'en')) && same(pairs('FORM_SURGERY_SITES_ES'), expect(st.SURGERY_SITES, 'es')),
+      'v0.0.15: the online form offers the same surgery sites');
+    log(same(pairs('FORM_DENTAL_YESNO'), expect(st.DENTAL_QUESTIONS, 'en')) && same(pairs('FORM_DENTAL_YESNO_ES'), expect(st.DENTAL_QUESTIONS, 'es')),
+      'v0.0.15: the online Step 3 is the same eight questions, word for word');
+    const enCat = st.CATALOG.en.intake, esCat = st.CATALOG.es.intake;
+    log(same(pairs('FORM_MED_YESNO'), [['under_treatment', enCat.underTreatment], ['major_surgery', enCat.majorSurgery], ['tobacco', enCat.tobacco]])
+      && same(pairs('FORM_MED_YESNO_ES'), [['under_treatment', esCat.underTreatment], ['major_surgery', esCat.majorSurgery], ['tobacco', esCat.tobacco]]),
+    'v0.0.15: doctor\'s care, major surgery and "Do you smoke?" read the same online as at the kiosk');
+    const enLabels = (list) => Object.fromEntries(list.map((x) => [x.key, x.en]));
+    log(same(ml.CONDITION_LABELS, enLabels(st.CONDITIONS)) && same(ml.ALLERGY_LABELS, enLabels(st.ALLERGIES))
+      && same(ml.MED_CHECKLIST_LABELS, enLabels(st.MED_CHECKLIST)) && same(ml.SURGERY_SITE_LABELS, enLabels(st.SURGERY_SITES)),
+    'v0.0.15: the printed record and spreadsheet name everything exactly as the app does (medicalLabels.js pinned)');
+    log(same(ml.FLAG_CONDITIONS, st.CONDITIONS.filter((c) => c.flag).map((c) => c.key)) && same(ml.INTAKE_CONDITIONS, INTAKE_25)
+      && same(ml.DENTAL_Q_LABELS, Object.fromEntries(st.DENTAL_QUESTIONS.map((q) => [q.key, q.short])))
+      && same(ml.DENTAL_LEGACY_LABELS, Object.fromEntries(st.DENTAL_LEGACY.map((q) => [q.key, q.label]))),
+    'v0.0.15: the main process agrees on the red flags, the 25 asked, and the Step 3 labels');
+    log(same(ml.ALLERGY_STATUS_LABELS, { nkda: enCat.nkda, yes: st.CATALOG.en.common.yes, unsure: enCat.unsure })
+      && /ALLERGY_STATUS = medicalLabels\.ALLERGY_STATUS_LABELS/.test(srcV('../src/main/clinicSheets.js')),
+    'v0.0.15: the spreadsheet words the allergy answer as the kiosk\'s own dropdown does (one copy, in medicalLabels.js)');
+    // The conditions are answered row by row now. A language still telling the
+    // patient to "select all that apply" above 25 dropdowns gives the wrong
+    // instruction; one without its own wording falls back to the English.
+    log(Object.values(st.CATALOG).every((c) => !(c.intake && c.intake.conditionsHint) || c.intake.conditionsHint !== c.intake.allergiesHint)
+      && /«Да», «Нет» или «Не уверен\(а\)»/.test(st.CATALOG.ru.intake.conditionsHint),
+    'v0.0.15: no language words the conditions as "select all that apply" any more');
+    const dbSrcV = srcV('../src/main/db.js');
+    log(/const VISIT_SPECIFIC_DENTAL_KEYS = Object\.keys\(require\('\.\/medicalLabels'\)\.DENTAL_Q_LABELS\)/.test(dbSrcV),
+      'v0.0.15: a returning patient\'s new visit clears the Step 3 questions from the pinned list, not a copy of its own');
+    log(/\n  event: \[[^\]]*'cities'[^\]]*\]/.test(dbSrcV), 'v0.0.15: the City list is part of what syncs for an event');
+
+    // ---- one legacy record and one v0.0.15 record, used by every check below ----
+    const ANS = Object.fromEntries(INTAKE_25.map((k) => [k, 'no']));
+    const LEGACY_MH = {
+      under_treatment: 'yes', hospitalized: 'yes', tobacco: 'no', pregnancy: 'na',
+      conditions: ['diabetes', 'heart_murmur', 'pain_mgmt', 'other'], conditions_other: 'Gout',
+      allergies: ['articaine', 'nsaids', 'other'], allergies_other: 'Sulfa',
+      medications: [{ name: 'Metformin', dose: '500 mg', reason: 'sugar' }],
+    };
+    const LEGACY_DH = { prior_dentist: 'Dr. Prior', gum_bleeding: 'yes', ortho: 'no', grinding: 'yes', visit_type: 'filling' };
+    const V2_MH = mhx.normalizeMedical({
+      under_treatment: 'no', condition_answers: { ...ANS, diabetes: 'yes', copd: 'yes', bleeding: 'unsure', pregnant: 'unsure' },
+      conditions_other: '', medications: [{ key: 'warfarin', name: 'Warfarin (Coumadin)' }, { key: 'other', name: 'Fish oil' }],
+      major_surgery: 'yes', surgery_sites: ['knee', 'hip'], tobacco: 'yes',
+      allergy_status: 'yes', allergies: ['sulfa', 'other'], allergies_other: 'Latex gloves',
+    });
+    const V2_DH = { prior_dentist: 'about_1_year', pain_cold: 'yes', pain_hot: 'no', pain_eating: 'yes', toothache_night: 'no',
+      pain_touch: 'no', grinding_night: 'yes', jaw_pain_waking: 'no', sores: 'no', visit_type: 'extraction_pain', may_need_extraction: 'yes' };
+    const V2_UNSURE = mhx.normalizeMedical({ ...V2_MH, allergy_status: 'unsure', allergies: [] });
+    const UNKNOWN = { conditions: ['diabetes', 'future_condition'], allergies: ['bee_venom'] };
+
+    // ---- the two implementations agree (renderer vs main process) ----
+    const fixtures = [LEGACY_MH, V2_MH, V2_UNSURE, UNKNOWN, {}, { conditions: ['none'], allergies: ['none'], medications_none: true }];
+    log(fixtures.every((f) => same(mhx.medicalDisplay(f, 'en'), ml.medicalDisplay(f))),
+      'v0.0.15: the screens and the printed record read every history the same way (legacy, new, unsure, unknown keys, empty)');
+    log(fixtures.every((f) => same(mhx.clinicalFlags(f), ml.clinicalFlags(f)) && mhx.firstMissingMedical(f) === ml.firstMissingMedical(f)),
+      'v0.0.15: the red flags and the "what is still unanswered" rule are identical in both');
+    const dSub = (d) => ({ q: d.questions.map((q) => [q.key, q.short, q.value]), l: d.legacy });
+    log([LEGACY_DH, V2_DH, {}].every((d) => same(dSub(mhx.dentalDisplay(d, 'en')), dSub(ml.dentalDisplay(d)))),
+      'v0.0.15: the dental history reads the same on screen and in print');
+
+    // ---- what the form stores, derived ----
+    log(same(V2_MH.conditions, ['diabetes', 'copd']) && V2_MH.history_version === 2 && !V2_MH.conditions_none,
+      'v0.0.15: conditions are derived from the Yes answers (Unsure is not a Yes)');
+    const allNo = mhx.normalizeMedical({ ...V2_MH, condition_answers: { ...ANS, pregnant: 'na' } });
+    log(same(allNo.conditions, ['none']) && allNo.conditions_none === true, 'v0.0.15: every condition answered No (or N/A) is a reviewed "none"');
+    const unsureOnly = mhx.normalizeMedical({ ...V2_MH, condition_answers: { ...ANS, asthma: 'unsure' } });
+    log(same(unsureOnly.conditions, []) && !unsureOnly.conditions_none, 'v0.0.15: an Unsure is never recorded as "none"');
+    const nk = mhx.normalizeMedical({ ...V2_MH, allergy_status: 'nkda', allergies: ['sulfa'] });
+    log(same(nk.allergies, ['none']) && nk.allergies_none === true && same(V2_UNSURE.allergies, []) && !V2_UNSURE.allergies_none,
+      'v0.0.15: NKDA is recorded as reviewed-none; Unsure lists nothing and is NOT "none"');
+    log(same(mhx.normalizeMedical({ ...V2_MH, major_surgery: 'no' }).surgery_sites, []), 'v0.0.15: no major surgery, no sites');
+    log(mhx.normalizeMedical(LEGACY_MH).history_version === undefined, 'v0.0.15: an old checklist run through the normaliser is not passed off as answered');
+
+    // ---- the red flags the dentist sees ----
+    const fl = mhx.clinicalFlags(V2_UNSURE);
+    log(fl.includes('Diabetes – Type 1 or Type 2') && fl.includes('Unsure: Bleeding Disorder / Excessive Bleeding') && fl.includes('Possibly pregnant')
+      && fl.includes('Allergy status unsure') && !fl.some((f) => /COPD/.test(f)),
+    'v0.0.15: flags carry the red-flag conditions, "Unsure: …" ones, "Possibly pregnant" and an Unsure allergy answer');
+    log(mhx.clinicalFlags(V2_MH).includes('Allergy: Sulfa antibiotics') && mhx.clinicalFlags(V2_MH).includes('Allergy: Latex gloves'),
+      'v0.0.15: a typed-in allergy is flagged too (it never was)');
+    log(mhx.clinicalFlags({ pregnancy: 'yes' }).includes('Pregnant') && mhx.clinicalFlags({ conditions: ['pregnant'] }).includes('Pregnant')
+      && !mhx.clinicalFlags({ conditions: ['blood_thinners'] }).length,
+    'v0.0.15: an older record\'s pregnancy still flags; blood thinners keep their own banner');
+    const reAnswered = mhx.normalizeMedical({ ...V2_MH, pregnancy: 'yes', condition_answers: { ...V2_MH.condition_answers, pregnant: 'no' } });
+    log(!mhx.clinicalFlags(reAnswered).includes('Pregnant') && !ml.clinicalFlags(reAnswered).includes('Pregnant'),
+      'v0.0.15: a pregnancy row answered No wins over an older record\'s "Pregnant, nursing…" Yes');
+    log(mhx.clinicalFlags(LEGACY_MH).includes('Heart murmur') && mhx.clinicalFlags(LEGACY_MH).includes('Allergy: Articaine'),
+      'v0.0.15: an older record\'s retired red flags still raise the flag');
+
+    // The blood-thinner rules recognise the checklist's canonical names — in all
+    // three places they live — and none of the other 21.
+    const mfV = await import('../src/renderer/js/medFlags.js');
+    const thin = ['warfarin', 'apixaban', 'clopidogrel', 'aspirin'];
+    const hits = st.MED_CHECKLIST.filter((m) => mfV.bloodThinnerFlags({ medications: [{ name: m.en }] }).length).map((m) => m.key);
+    log(same(hits.sort(), thin.slice().sort()), 'v0.0.15: the screens detect exactly Warfarin, Apixaban, Clopidogrel and Aspirin from the checklist');
+    const { buildHtml } = require('../src/main/pdf.js');
+    const thinPdf = st.MED_CHECKLIST.filter((m) => /Blood thinners[\s\S]{0,80}YES/.test(buildHtml({ first_name: 'T', last_name: 'P', medical_history: { medications: [{ name: m.en }] }, triage: {} }, 'summary'))).map((m) => m.key);
+    log(same(thinPdf.sort(), thin.slice().sort()), 'v0.0.15: the printed record detects the same four');
+    const thinP = db.createPatient(currentUser, { first_name: 'Thin', last_name: 'Checklist', demographics: {}, medical_history: { medications: [{ key: 'apixaban', name: 'Apixaban (Eliquis)' }] }, dental_history: {} });
+    const coffeeP = db.createPatient(currentUser, { first_name: 'Not', last_name: 'Thin', demographics: {}, medical_history: { medications: [{ key: 'losartan', name: 'Losartan (Cozaar)' }] }, dental_history: {} });
+    const qRows = db.listPatients({});
+    log(qRows.find((x) => x.id === thinP.id).on_thinner === true && qRows.find((x) => x.id === coffeeP.id).on_thinner === false,
+      'v0.0.15: and so do the queues (a checklist Apixaban is a thinner; Losartan is not)');
+
+    // ---- every screen: an old record and a new one ----
+    const oldP = db.createPatient(currentUser, { first_name: 'Olga', last_name: 'Legacy', dob: '1960-02-02', gender: 'female',
+      demographics: { city: 'Sandy', state: 'OR', marital_status: 'married', referral: 'flyer' }, medical_history: LEGACY_MH, dental_history: LEGACY_DH });
+    const newP = db.createPatient(currentUser, { first_name: 'Nina', last_name: 'Newform', dob: '1990-03-03', gender: 'female',
+      demographics: { city: 'Boring', state: 'OR', referral: 'other', referral_other: 'A neighbour' }, medical_history: V2_MH, dental_history: V2_DH });
+    const unsP = db.createPatient(currentUser, { first_name: 'Uma', last_name: 'Unsure', gender: 'male',
+      demographics: {}, medical_history: V2_UNSURE, dental_history: {} });
+    const { patientHistoryCards } = await import('../src/renderer/js/components/patientHistory.js');
+    const cardsText = (p) => { const d = document.createElement('div'); patientHistoryCards(db.getPatient(p.id)).forEach((c) => d.append(c)); return d; };
+    const oc = cardsText(oldP), ocT = oc.textContent;
+    log(/Heart murmur/.test(ocT) && /Pain management program/.test(ocT) && /Gout/.test(ocT) && /Diabetes/.test(ocT),
+      'legacy: the chart still lists every condition an old record ticked, retired and typed ones included');
+    log(/Articaine/.test(ocT) && /NSAIDs \(Ibuprofen, Aspirin\)/.test(ocT) && /Sulfa/.test(ocT), 'legacy: every logged allergy is still on the chart, typed one included');
+    log(/Hospitalized \(2 yrs\)/.test(ocT) && /Pregnant \/ nursing/.test(ocT) && /Not applicable/.test(ocT),
+      'legacy: the retired questions still show for the record that answered them, in words');
+    log(!/Unsure/.test(ocT) && !/High Blood Pressure/.test(ocT) && !/Major surgery/.test(ocT),
+      'legacy: nothing an old checklist did not tick is shown as an answer (never "No")');
+    log(/500 mg/.test(ocT) && /sugar/.test(ocT), 'legacy: an older medication\'s dose and reason still show');
+    log(/Earlier intake questions/.test(ocT) && /Gums bleed/.test(ocT) && /Clenching \/ grinding/.test(ocT) && /Dr\. Prior/.test(ocT),
+      'legacy: the old Step 3 answers show under "Earlier intake questions", and a free-text last visit verbatim');
+    log(/Female/.test(ocT) && /Married/.test(ocT) && /Heard about us/.test(ocT) && /Flyer/.test(ocT) && /Sandy/.test(ocT) && !/>female</.test(oc.innerHTML),
+      'the patient card labels gender, marital status and "heard about us" and shows the town (no raw codes)');
+    const nc = cardsText(newP), ncT = nc.textContent;
+    log(/Diabetes – Type 1 or Type 2/.test(ncT) && /COPD/.test(ncT) && /Unsure — ask the patient/.test(ncT) && /Bleeding Disorder/.test(ncT),
+      'new: the chart shows the Yes conditions and, separately, the ones the patient was unsure of');
+    log(/Major surgery \(6 mo\)/.test(ncT) && /Yes — Knee, Hip/.test(ncT) && /Smokes \/ tobacco/.test(ncT) && /Pregnancy/.test(ncT),
+      'new: major surgery with its sites, smoking and the pregnancy answer are on the chart');
+    log(!/Hospitalized/.test(ncT) && !/Pregnant \/ nursing/.test(ncT) && !/Earlier intake questions/.test(ncT),
+      'new: the retired questions do not appear as blanks on a record that was never asked them');
+    log(/Warfarin \(Coumadin\)/.test(ncT) && /Fish oil/.test(ncT) && !/<th>Dose<\/th>/.test(nc.innerHTML),
+      'new: checklist and typed medications are listed (no empty dose column)');
+    log(/Pain with cold water/.test(ncT) && /Clenches \/ grinds at night/.test(ncT) && /Boring/.test(ncT) && /A neighbour/.test(ncT),
+      'new: the Step 3 answers and the town show on the chart');
+    const carried = db.createPatient(currentUser, { first_name: 'Carried', last_name: 'Over', demographics: {},
+      medical_history: { ...V2_MH, hospitalized: 'yes' }, dental_history: {} });
+    log(/Hospitalized \(2 yrs\) \(earlier form\)/.test(cardsText(carried).textContent)
+      && /Recent hospitalization \(earlier form\)/.test(buildHtml(db.getPatient(carried.id), 'full')),
+    'a retired answer carried into a new-form record is marked as the earlier form\'s');
+    const ucT = cardsText(unsP).textContent;
+    log(/Unsure — ask the patient/.test(ucT) && !/None reported|None \(reviewed\)/.test(ucT.split('Conditions')[0]),
+      'an allergy answer of Unsure never reads as "None"');
+
+    // A key this build does not know — written by a newer list, or typed
+    // into a backup — is shown readably, never dropped.
+    const unkP = db.createPatient(currentUser, { first_name: 'Una', last_name: 'Known', demographics: {}, medical_history: UNKNOWN, dental_history: {} });
+    const unkT = cardsText(unkP).textContent;
+    log(/Future Condition/.test(unkT) && /Bee Venom/.test(unkT) && /Allergy: Bee Venom/.test(mhx.clinicalFlags(UNKNOWN).join('|')),
+      'an unknown condition or allergy key is shown (and flagged) by a readable name, never dropped');
+
+    // Records shows the chart's own cards.
+    const { renderRecords: recV } = await import('../src/renderer/js/views/records.js');
+    const storeV = (await import('../src/renderer/js/store.js')).store; storeV.setUser(currentUser);
+    const ctxV = { navigate: () => {}, toast: () => {}, store: storeV, setDetail: () => {} };
+    const recOld = recV(ctxV, { id: oldP.id }); document.body.append(recOld);
+    const recNew = recV(ctxV, { id: newP.id }); document.body.append(recNew);
+    for (let i = 0; i < 6; i++) await tick();
+    log(/Heart murmur/.test(recOld.textContent) && /Hospitalized \(2 yrs\)/.test(recOld.textContent) && /Gums bleed/.test(recOld.textContent) && /Blood thinner/.test(recOld.textContent),
+      'records: an old record reads as it did, with vitals and blood thinner still in the medical card');
+    log(/Unsure — ask the patient/.test(recNew.textContent) && /Yes — Knee, Hip/.test(recNew.textContent) && /Heard about us/.test(recNew.textContent) && !/>Referral</.test(recNew.innerHTML),
+      'records: a new record shows the same history the chart does; "Referral" reads "Heard about us"');
+
+    // The dentist's banner and summary.
+    const { renderProvider: provV } = await import('../src/renderer/js/views/provider.js');
+    const provNew = provV(ctxV, { id: unsP.id }); document.body.append(provNew);
+    for (let i = 0; i < 6; i++) await tick();
+    const banner = Array.from(provNew.querySelectorAll('.banner')).map((b) => b.textContent).find((x) => /Medical flags/.test(x)) || '';
+    log(/Unsure: Bleeding Disorder/.test(banner) && /Possibly pregnant/.test(banner) && /Allergy status unsure/.test(banner),
+      'provider: the medical-flags banner carries Unsure answers and an Unsure allergy status');
+    const mini = provNew.querySelector('.mini-hist');
+    log(!!mini && /Allergies: Unsure — ask the patient/.test(mini.textContent) && /Unsure: Bleeding Disorder/.test(mini.textContent) && /Warfarin \(Coumadin\)/.test(mini.textContent),
+      'provider: the patient summary reads the allergy answer, the Unsure conditions and the medications');
+
+    // The printed record, both formats.
+    const fullOld = buildHtml(db.getPatient(oldP.id), 'full');
+    const fullNew = buildHtml(db.getPatient(newP.id), 'full');
+    log(/Heart murmur/.test(fullOld) && /Articaine/.test(fullOld) && /Sulfa/.test(fullOld) && /Recent hospitalization/.test(fullOld) && /Pregnant \/ nursing/.test(fullOld)
+      && /500 mg/.test(fullOld) && /Gums bleed \(earlier form\)/.test(fullOld),
+    'pdf: an old record prints its conditions and allergies by name, its retired answers and its old Step 3 answers');
+    log(!/Heart Murmur|Pain Mgmt|>Nsaids</.test(fullOld), 'pdf: no stored key is title-cased onto the record any more');
+    log(/Major surgery in the past 6 months/.test(fullNew) && /Yes — Knee, Hip/.test(fullNew) && /Smokes \/ tobacco/.test(fullNew)
+      && /Unsure — ask the patient/.test(fullNew) && /Pain with cold water/.test(fullNew) && /Clenches \/ grinds at night/.test(fullNew)
+      && !/Recent hospitalization/.test(fullNew) && !/Gums bleed/.test(fullNew),
+    'pdf: a new record prints major surgery, smoking, the Unsure group and the eight Step 3 answers — and no retired rows');
+    log(/<div class="val">Female<\/div>/.test(fullNew) && !/<div class="val">(female|unsure|na|yes|no)<\/div>/.test(fullNew + fullOld),
+      'pdf: no raw code reaches the printed record');
+    log((fullNew.match(/<tr>(?:(?!<\/tr>)[\s\S])*<\/tr>/g) || []).filter((r) => /class="label"/.test(r)).every((r) => (r.match(/<td>/g) || []).length <= 2),
+      'pdf: every history row has at most two cells (an odd count is padded, never spilled)');
+    const sumUns = buildHtml(db.getPatient(unsP.id), 'summary');
+    log(/Unsure — ask the patient/.test(sumUns) && /Major surgery \(6 mo\)/.test(sumUns) && !/None reported/.test(sumUns.split('Conditions')[0]),
+      'pdf summary: the Unsure allergy answer and major surgery print; Unsure is never "None"');
+    log(/Heart murmur/.test(buildHtml(db.getPatient(oldP.id), 'summary')), 'pdf summary: an old record\'s conditions print by their old names');
+
+    // The clinic spreadsheet.
+    const { clinicSheets: sheetsV } = require('../src/main/clinicSheets.js');
+    const shV = sheetsV(db.exportClinicBundle())[0];
+    const rowOf = (last) => { const r = shV.rows.find((x) => x[0] === last); return Object.fromEntries(shV.columns.map((c, i) => [c, r[i]])); };
+    log(shV.rows.every((r) => r.length === shV.columns.length), 'sheet: every patient row has exactly one value per column');
+    const ro = rowOf('Legacy'), rn = rowOf('Newform');
+    log(ro.Allergies === 'Articaine, NSAIDs (Ibuprofen, Aspirin), Sulfa' && /Heart murmur/.test(ro.Conditions) && ro['Hospitalized (2 yrs)'] === 'Yes'
+      && ro['Pregnant/nursing'] === 'Not applicable' && ro['Allergy status'] === '' && ro['Major surgery (6 mo)'] === '',
+    'sheet: an old record exports its answers by name, and leaves the questions it was never asked empty');
+    log(rn['Allergy status'] === 'Yes' && rn.Allergies === 'Sulfa antibiotics, Latex gloves' && rn['Conditions (unsure)'] === 'Bleeding Disorder / Excessive Bleeding, Pregnancy / Possible Pregnancy (when applicable)'
+      && rn['Major surgery (6 mo)'] === 'Yes' && rn['Surgery sites'] === 'Knee, Hip' && rn['Smokes / tobacco'] === 'Yes' && rn.Pregnancy === 'Unsure'
+      && rn['Hospitalized (2 yrs)'] === '' && rn.Gender === 'Female',
+    'sheet: a new record exports its allergy status, Unsure conditions, surgery, smoking and pregnancy answers');
+    const dentCols = shV.columns.slice(shV.columns.indexOf('Last saw a dentist') + 1, shV.columns.indexOf('Last saw a dentist') + 9);
+    log(same(dentCols, st.DENTAL_QUESTIONS.map((q) => q.short)) && rn['Pain with cold water'] === 'Yes' && rn['Wakes with jaw pain'] === 'No',
+      'sheet: the eight Step 3 answers follow "Last saw a dentist"');
+
+    // ---- reports: the "none" / "other" markers were never conditions ----
+    const sentP = db.createPatient(currentUser, { first_name: 'Sent', last_name: 'Inel', demographics: {}, medical_history: { conditions: ['none'] }, dental_history: {} });
+    const sentQ = db.createPatient(currentUser, { first_name: 'Sent', last_name: 'Other', demographics: {}, medical_history: { conditions: ['other'], conditions_other: 'x' }, dental_history: {} });
+    void sentP; void sentQ;
+    const liveSum = db.buildEventSummary();
+    log(liveSum.conditions.none === undefined && liveSum.conditions.other === undefined && liveSum.conditions.heart_murmur >= 1,
+      'reports: "none" and "other" are no longer counted as conditions');
+    const rex = require('../src/main/reportExport.js');
+    const kept = { patients_seen: 10, conditions: { none: 99, other: 12, diabetes: 3, diabetes_typo: 2, heart_murmur: 1, mystery_key: 1 } };
+    const condRows = rex.reportSections(kept, 'Kept', { conditions: { diabetes: 'Diabetes', diabetes_typo: 'Diabetes', heart_murmur: 'Heart murmur' } })
+      .find((x) => x.title === 'Most common conditions').rows;
+    log(!condRows.some((r) => /^(None|Other|none|other)$/.test(r[0])) && condRows.find((r) => r[0] === 'Diabetes')[1] === 5
+      && condRows.some((r) => r[0] === 'Heart murmur') && condRows.some((r) => r[0] === 'Mystery Key'),
+    'reports: a kept summary\'s old "none"/"other" counts are dropped, two keys with one name are ADDED, and no raw key reaches a funder');
+    // The Reports tab reads a kept summary the same way.
+    const evK = db.createEvent(currentUser, { name: 'Kept Sentinels' });
+    const rdb = rawDb();
+    rdb.prepare(`INSERT INTO event_reports (uid, event_id, summary, patients_seen, finished_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`)
+      .run('kept-sentinels-uid', evK.id, JSON.stringify({ patients_seen: 3, conditions: { none: 99, other: 40, heart_murmur: 2 }, by_city: { 'sandy, OR': 1, 'Sandy , OR': 1, 'Sandy, OR': 3 } }), 3, new Date().toISOString(), new Date().toISOString(), new Date().toISOString());
+    rdb.close();
+    const rollK = db.reportRollup(evK.id);
+    log(rollK.summary.by_city['Sandy, OR'] === 5 && Object.keys(rollK.summary.by_city).length === 1,
+      'reports: one town is one row — a kept report\'s "sandy" / "Sandy " / "Sandy" are folded together');
+    const allLabels = { conditions: Object.fromEntries(i18nV.conditions().map((c) => [c.key, c.label])) };
+    const allRows = rex.reportSections(db.reportRollup('all').summary, 'All', allLabels).find((x) => x.title === 'Most common conditions').rows;
+    log(allRows.some((r) => r[0] === 'Heart murmur') && !allRows.some((r) => /^None$|^Other$/.test(r[0])),
+      'reports: across all clinics, kept and live, a retired condition is named and "None" is not a condition');
+    const { renderReports: repV } = await import('../src/renderer/js/views/reports.js');
+    const repK = repV(ctxV); document.body.append(repK);
+    for (let i = 0; i < 8; i++) await tick();
+    const condCard = Array.from(repK.querySelectorAll('.card')).find((c) => /Most common conditions/.test(c.textContent));
+    log(!!condCard && /Diabetes/.test(condCard.textContent) && !/\bNone\b/.test(condCard.textContent) && !/\b99\b/.test(condCard.textContent),
+      'reports: the Reports tab never lists "None" among the most common conditions');
+    const foldSum = db.mergeSummaries([{ by_city: { 'Boring, OR': 1 } }, { by_city: { 'boring, OR': 2 } }]);
+    log(foldSum.by_city['boring, OR'] === 3 && Object.keys(foldSum.by_city).length === 1,
+      'reports: merged totals fold one town\'s spellings together, under the spelling most of them used');
+
+    // ---- City: the event's own list ----
+    const evC = db.createEvent(currentUser, { name: 'City List', cities: [' Sandy ', 'sandy', 'Boring', '', 'Other', 'Estacada  Heights'] });
+    // The list is cleaned in three places — the data layer when the admin saves
+    // it, the kiosk, and the Worker when it serves the online form — so all
+    // three are run over one messy list and must offer the same towns.
+    const { eventCities: evCitiesR } = await import('../src/renderer/js/components/intakeSections.js');
+    const MESSY = [' Sandy ', 'sandy', 'Boring', '', 'Other', ' OTHER ', 'Estacada  Heights', 'x'.repeat(90),
+      ...Array.from({ length: 120 }, (_, i) => 'Town   ' + i)];
+    const kioskTowns = evCitiesR({ cities: MESSY });
+    const dbTowns = JSON.parse(db.createEvent(currentUser, { name: 'City Parity', cities: MESSY }).cities);
+    const workerC = (await import('../cloud/worker.js')).default;
+    const envC = { DB: { prepare() { return { bind() { return this; },
+      async first() { return { data: JSON.stringify({ name: 'Parity', active: 1, cities: JSON.stringify(MESSY) }) }; }, async run() { return {}; } }; } } };
+    const parityPage = await (await workerC.fetch(new Request('https://sync.example/checkin/evt-parity'), envC, {})).text();
+    const workerTowns = Array.from(new JSDOM(parityPage).window.document.querySelectorAll('#city option')).map((o) => o.value).filter((v) => v && v !== 'other');
+    log(same(kioskTowns, dbTowns) && same(kioskTowns, workerTowns) && kioskTowns.length === 100 && kioskTowns[3] === 'x'.repeat(80)
+      && same(kioskTowns.slice(0, 5), ['Sandy', 'Boring', 'Estacada Heights', 'x'.repeat(80), 'Town 0']),
+    'city: the data layer, the kiosk and the online form clean one messy list to the same towns (80 characters, 100 towns)');
+    log(evC.cities === JSON.stringify(['Sandy', 'Boring', 'Estacada Heights']),
+      'city: the list is stored trimmed, de-duplicated ignoring case, without blanks or "Other"');
+    log(db.updateEvent(currentUser, evC.id, { name: 'City List' }).cities === evC.cities, 'city: an edit that does not mention the list keeps it');
+    const bundleC = db.exportClinicBundle(evC.id);
+    bundleC.event.uid = 'city-list-copy'; bundleC.event.name = 'City List (restored)';
+    db.importClinicBundle(currentUser, bundleC);
+    const restored = db.listEvents().find((e) => e.uid === 'city-list-copy');
+    log(!!restored && restored.cities === evC.cities, 'city: the list travels in a clinic backup and is restored with the event');
+    log(db.updateEvent(currentUser, restored.id, { cities: [] }).cities === null, 'city: clearing the list returns City to a free-text box');
+
+    // The admin event form carries the list.
+    const { renderAdmin } = await import('../src/renderer/js/views/admin.js');
+    const adm = renderAdmin(ctxV, { section: 'events' }); document.body.append(adm);
+    for (let i = 0; i < 6; i++) await tick();
+    clickText('New event', adm); await tick();
+    const ov = $all('.modal-overlay').pop();
+    const ta = ov && Array.from(ov.querySelectorAll('label.field')).find((l) => /Cities offered at check-in/.test(l.textContent));
+    log(!!ta && !!ta.querySelector('textarea'), 'city: the admin event form asks "Cities offered at check-in (one per line)"');
+    if (ta) {
+      setInput(ov.querySelector('input'), 'Form Made Clinic');
+      setInput(ta.querySelector('textarea'), 'Gresham\ngresham\nTroutdale');
+      clickText('Create', ov);
+      for (let i = 0; i < 6; i++) await tick();
+    }
+    const made = db.listEvents().find((e) => e.name === 'Form Made Clinic');
+    log(!!made && made.cities === JSON.stringify(['Gresham', 'Troutdale']), 'city: an admin-typed list is saved on the event');
+
+    // The kiosk offers the list, canonicalises a typed town, and never blanks an old one.
+    const { demographicsSection, medicalHistorySection, dentalHistorySection } = await import('../src/renderer/js/components/intakeSections.js');
+    const cities = ['Sandy', 'Boring'];
+    const citySel = (sec) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => /^City/.test(l.querySelector('.field-label').textContent)).querySelector('select');
+    const otherIn = (sec) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => /Please type your city/.test(l.textContent)).querySelector('input');
+    const baseDemo = { first_name: 'C', last_name: 'T', dob: '1990-01-01', gender: 'male', phone: '5035550100',
+      demographics: { state: 'OR', emergency_name: 'E', emergency_phone: '5035550101', services: ['dental'], future_key: 'kept' } };
+    const s1 = demographicsSection(baseDemo, { cities });
+    log(!!citySel(s1) && same(Array.from(citySel(s1).options).map((o) => o.value), ['', 'Sandy', 'Boring', 'other']),
+      'city: with a list, City is a dropdown of the event\'s towns plus Other');
+    citySel(s1).value = 'other'; citySel(s1).dispatchEvent(new window.Event('change'));
+    setInput(otherIn(s1), ' boring ');
+    const got1 = s1.collect();
+    log(!!got1 && got1.demographics.city === 'Boring' && got1.demographics.future_key === 'kept',
+      'city: a typed town that is on the list is stored in the listed spelling (and unknown demographics keys survive)');
+    const s2 = demographicsSection({ ...baseDemo, demographics: { ...baseDemo.demographics, city: 'Sandy OR' } }, { cities });
+    log(citySel(s2).value === 'other' && otherIn(s2).value === 'Sandy OR' && s2.collect().demographics.city === 'Sandy OR' && !s2.isDirty(),
+      'city: an old free-text town opens as Other with its text — never silently blanked');
+    citySel(s2).value = 'other'; setInput(otherIn(s2), '');
+    log(s2.collect() === false && /Please type your city/.test($all('#toast-host .toast').pop().textContent),
+      'city: Other with nothing typed is refused, by name');
+    const s3 = demographicsSection({ ...baseDemo, demographics: { ...baseDemo.demographics, city: 'SANDY' } }, { cities });
+    log(citySel(s3).value === 'Sandy', 'city: an old record in another case opens on the listed town');
+    const noListSec = demographicsSection(baseDemo, { cities: [] });
+    const noList = Array.from(noListSec.node.querySelectorAll('label.field')).find((l) => /^City/.test(l.querySelector('.field-label').textContent));
+    log(!!noList.querySelector('input') && !noList.querySelector('select'), 'city: with no list, City stays a text box');
+    // A typed town is cleaned the way the online form cleans one, list or no list.
+    const longTown = '  Far   Away ' + 'x'.repeat(100);
+    const s5 = demographicsSection(baseDemo, { cities });
+    citySel(s5).value = 'other'; citySel(s5).dispatchEvent(new window.Event('change'));
+    setInput(otherIn(s5), longTown);
+    setInput(noList.querySelector('input'), longTown);
+    const cityGot = (sec) => (sec.collect() || { demographics: {} }).demographics.city;
+    log(cityGot(s5) === ('Far Away ' + 'x'.repeat(100)).slice(0, 80) && cityGot(noListSec) === cityGot(s5)
+      && otherIn(s5).maxLength === 80 && noList.querySelector('input').maxLength === 80,
+    'city: a typed town is stored as the online form stores it (one space, trimmed, at most 80 characters)');
+
+    // An answer from before a question was a dropdown — the online form stored
+    // "How did you hear about us?" as prose until v0.0.13 — or a key from a
+    // newer build's list opens as recorded, and is saved back exactly as it was.
+    const legacyDemo = { ...baseDemo, gender: 'F',
+      demographics: { ...baseDemo.demographics, city: 'Sandy', state: 'Ore.', referral: 'Facebook group', marital_status: 'Separated' } };
+    const s4 = demographicsSection(legacyDemo, { cities });
+    const selOf = (sec, re) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => re.test(l.querySelector('.field-label').textContent)).querySelector('select');
+    const shownIn = (sel) => sel.options[sel.selectedIndex].textContent;
+    log(shownIn(selOf(s4, /^How did you hear/)) === 'Facebook group (as recorded)' && shownIn(selOf(s4, /^Marital/)) === 'Separated (as recorded)'
+      && shownIn(selOf(s4, /^State/)) === 'Ore. (as recorded)' && shownIn(selOf(s4, /^Gender/)) === 'F (as recorded)',
+    'edit: an old free-text referral, marital status, state or gender opens showing what the record says (never a blank "—")');
+    const got4 = s4.collect();
+    log(!s4.isDirty() && !!got4 && got4.demographics.referral === 'Facebook group' && got4.demographics.marital_status === 'Separated'
+      && got4.demographics.state === 'Ore.' && got4.gender === 'F' && got4.demographics.future_key === 'kept',
+    'edit: saving without touching them keeps every one exactly as recorded — nothing reads as changed, nothing is erased');
+    const refSel4 = selOf(s4, /^How did you hear/); refSel4.value = 'flyer'; refSel4.dispatchEvent(new window.Event('change'));
+    const got4b = s4.collect();
+    log(s4.isDirty() && !!got4b && got4b.demographics.referral === 'flyer', 'edit: choosing a listed answer replaces the recorded one, and is noticed');
+    const s4b = demographicsSection({ ...legacyDemo, demographics: { ...legacyDemo.demographics, state: 'oregon', referral: 'flyer' } }, { cities });
+    log(selOf(s4b, /^State/).value === 'OR' && selOf(s4b, /^How did you hear/).value === 'flyer' && !Array.from(selOf(s4b, /^How did you hear/).options).some((o) => /as recorded/.test(o.textContent)),
+      'edit: a state typed out in full still opens on its code, and a listed answer adds no "as recorded" option');
+
+    // "Prefer not to answer" is about the race list, so it replaces it — on
+    // screen, not silently when saved — and any race chosen after clears it.
+    const raceSec = demographicsSection({ ...baseDemo, demographics: { ...baseDemo.demographics, city: 'Sandy' } }, { cities });
+    const raceGrid = Array.from(raceSec.node.querySelectorAll('.field')).find((f) => Array.from(f.children).some((c) => c.classList.contains('field-label') && /^Race and ethnicity/.test(c.textContent)));
+    const raceLit = () => Array.from(raceGrid.querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
+    raceGrid.querySelector('.chip-select[data-key="white"]').click();
+    raceGrid.querySelector('.chip-select[data-key="prefer_not"]').click();
+    const raceGot = () => (raceSec.collect() || { demographics: {} }).demographics.race;
+    const racePna = [raceLit(), raceGot()];
+    raceGrid.querySelector('.chip-select[data-key="asian"]').click();
+    log(same(racePna, [['prefer_not'], ['prefer_not']]) && same(raceLit(), ['asian']) && same(raceGot(), ['asian']),
+      'race: "Prefer not to answer" clears the other choices on screen, and a race chosen after it clears it');
+    // And the kiosk itself, on an event with a list.
+    const prevActive = db.getActiveEvent();
+    db.setActiveEvent(currentUser, evC.id);
+    const { renderKiosk } = await import('../src/renderer/js/views/kiosk.js');
+    const ksk = renderKiosk({ navigate: () => {} }); document.body.append(ksk);
+    for (let i = 0; i < 4; i++) await tick();
+    Array.from(ksk.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click();
+    for (let i = 0; i < 4; i++) await tick();
+    const kCity = Array.from(ksk.querySelectorAll('label.field')).find((l) => /^City/.test(l.querySelector('.field-label').textContent));
+    log(!!kCity && !!kCity.querySelector('select') && /Estacada Heights/.test(kCity.textContent),
+      'city: the kiosk offers the active event\'s towns');
+    ksk.remove();
+    if (prevActive) db.setActiveEvent(currentUser, prevActive.id);
+
+    // ---- the shared builders: an old record opened for editing ----
+    const medSec = medicalHistorySection(LEGACY_MH);
+    const rowSel = (sec, k) => sec.node.querySelector(`.tri-row[data-key="${k}"] select`);
+    log(rowSel(medSec, 'diabetes').value === 'yes' && rowSel(medSec, 'high_bp').value === '' && rowSel(medSec, 'heart_murmur').value === 'yes'
+      && rowSel(medSec, 'pain_mgmt').value === 'yes',
+    'edit: an old record opens with its ticks as Yes, nothing unticked as No, and its retired conditions still on screen');
+    log(!medSec.isDirty(), 'edit: opening a record changes nothing');
+    const gridIn = (sec, re) => Array.from(sec.node.querySelectorAll('.field')).find((f) => Array.from(f.children).some((c) => c.classList.contains('field-label') && re.test(c.textContent)));
+    const allergyGridE = gridIn(medSec, /^Medication allergies \*/);
+    log(!!allergyGridE.querySelector('.chip-select--on[data-key="articaine"]') && !!allergyGridE.querySelector('.chip-select--on[data-key="nsaids"]'),
+      'edit: an old record\'s retired allergies stay selected, so saving cannot drop them');
+    log(medSec.collect() === false && /Required: High Blood Pressure \(Hypertension\)/.test($all('#toast-host .toast').pop().textContent),
+      'edit: the questions an old record never answered are still asked before it can be saved');
+    INTAKE_25.forEach((k) => { const sel = rowSel(medSec, k); if (!sel.value) { sel.value = k === 'pregnant' ? 'na' : 'no'; } });
+    const selIn = (sec, re) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => re.test(l.querySelector('.field-label').textContent)).querySelector('select');
+    [[/^Major surgery/, 'no'], [/^Do you smoke/, 'no'], [/under a doctor/, 'yes']].forEach(([re, v]) => { const x = selIn(medSec, re); x.value = v; x.dispatchEvent(new window.Event('change')); });
+    log(medSec.isDirty(), 'edit: a change is noticed');
+    const savedMh = medSec.collect();
+    log(!!savedMh && savedMh.history_version === 2 && savedMh.hospitalized === 'yes' && savedMh.pregnancy === 'na'
+      && savedMh.conditions.includes('heart_murmur') && savedMh.conditions.includes('pain_mgmt') && savedMh.allergies.includes('articaine')
+      && savedMh.medications.some((m) => m.name === 'Metformin' && m.dose === '500 mg' && m.reason === 'sugar'),
+    'edit: saving an old record keeps every answer it had — retired questions, retired items and an old dose included');
+    // A free-text "last saw a dentist" from before the dropdown opens as
+    // recorded — whoever edits the record sees what it says — and is kept
+    // unless they choose an answer from the list.
+    const dSec = dentalHistorySection(LEGACY_DH);
+    const dSels = Array.from(dSec.node.querySelectorAll('select'));
+    log(dSels[0].value === 'Dr. Prior' && dSels[0].options[dSels[0].selectedIndex].textContent === 'Dr. Prior (as recorded)' && !dSec.isDirty(),
+      'edit: an old free-text last visit opens showing what it says, not a blank');
+    dSels.slice(1).forEach((x) => { if (!x.value) x.value = 'no'; });
+    const savedDh = dSec.collect();
+    log(!!savedDh && savedDh.prior_dentist === 'Dr. Prior' && savedDh.gum_bleeding === 'yes' && savedDh.grinding === 'yes' && savedDh.visit_type === 'filling' && savedDh.pain_cold === 'no',
+      'edit: saving Step 3 keeps the old answers, the recorded last visit and the visit type it was not asked to change');
+    dSels[0].value = 'over_3_years';
+    log((dSec.collect() || {}).prior_dentist === 'over_3_years', 'edit: choosing from the list replaces the recorded last visit');
+    const two = [medicalHistorySection({}), medicalHistorySection({})].map((x) => x.node.querySelector('datalist').id);
+    log(two[0] !== two[1], 'edit: two forms open at once never share a datalist id');
+    // "No medications" is an answer about the list: it replaces the ticked and
+    // typed medications on screen and in what is saved, and a tick clears it.
+    const exSec = medicalHistorySection(V2_MH);
+    const exGrid = gridIn(exSec, /^Current medications/);
+    const exLit = () => Array.from(exGrid.querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
+    log(same(exLit(), ['warfarin', 'other']), 'edit: a record\'s checklist and typed medications open ticked');
+    exGrid.querySelector('.chip-select[data-key="none"]').click();
+    const exNone = exSec.collect();
+    log(same(exLit(), ['none']) && !!exNone && same(exNone.medications, []) && exNone.medications_none === true,
+      'edit: "No medications" clears the ticked and typed medications, on screen and in the saved history');
+    exGrid.querySelector('.chip-select[data-key="aspirin"]').click();
+    const exAsp = exSec.collect();
+    log(same(exLit(), ['aspirin']) && !!exAsp && same(exAsp.medications.map((x) => x.key), ['aspirin']) && exAsp.medications_none === undefined,
+      'edit: ticking a medication clears "No medications" again');
+
+    // ---- a Spanish-speaking patient reads the whole step in Spanish ----
+    i18nV.setLang('es');
+    const esMed = medicalHistorySection({});
+    const esT = esMed.node.textContent;
+    log(/Presión arterial alta \(hipertensión\)/.test(esT) && /¿Fuma\?/.test(esT) && /¿Cirugía mayor en los últimos 6 meses\?/.test(esT)
+      && /Sin alergias conocidas a medicamentos \(NKDA\)/.test(esT) && /No estoy seguro\/a/.test(esT) && /No aplica/.test(esT) && /Warfarina \(Coumadin\)/.test(esT),
+    'es: the medical step reads in Spanish, its answers included');
+    INTAKE_25.forEach((k) => { rowSel(esMed, k).value = k === 'pregnant' ? 'na' : 'no'; });
+    [[/^¿Está bajo el cuidado/, 'no'], [/^¿Cirugía mayor/, 'no'], [/^¿Fuma/, 'no'], [/^¿Tiene alergia/, 'nkda']]
+      .forEach(([re, v]) => { const x = selIn(esMed, re); x.value = v; x.dispatchEvent(new window.Event('change')); });
+    gridIn(esMed, /^Medicamentos actuales/).querySelector('.chip-select[data-key="warfarin"]').click();
+    const esSaved = esMed.collect();
+    log(!!esSaved && esSaved.medications[0].name === 'Warfarin (Coumadin)' && same(esSaved.allergies, ['none']),
+      'es: a medication ticked in Spanish is stored under its canonical English name (the blood-thinner rules read it)');
+    log(/¿Siente dolor al tomar agua fría\?/.test(dentalHistorySection({}).node.textContent)
+      && Array.from(demographicsSection(baseDemo, { cities }).node.querySelectorAll('option')).some((o) => o.value === 'other' && o.textContent === 'Otra'),
+    'es: Step 3 and the City list read in Spanish');
+    i18nV.setLang('en');
+
+    // ---- a Spanish-speaking patient checks in at the kiosk, start to finish ----
+    // The Sign & Submit review reads back what they ticked in their own
+    // language, while the record stores the canonical English name.
+    try {
+      const kes = renderKiosk({ navigate: () => {} }); document.body.append(kes);
+      for (let i = 0; i < 4; i++) await tick();
+      Array.from(kes.querySelectorAll('.lang-card')).find((c) => /Español/.test(c.textContent)).click();
+      for (let i = 0; i < 4; i++) await tick();
+      const T = i18nV.t;
+      const fieldOf = (label) => Array.from(kes.querySelectorAll('.kiosk-body label.field'))
+        .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
+      const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+      const nextStep = async () => { clickText(T('common.next'), kes); for (let i = 0; i < 3; i++) await tick(); };
+      put(T('intake.firstName'), 'Lucía'); put(T('intake.lastName'), 'Espanola'); put(T('intake.dob'), '1980-01-01');
+      put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+      const citySelEs = fieldOf(T('intake.city')).querySelector('select');
+      put(T('intake.city'), citySelEs ? citySelEs.options[1].value : 'Sandy');
+      put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+      await nextStep();
+      kes.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+      put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+      gridIn({ node: kes }, /^Medicamentos actuales/).querySelector('.chip-select[data-key="acetaminophen"]').click();
+      await nextStep();
+      const esDental = Array.from(kes.querySelectorAll('.kiosk-body select'));
+      esDental.forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+      kes.querySelectorAll('.kiosk-body .highlight-field button')[2].click();
+      await nextStep();
+      const esAgree = kes.querySelector('.big-check'); esAgree.checked = true; esAgree.dispatchEvent(new window.Event('change', { bubbles: true }));
+      kes.querySelector('.deemed-field .chip-btn').click();
+      put(T('intake.signerName'), 'Lucía Espanola');
+      await nextStep();
+      const esReview = kes.querySelector('.review') ? kes.querySelector('.review').textContent : '';
+      log(/Acetaminofén \(Tylenol\)/.test(esReview) && !/Acetaminophen/.test(esReview) && /Sin alergias conocidas/.test(esReview),
+        'es kiosk: the review reads back a ticked medication in Spanish, not the stored English name');
+      log(/General — firmado/.test(esReview) && !/signed/.test(esReview), 'es kiosk: the review says the consent is signed in Spanish too');
+      $all('.kiosk-nav button', kes).pop().click();
+      for (let i = 0; i < 4; i++) await tick();
+      const esP = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === 'Espanola');
+      const esMhK = esP ? db.getPatient(esP.id).medical_history : {};
+      log(!!kes.querySelector('.kiosk-thanks') && same((esMhK.medications || []).map((x) => [x.key, x.name]), [['acetaminophen', 'Acetaminophen (Tylenol)']]),
+        'es kiosk: a Spanish check-in submits, the medication stored under its canonical English name');
+      kes.remove();
+    } catch (e) {
+      log(false, 'es kiosk: a Spanish check-in could not be walked through: ' + e.message);
+    }
+    i18nV.setLang('en');
+
+    // ---- a returning patient: today's answers are asked again ----
+    const back = db.createPatient(currentUser, { first_name: 'Ret', last_name: 'Urner', demographics: {},
+      medical_history: mhx.normalizeMedical({ ...V2_MH, condition_answers: { ...ANS, diabetes: 'yes', pregnant: 'yes' } }),
+      dental_history: V2_DH });
+    const again = db.startVisitFromExisting(currentUser, back.id);
+    const am = again.medical_history, ad = again.dental_history;
+    log(am.condition_answers.pregnant === undefined && !am.conditions.includes('pregnant') && am.major_surgery === undefined
+      && am.surgery_sites === undefined && am.history_version === undefined && am.condition_answers.diabetes === 'yes'
+      && !mhx.clinicalFlags(am).includes('Pregnant'),
+    'return visit: pregnancy and last visit\'s major surgery are asked again; the rest of the history carries over');
+    const allNoBack = db.createPatient(currentUser, { first_name: 'All', last_name: 'Noes', demographics: {},
+      medical_history: mhx.normalizeMedical({ ...V2_MH, condition_answers: { ...ANS } }), dental_history: {} });
+    const allNoAgain = db.startVisitFromExisting(currentUser, allNoBack.id).medical_history;
+    log(db.getPatient(allNoBack.id).medical_history.conditions_none === true && same(allNoAgain.conditions, []) && !allNoAgain.conditions_none,
+      'return visit: with the pregnancy answer gone, the history no longer claims every condition was reviewed as None');
+    log(st.DENTAL_QUESTIONS.every((q) => ad[q.key] === undefined) && ad.prior_dentist === 'about_1_year',
+      'return visit: today\'s toothache questions start blank; when they last saw a dentist carries over');
+
+    // ---- the online form, driven for real: page -> server -> sync -> chart ----
+    const workerV = (await import('../cloud/worker.js')).default;
+    const rowsV = [];
+    const envV = { DB: { prepare(sql) { return { bind(...a) { this.a = a; return this; },
+      async first() { if (/entity = 'event'/.test(sql)) return { data: JSON.stringify({ name: 'Online', active: 1, cities: JSON.stringify(['Sandy', 'Boring']) }) }; return { v: rowsV.length + 1 }; },
+      async run() { if (/INSERT OR REPLACE/.test(sql)) rowsV.push(this.a); return {}; } }; } } };
+    const pageHtml = await (await workerV.fetch(new Request('https://sync.example/checkin/evt-online'), envV, {})).text();
+    const formDom = new JSDOM(pageHtml, { runScripts: 'dangerously', url: 'https://sync.example/checkin/evt-online', pretendToBeVisual: true,
+      beforeParse(w) {
+        w.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {} });
+        w.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,AAAA';
+        w.HTMLElement.prototype.scrollIntoView = function () {};
+        w.scrollTo = () => {};
+        w.fetch = async (_u, init) => { w.__posted = JSON.parse(init.body); return { json: async () => ({ ok: true }) }; };
+      } });
+    const fw = formDom.window, fd = fw.document;
+    const fset = (id, v) => { const e = fd.getElementById(id); e.value = v; e.dispatchEvent(new fw.Event('change', { bubbles: true })); };
+    const ftick = (sel) => { const e = fd.querySelector(sel); e.checked = true; e.dispatchEvent(new fw.Event('change', { bubbles: true })); };
+    const fsubmit = () => { fd.getElementById('err').textContent = ''; fd.getElementById('f').dispatchEvent(new fw.Event('submit', { cancelable: true })); return fd.getElementById('err').textContent; };
+    fset('first_name', 'Olivia'); fset('last_name', 'Online'); fset('dob', '1991-01-01'); fset('gender', 'female');
+    fset('city', 'other'); fset('city_other', 'sandy'); fset('state', 'OR'); fset('emergency_name', 'K'); fset('emergency_phone', '5550001111');
+    ftick('input[name=service][value=dental]'); ftick('input[name=visit][value=cleaning]');
+    // Phone is required online as it is at the kiosk, and asked in the kiosk's order.
+    const phoneRefusal = fsubmit();
+    log(phoneRefusal === 'Please enter a phone number.', 'online form (real page): a missing phone number is refused, by name, as at the kiosk');
+    fset('phone', '5035550100');
+    // "Prefer not to answer" replaces the race list on screen, as at the kiosk.
+    const raceOn = () => Array.from(fd.querySelectorAll('#race input:checked')).map((x) => x.value);
+    const raceLitOn = () => Array.from(fd.querySelectorAll('#race .chip.on input')).map((x) => x.value);
+    ftick('input[name=race][value=white]'); ftick('input[name=race][value=prefer_not]');
+    const pnaOnly = same(raceOn(), ['prefer_not']) && same(raceLitOn(), ['prefer_not']);
+    ftick('input[name=race][value=asian]');
+    log(pnaOnly && same(raceOn(), ['asian']) && same(raceLitOn(), ['asian']),
+      'online form (real page): "Prefer not to answer" clears the other races on screen, and a race chosen after clears it');
+    fset('under_treatment', 'no');
+    const firstRefusal = fsubmit();
+    log(/every medical and dental history question: High Blood Pressure \(Hypertension\)/.test(firstRefusal),
+      'online form (real page): a missing answer is refused naming the question, in the kiosk\'s order');
+    fd.querySelectorAll('#conditions select').forEach((x) => { x.value = 'no'; });
+    fset('cond_diabetes', 'yes'); fset('cond_pregnant', 'na');
+    // "No medications" clears the ticks, and a tick clears it — as at the kiosk.
+    const medOn = () => Array.from(fd.querySelectorAll('#medchips input:checked')).map((x) => x.name === 'med' ? x.value : x.id);
+    const medLit = () => Array.from(fd.querySelectorAll('#medchips .chip.on input')).map((x) => x.name === 'med' ? x.value : x.id);
+    ftick('input[name=med][value=warfarin]'); ftick('#medications_none');
+    const noneOnly = same(medOn(), ['medications_none']) && same(medLit(), ['medications_none']);
+    ftick('input[name=med][value=metformin]');
+    log(noneOnly && same(medOn(), ['metformin']) && same(medLit(), ['metformin']),
+      'online form (real page): "No medications" clears the ticked medications, and a tick clears it');
+    ftick('input[name=med][value=other]');
+    fd.querySelector('#meds input').value = 'Fish oil';
+    // Worded as the kiosk words it: "Other" on both lists, and the typed
+    // allergy under a label of its own.
+    const chipText = (doc, name) => doc.querySelector('input[name=' + name + '][value=other]').closest('label').textContent;
+    const esPage = new JSDOM(await (await workerV.fetch(new Request('https://sync.example/checkin/evt-online?lang=es'), envV, {})).text()).window.document;
+    const allergyOtherLabel = fd.querySelector('label[for=allergies_other]');
+    log(chipText(fd, 'med') === st.CATALOG.en.common.other && chipText(fd, 'allergy') === st.CATALOG.en.common.other
+      && chipText(esPage, 'med') === st.CATALOG.es.common.other && chipText(esPage, 'allergy') === st.CATALOG.es.common.other
+      && !!allergyOtherLabel && allergyOtherLabel.textContent.startsWith(st.CATALOG.en.intake.allergyOther),
+    'online form (real page): "Other" and the typed-allergy label read exactly as at the kiosk, in English and Spanish');
+    fset('major_surgery', 'no'); fset('tobacco', 'no'); fset('allergy_status', 'yes'); ftick('input[name=allergy][value=penicillin]');
+    fset('prior_dentist', 'never');
+    fd.querySelectorAll('select').forEach((x) => { if (st.DENTAL_QUESTIONS.some((q) => q.key === x.id)) x.value = 'no'; });
+    ftick('#cagree'); fset('signer', 'Olivia Online');
+    const pdE = new fw.Event('pointerdown', { bubbles: true }); pdE.clientX = 1; pdE.clientY = 1; fd.getElementById('gsig').dispatchEvent(pdE);
+    log(fsubmit() === '' && !!fw.__posted && fw.__posted.form_version === 2, 'online form (real page): a complete form submits');
+    const postRes = await workerV.fetch(new Request('https://sync.example/checkin/evt-online', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fw.__posted) }), envV, {});
+    const patRow = rowsV.find((r) => r[1] === 'patient');
+    const onlineData = patRow ? JSON.parse(patRow[6]) : null;
+    const onlineMh = onlineData ? JSON.parse(onlineData.medical_history) : {};
+    log(postRes.status === 200 && !rowsV.some((r) => r[1] === 'survey') && JSON.parse(onlineData.demographics).city === 'Sandy',
+      'online form (real page): accepted, the typed town canonicalised, and no survey row filed');
+    const kioskSame = mhx.normalizeMedical({ under_treatment: 'no', condition_answers: { ...ANS, diabetes: 'yes', pregnant: 'na' }, conditions_other: '',
+      medications: [{ key: 'metformin', name: 'Metformin (Glucophage)' }, { key: 'other', name: 'Fish oil' }], major_surgery: 'no', surgery_sites: [], tobacco: 'no',
+      allergy_status: 'yes', allergies: ['penicillin'], allergies_other: '' });
+    // Key order is not meaning, so both are compared with keys sorted at EVERY
+    // depth. (A replacer array would not do: it filters nested keys as well, so
+    // condition_answers and each medication row would compare as {}.)
+    const stableV = (v) => (Array.isArray(v) ? v.map(stableV)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stableV(v[k])])) : v);
+    const sortedJ = (o) => JSON.stringify(stableV(o));
+    log(sortedJ({ a: { x: 1 }, m: [{ key: 'warfarin' }] }) !== sortedJ({ a: { x: 2 }, m: [{ key: 'aspirin' }] })
+      && sortedJ(onlineMh) === sortedJ(kioskSame) && Object.keys(onlineMh.condition_answers).length === 25,
+    'online form (real page): stores exactly the history the kiosk stores for the same answers — every answer and medication compared');
+    const evOn = db.getActiveEvent();
+    db.applyRemoteRows([{ entity: 'patient', uid: 'online-v15-uid', event_uid: evOn.uid, patient_uid: null, deleted: 0, updated_at: '2099-05-05T00:00:00.000Z@prereg', data: onlineData }]);
+    const onlineP = db.listPatients({}).find((x) => x.last_name === 'Online');
+    const onlineCards = onlineP ? cardsText(onlineP).textContent : '';
+    log(/Diabetes – Type 1 or Type 2/.test(onlineCards) && /Metformin \(Glucophage\)/.test(onlineCards) && /Penicillin/.test(onlineCards) && /Sandy/.test(onlineCards),
+      'online form: the pre-registration arrives by sync and reads on the chart like a walk-in');
   }
 
   /* ===== Supplies ===========================================================
@@ -3045,12 +3780,16 @@ async function main() {
     const refusal = (lang, key) => { i18n.setLang(lang); return i18n.t('common.required') + ': ' + i18n.t(key); };
     log(refusal('es', 'intake.underTreatment') === 'Requerido: \u00bfEst\u00e1 bajo el cuidado de un m\u00e9dico actualmente?',
       'the medical refusal is fully Spanish for a Spanish-speaking patient');
-    log(refusal('es', 'intake.pregnancy') === 'Requerido: \u00bfEmbarazada, amamantando o usando anticonceptivos?'
-      && i18n.t('intake.pregnancyNA') === 'No aplica',
-      'the pregnancy question and its Not-applicable choice are translated too');
+    log(refusal('es', 'intake.majorSurgery') === 'Requerido: \u00bfCirug\u00eda mayor en los \u00faltimos 6 meses?'
+      && refusal('es', 'intake.tobacco') === 'Requerido: \u00bfFuma?',
+      'the new questions (major surgery, "Do you smoke?") are translated too');
+    // The pregnancy row of the conditions table, and its fourth answer.
+    log(i18n.conditionLabel('pregnant') === 'Embarazo / posible embarazo (cuando aplique)'
+      && i18n.answerLabel('na') === 'No aplica' && i18n.answerLabel('unsure') === 'No estoy seguro/a',
+      'the pregnancy row, Not applicable and Unsure are translated too');
     // ru/bzj/nya carry their own 'Required'; the question falls back to English
     // rather than showing a key, which is the existing rule for this file.
-    log(refusal('bzj', 'intake.tobacco') === 'Fi need: Do you use tobacco?',
+    log(refusal('bzj', 'intake.tobacco') === 'Fi need: Do you smoke?',
       'a language without the question translated still names it, in its own Required');
     i18n.setLang('en');
   }

@@ -107,9 +107,16 @@ function surveyCard(sv) {
   ]);
 }
 
+// Every condition key a summary may hold — the current 25 and the retired ones —
+// by name. 'none' and 'other' are not conditions: they are what the form stores
+// for "none of these" and "something I typed", and summaries kept before
+// v0.0.15 counted them, which could put "None" at the top of "Most common
+// conditions". They are dropped here, at display time, because a kept summary
+// is frozen and will never be recounted.
 function conditionLabels(obj) {
   const map = Object.fromEntries(conditions().map((c) => [c.key, c.label]));
-  return relabel(obj, (k) => map[k] || String(k).replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()));
+  const kept = Object.fromEntries(Object.entries(obj || {}).filter(([k]) => k !== 'none' && k !== 'other'));
+  return relabel(kept, (k) => map[k] || String(k).replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()));
 }
 
 export function renderReports(ctx) {

@@ -121,7 +121,8 @@ in with the account they already have.
 Mirrors the six modules of the product map:
 
 1. **Patient Check-In & Intake** — bilingual (English / Spanish) kiosk wizard,
-   full demographics, 28-condition medical history, dental history, digital
+   full demographics, a top-25 Yes / No / Unsure medical history with the
+   medication-allergy and medication checklists, dental history, digital
    **consent with signature capture**, conditional oral-surgery consent, and
    **read-aloud** of every consent section in the patient's language.
 2. **Triage** — live patient queue, **auto-flagged medical conditions**,

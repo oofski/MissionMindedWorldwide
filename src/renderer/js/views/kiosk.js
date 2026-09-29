@@ -1,9 +1,10 @@
 import { el, clear, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { t, tRaw, getLang, setLang, languageList, conditions, allergies, referrals, visitTypes, visitTypeLabel, speak, stopSpeaking, priorDentistOptions, priorDentistLabel, routeForVisitType, raceOptions, US_STATES, MEDICATIONS } from '../i18n.js';
-import { textField, selectField, yesNo, chipGrid, limitDigits } from '../forms.js';
+import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpeaking, priorDentistLabel, routeForVisitType, answerLabel, medChecklist } from '../i18n.js';
+import { textField } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
-import { REGISTRATION_SECTIONS } from '../../i18n/exitSurvey.js';
+import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, matchCity } from '../components/intakeSections.js';
+import { medicalDisplay } from '../medicalHistory.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 
@@ -16,11 +17,11 @@ export function renderKiosk(ctx) {
   const data = {
     language: 'en',
     demographics: {}, medical_history: {}, dental_history: {}, consents: [],
-    survey: { answers: {}, declined: false },
   };
   const root = el('div', { class: 'kiosk' });
   let started = false;
   let eventLangs = null; // CSV of language codes enabled for the active event
+  let eventCityList = []; // the active event's City dropdown; empty = a text box
 
   // Step builders return { title, node, collect } — collect() validates and
   // writes into `data`, returning false to block navigation.
@@ -35,7 +36,9 @@ export function renderKiosk(ctx) {
     // implied by what the patient said they need on the dental step, and asking
     // twice let the two disagree — a patient could ask for a cleaning and then
     // pick the dentist, and the queue believed the second answer.
-    list.push(stepSurvey);
+    //
+    // And no survey step (v0.0.15, "Step 5 — remove entire step"): the whole
+    // grant survey is asked at check-out now, in one sitting.
     list.push(stepReview);
     return list;
   }
@@ -68,9 +71,14 @@ export function renderKiosk(ctx) {
     data.language = code;
     setLang(code);
     started = true;
-    steps = computeSteps();
-    idx = 0;
-    paint();
+    // The first step needs the event's city list. It has normally long
+    // arrived by the time a patient taps a language; waiting for it (briefly)
+    // keeps step 1 from being built as a text box and then becoming a dropdown.
+    eventLoaded.then(() => {
+      steps = computeSteps();
+      idx = 0;
+      paint();
+    });
   }
 
   function go(n) {
@@ -115,454 +123,54 @@ export function renderKiosk(ctx) {
 
   /* ---------------- Steps ---------------- */
 
-  // Records taken before the dropdown hold free text — "Oregon", "or", "Ore.".
-  // Match them to a code where it is unambiguous so opening an old record does
-  // not silently blank the field; anything unrecognised falls back to no
-  // selection rather than a wrong one.
-  function normalizeState(v) {
-    const raw = String(v || '').trim();
-    if (!raw) return '';
-    const up = raw.toUpperCase().replace(/\.$/, '');
-    if (US_STATES.some(([c]) => c === up)) return up;
-    const byName = US_STATES.find(([, n]) => n.toUpperCase() === up);
-    return byName ? byName[0] : '';
-  }
-
+  // The three question steps are the shared intake builders — the same ones a
+  // station mounts to correct an answer later — so the kiosk only decides
+  // where each answer lands in `data`.
   function stepDemographics() {
-    const d = data.demographics;
-    const first = textField(t('intake.firstName'), { value: data.first_name, required: true });
-    const last = textField(t('intake.lastName'), { value: data.last_name, required: true });
-    const dob = textField(t('intake.dob'), { value: data.dob, type: 'date', required: true });
-    const gender = selectField(t('intake.gender'), [
-      { value: '', label: '—' },
-      { value: 'male', label: t('intake.genderM') },
-      { value: 'female', label: t('intake.genderF') },
-      { value: 'other', label: t('intake.genderO') },
-    ], { value: data.gender, required: true });
-    const phone = textField(t('intake.phone'), { value: data.phone, type: 'tel', required: true });
-    const email = textField(t('intake.email'), { value: data.email, type: 'email' });
-    const address = textField(t('intake.address'), { value: d.address });
-    // Required: grant-funded clinics report how many patients came from their town.
-    const city = textField(t('intake.city'), { value: d.city, required: true });
-    // A dropdown, not a text box: "OR", "Oregon" and "ore" were landing in the
-    // city/state report as three different places.
-    const stateF = selectField(
-      t('intake.state'),
-      [{ value: '', label: '\u2014' }, ...US_STATES.map(([code, name]) => ({ value: code, label: `${name} (${code})` }))],
-      { value: normalizeState(d.state), required: true },
-    );
-    const mailing = textField(t('intake.mailing'), { value: d.mailing_address });
-    const marital = selectField(t('intake.marital'), [
-      { value: '', label: '—' },
-      { value: 'single', label: t('intake.single') },
-      { value: 'married', label: t('intake.married') },
-      { value: 'divorced', label: t('intake.divorced') },
-      { value: 'widowed', label: t('intake.widowed') },
-    ], { value: d.marital_status });
-    const emName = textField(t('intake.emergencyName'), { value: d.emergency_name, required: true });
-    const emPhone = textField(t('intake.emergencyPhone'), { value: d.emergency_phone, type: 'tel', required: true });
-    // Phone numbers accept digits only, max 10.
-    limitDigits(phone.input, 10);
-    limitDigits(emPhone.input, 10);
-
-    // MMW runs dental, medical and vision under one roof, and the registration
-    // form asks which the patient is here for. It drives who they queue for, so
-    // at least one has to be chosen — a blank would strand them in no queue.
-    const SERVICES = [
-      { key: 'dental', label: L({ en: 'Dental', es: 'Dental', ru: 'Стоматология' }) },
-      { key: 'medical', label: L({ en: 'Medical', es: 'Médico', ru: 'Медицина' }) },
-      { key: 'vision', label: L({ en: 'Vision', es: 'Visión', ru: 'Зрение' }) },
-    ];
-    const chosenServices = new Set(Array.isArray(d.services) && d.services.length ? d.services : ['dental']);
-    const serviceBtns = SERVICES.map((svc) => {
-      const btn = el('button', {
-        type: 'button',
-        class: 'chip-btn' + (chosenServices.has(svc.key) ? ' chip-btn--on' : ''),
-        onClick: () => {
-          if (chosenServices.has(svc.key)) chosenServices.delete(svc.key); else chosenServices.add(svc.key);
-          btn.classList.toggle('chip-btn--on', chosenServices.has(svc.key));
-          btn.setAttribute('aria-pressed', String(chosenServices.has(svc.key)));
-        },
-        'aria-pressed': String(chosenServices.has(svc.key)),
-      }, [svc.label]);
-      return btn;
-    });
-    const servicesField = el('div', { class: 'span-2' }, [
-      el('span', { class: 'field-label' }, [L({ en: 'Services needed today', es: 'Servicios que necesita hoy', ru: 'Необходимые услуги' })]),
-      el('div', { class: 'chip-row' }, serviceBtns),
-    ]);
-
-    // F4: referral as a dropdown of known sources; "Other" reveals a free-text field.
-    const referral = selectField(t('intake.referral'), [
-      { value: '', label: '—' },
-      ...referrals().map((r) => ({ value: r.key, label: r.label })),
-    ], { value: d.referral });
-    // Race and ethnicity as ONE optional select-all question. Optional on
-    // purpose and labelled as such: it is asked for grant reporting, and a
-    // patient who does not want to answer must still get care.
-    const RACE_OPTS = raceOptions();
-    const race = chipGrid(
-      L({ en: 'Race and ethnicity', es: 'Raza y origen étnico', ru: 'Раса и этническая принадлежность' }),
-      RACE_OPTS.map((o) => ({ key: o.key, label: o.label })),
-      {
-        selected: Array.isArray(d.race) ? d.race : [],
-        hint: L({
-          en: 'Optional. Choose any that apply — this is only used for reporting how the clinic served the community.',
-          es: 'Opcional. Elija todas las que correspondan — solo se usa para informar cómo la clínica sirvió a la comunidad.',
-          ru: 'Необязательно. Выберите все подходящие — используется только для отчётности.',
-        }),
-      },
-    );
-    const raceField = el('div', { class: 'span-2' }, [race.node]);
-    // Make the exclusivity visible rather than reconciling it silently on save:
-    // today a patient can light up "White" AND "Prefer not to answer" and only
-    // one of them survives, with no indication which.
-    race.node.addEventListener('click', (e) => {
-      const btn = e.target.closest && e.target.closest('.chip-select');
-      if (!btn) return;
-      const chosen = race.get();
-      const isPna = btn.textContent === (RACE_OPTS.find((o) => o.key === 'prefer_not') || {}).label;
-      if (isPna && chosen.includes('prefer_not')) race.set(['prefer_not']);
-      else if (!isPna && chosen.includes('prefer_not')) race.set(chosen.filter((k) => k !== 'prefer_not'));
-      else return;
-      // Repaint the chips from the corrected selection.
-      const now = race.get();
-      race.node.querySelectorAll('.chip-select').forEach((b, i) => {
-        b.classList.toggle('chip-select--on', now.includes(RACE_OPTS[i].key));
-      });
-    });
-
-    const referralOther = textField(t('intake.referralOther'), { value: d.referral_other });
-    const referralOtherWrap = el('div', { class: 'span-2' }, [referralOther.node]);
-    const syncReferralOther = () => { referralOtherWrap.style.display = referral.get() === 'other' ? '' : 'none'; };
-    referral.input.addEventListener('change', syncReferralOther);
-    syncReferralOther();
-
-    const node = el('div', { class: 'form-grid' }, [
-      first.node, last.node, dob.node, gender.node, phone.node, email.node,
-      el('div', { class: 'span-2' }, [address.node]),
-      city.node, stateF.node,
-      el('div', { class: 'span-2' }, [mailing.node]),
-      marital.node, emName.node, emPhone.node,
-      raceField,
-      servicesField,
-      el('div', { class: 'span-2' }, [referral.node]),
-      referralOtherWrap,
-    ]);
-
+    const sec = demographicsSection({
+      first_name: data.first_name, last_name: data.last_name, dob: data.dob, gender: data.gender,
+      phone: data.phone, email: data.email, demographics: data.demographics,
+    }, { cities: eventCityList });
     return {
       title: t('intake.s_demographics'),
-      node,
+      node: sec.node,
       collect: () => {
-        if (!first.get() || !last.get()) { toast(t('common.required') + ': ' + t('intake.firstName') + ' / ' + t('intake.lastName'), 'error'); return false; }
-        if (!dob.get()) { toast(t('common.required') + ': ' + t('intake.dob'), 'error'); return false; }
-        if (!gender.get()) { toast(t('common.required') + ': ' + t('intake.gender'), 'error'); return false; }
-        if (!city.get()) { toast(t('common.required') + ': ' + t('intake.city'), 'error'); return false; }
-        if (!stateF.get()) { toast(t('common.required') + ': ' + t('intake.state'), 'error'); return false; }
-        if (!phone.get()) { toast(t('common.required') + ': ' + t('intake.phone'), 'error'); return false; }
-        if (!emName.get()) { toast(t('common.required') + ': ' + t('intake.emergencyName'), 'error'); return false; }
-        if (!emPhone.get()) { toast(t('common.required') + ': ' + t('intake.emergencyPhone'), 'error'); return false; }
-        if (!chosenServices.size) { toast(L({ en: 'Please choose at least one service.', es: 'Elija al menos un servicio.', ru: 'Выберите хотя бы одну услугу.' }), 'error'); return false; }
-        data.first_name = first.get(); data.last_name = last.get();
-        data.dob = dob.get(); data.gender = gender.get(); data.phone = phone.get(); data.email = email.get();
-        Object.assign(data.demographics, {
-          address: address.get(), city: city.get(), state: stateF.get(), mailing_address: mailing.get(), marital_status: marital.get(),
-          emergency_name: emName.get(), emergency_phone: emPhone.get(),
-          services: SERVICES.map((x) => x.key).filter((k) => chosenServices.has(k)),
-          // "Prefer not to answer" is about the list, so it replaces it rather
-          // than joining it — a record must not say both "white" and "declined".
-          race: race.get().includes('prefer_not') ? ['prefer_not'] : race.get(),
-          referral: referral.get(),
-          referral_other: referral.get() === 'other' ? referralOther.get() : '',
-        });
+        const out = sec.collect();
+        if (!out) return false;
+        ['first_name', 'last_name', 'dob', 'gender', 'phone', 'email'].forEach((k) => { data[k] = out[k]; });
+        // A slow start can build this step before the event's list arrives
+        // (a text box); a town typed there is still stored in the listed
+        // spelling, so it lands in the same report row as everyone else's.
+        data.demographics = { ...out.demographics, city: matchCity(out.demographics.city, eventCityList) || out.demographics.city };
         return true;
       },
     };
   }
 
   function stepMedical() {
-    const m = data.medical_history;
     // A2: vitals are no longer collected at check-in — the EMT records them.
-
-    // Ordered so the refusal below can name the first unanswered question rather
-    // than saying "something is missing" and leaving the patient to hunt.
-    const YN_FIELDS = [
-      ['under_treatment', t('intake.underTreatment'), ''],
-      ['hospitalized', t('intake.hospitalized'), ''],
-      ['tobacco', t('intake.tobacco'), ''],
-      // The pregnancy question is required like the rest, but it is the one
-      // question here that is simply not about most of the people who sit down
-      // at this screen. "Not applicable" is what lets a man, a child or a
-      // post-menopausal woman answer it truthfully instead of being made to
-      // declare they are not pregnant — and it keeps a "No" meaning what the
-      // dentist needs it to mean: this patient could be, and is not.
-      ['pregnancy', t('intake.pregnancy'), t('intake.pregnancyNA')],
-    ].map(([k, label, naText]) => ({
-      key: k, label,
-      field: yesNo(label, { value: m[k], yesText: t('common.yes'), noText: t('common.no'), naText }),
-    }));
-    const [underTx, hosp, tobacco, pregnancy] = YN_FIELDS.map((f) => f.field);
-
-    const noneLabel = L({ en: 'None of the above', es: 'Ninguna de las anteriores', ru: 'Ничего из перечисленного' });
-
-    // A3: makes "reviewed but nothing to report" explicit. A mutually-exclusive
-    // 'none' chip: choosing it clears the real chips, and picking any real chip
-    // clears 'none'. Reflected in the *_none flags on collect.
-    function wireNone(gridComp, items, noneKey) {
-      const btns = Array.from(gridComp.node.querySelectorAll('.chip-select'));
-      const byKey = new Map(items.map((it, i) => [it.key, btns[i]]));
-      const apply = (desired) => {
-        gridComp.set(desired);
-        const want = new Set(desired);
-        for (const [key, btn] of byKey) btn.classList.toggle('chip-select--on', want.has(key));
-      };
-      gridComp.node.addEventListener('click', (e) => {
-        const btn = e.target.closest('.chip-select');
-        if (!btn) return;
-        const cur = new Set(gridComp.get());
-        if (btn === byKey.get(noneKey)) {
-          if (cur.has(noneKey)) apply([noneKey]); // just picked 'none' → clear the rest
-        } else if (cur.has(noneKey)) {
-          cur.delete(noneKey); // picked a real chip → drop 'none'
-          apply(Array.from(cur));
-        }
-      });
-    }
-
-    // F7 + A3: allergy chips + an "other" chip (free-text) + a "None of the above" chip.
-    const allergyItems = [
-      ...allergies().filter((a) => a.intake).map((a) => ({ key: a.key, label: a.label, flag: true })),
-      { key: 'other', label: t('common.other') },
-      { key: 'none', label: noneLabel },
-    ];
-    const allergyGrid = chipGrid(t('intake.allergiesTitle') + ' *', allergyItems,
-      { selected: m.allergies || [], hint: t('intake.allergiesHint') });
-    const allergyOther = textField(t('intake.allergyOther'), { value: m.allergies_other });
-    const allergyOtherWrap = el('div', { class: 'span-2' }, [allergyOther.node]);
-    const syncAllergyOther = () => { allergyOtherWrap.style.display = allergyGrid.get().includes('other') ? '' : 'none'; };
-    wireNone(allergyGrid, allergyItems, 'none');
-    allergyGrid.node.addEventListener('click', syncAllergyOther);
-    syncAllergyOther();
-
-    // F8 + A3: condition chips + an "other" chip (free-text) + a "None of the above" chip.
-    const condItems = [
-      ...conditions().map((c) => ({ key: c.key, label: c.label, flag: c.flag })),
-      { key: 'other', label: t('common.other') },
-      { key: 'none', label: noneLabel },
-    ];
-    const condGrid = chipGrid(t('intake.conditionsTitle') + ' *', condItems,
-      { selected: m.conditions || [], hint: t('intake.conditionsHint') });
-    const condOther = textField(t('intake.conditionOther'), { value: m.conditions_other });
-    const condOtherWrap = el('div', { class: 'span-2' }, [condOther.node]);
-    const syncCondOther = () => { condOtherWrap.style.display = condGrid.get().includes('other') ? '' : 'none'; };
-    wireNone(condGrid, condItems, 'none');
-    condGrid.node.addEventListener('click', syncCondOther);
-    syncCondOther();
-
-    // Medication table
-    const medRows = el('div', { class: 'med-rows' });
-    // A3: "No medications" — mutually exclusive with the med rows.
-    const noMeds = el('input', { class: 'big-check', type: 'checkbox' });
-    const addBtn = el('button', { class: 'btn btn--ghost btn--sm', type: 'button', onClick: () => addMedRow() }, ['+ ' + t('intake.addMed')]);
-    const refreshMedsDisabled = () => {
-      const disabled = noMeds.checked;
-      addBtn.disabled = disabled;
-      medRows.querySelectorAll('input, button').forEach((x) => { x.disabled = disabled; });
-    };
-    // One shared <datalist> for every row: the 100 medications MMW listed, in
-    // order of how commonly they are prescribed.
-    //
-    // A datalist rather than a <select>, deliberately. It behaves as a picker —
-    // type two letters and the matches appear — but it still accepts anything
-    // typed. A closed dropdown would be both unusable at 100 entries on a tablet
-    // AND unable to record a patient on a drug outside the list, and the
-    // provider reads this before deciding what is safe to give them. A
-    // medication that cannot be entered is a medication nobody sees.
-    const MED_LIST_ID = 'mmw-med-list';
-    const medDatalist = el('datalist', { id: MED_LIST_ID },
-      MEDICATIONS.map((x) => el('option', { value: x.name })));
-
-    function addMedRow(med = {}) {
-      if (noMeds.checked) { noMeds.checked = false; refreshMedsDisabled(); } // adding a med clears "none"
-      const name = el('input', {
-        class: 'input', placeholder: t('intake.medName'), value: med.name || '',
-        list: MED_LIST_ID, autocomplete: 'off',
-      });
-      const dose = el('input', { class: 'input', placeholder: t('intake.medDose'), value: med.dose || '' });
-      const reason = el('input', { class: 'input', placeholder: t('intake.medReason'), value: med.reason || '' });
-      const row = el('div', { class: 'med-row' }, [name, dose, reason,
-        el('button', { class: 'btn btn--ghost btn--sm btn--icon', type: 'button', onClick: () => row.remove() }, [icon('x', { size: 15 })])]);
-      row._get = () => ({ name: name.value.trim(), dose: dose.value.trim(), reason: reason.value.trim() });
-      medRows.append(row);
-    }
-    (m.medications || []).forEach(addMedRow);
-    noMeds.checked = !!m.medications_none;
-    if (noMeds.checked) clear(medRows);
-    noMeds.addEventListener('change', () => { if (noMeds.checked) clear(medRows); refreshMedsDisabled(); });
-    refreshMedsDisabled();
-    const noMedsLabel = L({ en: 'No medications', es: 'Sin medicamentos', ru: 'Нет лекарств' });
-
-    const node = el('div', {}, [
-      el('div', { class: 'form-grid' }, [underTx.node, hosp.node, tobacco.node, pregnancy.node]),
-      el('div', { class: 'span-2' }, [allergyGrid.node]),
-      el('div', { class: 'form-grid' }, [allergyOtherWrap]),
-      el('div', { class: 'span-2' }, [condGrid.node]),
-      el('div', { class: 'form-grid' }, [condOtherWrap]),
-      el('div', { class: 'field' }, [
-        el('span', { class: 'field-label' }, [t('intake.medsTitle') + ' *']),
-        el('label', { class: 'agree-row' }, [noMeds, el('span', {}, [noMedsLabel])]),
-        medDatalist,
-        medRows,
-        addBtn,
-      ]),
-    ]);
-
+    const sec = medicalHistorySection(data.medical_history);
     return {
       title: t('intake.s_medical'),
-      node,
+      node: sec.node,
       collect: () => {
-        const allergySel = allergyGrid.get();
-        const condSel = condGrid.get();
-        const medList = Array.from(medRows.children).map((r) => r._get()).filter((x) => x.name);
-        // Every medical question is REQUIRED, the same as the online form already
-        // requires them — the same clinic was getting a complete history from a
-        // patient who signed up at home and a blank one from the patient at the
-        // desk, and the dentist reads these before deciding whether it is safe
-        // to treat. Each refusal names its question: on a column of
-        // near-identical Yes/No rows a generic "please complete this step" is
-        // how people give up on a form.
-        const missingYN = YN_FIELDS.find((f) => !f.field.get());
-        if (missingYN) { toast(t('common.required') + ': ' + missingYN.label, 'error'); return false; }
-        // Allergies, conditions and medications are REQUIRED — the patient must
-        // actively answer each (a real chip, "Other", or "None of the above" /
-        // "No medications"). A blank section no longer silently passes.
-        if (!allergySel.length) { toast(L({ en: 'Please answer the allergies question — choose an allergy, Other, or None of the above.', es: 'Por favor responda la pregunta de alergias: elija una alergia, Otra o Ninguna de las anteriores.', ru: 'Пожалуйста, ответьте на вопрос об аллергии — выберите аллергию, «Другое» или «Ничего из перечисленного».' }), 'error'); return false; }
-        if (allergySel.includes('other') && !allergyOther.get()) { toast(L({ en: 'Please specify the other allergy.', es: 'Por favor especifique la otra alergia.', ru: 'Пожалуйста, укажите другую аллергию.' }), 'error'); return false; }
-        if (!condSel.length) { toast(L({ en: 'Please answer the conditions question — choose a condition, Other, or None of the above.', es: 'Por favor responda la pregunta de condiciones: elija una condición, Otra o Ninguna de las anteriores.', ru: 'Пожалуйста, ответьте на вопрос о заболеваниях — выберите заболевание, «Другое» или «Ничего из перечисленного».' }), 'error'); return false; }
-        if (condSel.includes('other') && !condOther.get()) { toast(L({ en: 'Please specify the other condition.', es: 'Por favor especifique la otra condición.', ru: 'Пожалуйста, укажите другое заболевание.' }), 'error'); return false; }
-        if (!noMeds.checked && !medList.length) { toast(L({ en: 'Please list your medications, or check "No medications".', es: 'Por favor indique sus medicamentos o marque «Sin medicamentos».', ru: 'Пожалуйста, укажите ваши лекарства или отметьте «Нет лекарств».' }), 'error'); return false; }
-        Object.assign(m, {
-          under_treatment: underTx.get(), hospitalized: hosp.get(), tobacco: tobacco.get(), pregnancy: pregnancy.get(),
-          allergies: allergySel, conditions: condSel,
-          allergies_other: allergySel.includes('other') ? allergyOther.get() : '',
-          conditions_other: condSel.includes('other') ? condOther.get() : '',
-          medications: noMeds.checked ? [] : medList,
-        });
-        // A3: record that a section was actively reviewed as "none".
-        if (allergySel.includes('none')) m.allergies_none = true; else delete m.allergies_none;
-        if (condSel.includes('none')) m.conditions_none = true; else delete m.conditions_none;
-        if (noMeds.checked) m.medications_none = true; else delete m.medications_none;
+        const out = sec.collect();
+        if (!out) return false;
+        data.medical_history = out;
         return true;
       },
     };
   }
 
   function stepDental() {
-    const dh = data.dental_history;
-    // "Reason for today's visit" is gone: "What do you need today?" below asks
-    // the same thing as a countable choice, and the free-text box duplicated it
-    // in prose nothing could report on.
-    const POPTS = priorDentistOptions();
-    const prior = selectField(
-      t('intake.priorDentist'),
-      [{ value: '', label: '—' }, ...POPTS.map((o) => ({ value: o.key, label: o.label }))],
-      { value: dh.prior_dentist, required: true },
-    );
-    const yn = (k, label) => yesNo(label, { value: dh[k], yesText: t('common.yes'), noText: t('common.no') });
-    // Ordered so the refusal below can name the first unanswered question rather
-    // than saying "something is missing" and leaving the patient to hunt.
-    const YN_FIELDS = [
-      ['gum_bleeding', t('intake.gumBleeding')],
-      ['sores', t('intake.sores')],
-      ['jaw_injury', t('intake.jawInjury')],
-      ['grinding', t('intake.grinding')],
-      ['post_extraction_bleeding', t('intake.postExtraction')],
-      ['ortho', t('intake.ortho')],
-    ].map(([k, label]) => ({ key: k, label, field: yn(k, label) }));
-    const [gum, sores, jaw, grinding, postExt, ortho] = YN_FIELDS.map((f) => f.field);
-    // "What do you need today?" on a 1–4 slider. Options 1 & 2 (extraction) add the
-    // oral-surgery consent (may_need_extraction='yes'); this replaces the old yes/no
-    // "are you in pain" question but drives the exact same consent trigger.
-    const VOPTS = visitTypes();
-    const storedVisitIdx = VOPTS.findIndex((o) => o.key === dh.visit_type);
-    let visitNum = storedVisitIdx >= 0 ? storedVisitIdx + 1 : null; // 1..4, null = not chosen
-    const visitQ = L({ en: 'What do you need today?', es: '¿Qué necesita hoy?', ru: 'Что вам нужно сегодня?' });
-    const slidePrompt = L({ en: 'Slide or tap a number to choose.', es: 'Deslice o toque un número para elegir.', ru: 'Проведите или коснитесь номера, чтобы выбрать.' });
-    const surgeryNote = L({ en: 'An oral surgery consent will be added.', es: 'Se agregará un consentimiento de cirugía oral.', ru: 'Будет добавлено согласие на операцию.' });
-    const visitRange = el('input', { type: 'range', min: '1', max: '4', step: '1', value: String(visitNum || 1), class: 'visit-range', style: 'width:100%;accent-color:var(--accent);height:28px' });
-    const visitDesc = el('div', { class: 'visit-desc', style: 'min-height:26px;margin-top:6px;font-weight:var(--fw-semibold)' });
-    const visitTicks = VOPTS.map((o, i) => el('button', {
-      type: 'button',
-      style: 'flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 4px;border:var(--border-line);border-radius:var(--radius-sm);background:var(--surface);cursor:pointer',
-      onClick: () => setVisit(i + 1),
-    }, [
-      el('span', { style: 'font-size:var(--fs-h3);font-weight:var(--fw-bold)' }, [String(i + 1)]),
-      el('span', { style: 'font-size:var(--fs-2xs);text-align:center;line-height:1.15' }, [o.label]),
-    ]));
-    function paintVisit() {
-      // Dim the track until a choice is actually made, so the thumb parked at 1
-      // doesn't read as "option 1 is selected".
-      visitRange.style.opacity = visitNum ? '1' : '0.45';
-      visitTicks.forEach((tk, i) => {
-        const on = visitNum === i + 1;
-        tk.style.borderColor = on ? 'var(--accent)' : '';
-        tk.style.background = on ? 'var(--accent-soft, rgba(20,150,140,0.12))' : 'var(--surface)';
-        tk.style.boxShadow = on ? 'inset 0 0 0 1px var(--accent)' : '';
-      });
-      clear(visitDesc);
-      if (visitNum) {
-        const o = VOPTS[visitNum - 1];
-        visitDesc.append(el('span', {}, [`${visitNum}. ${o.label}`]));
-        if (o.surgery) visitDesc.append(el('span', { class: 'subtle small', style: 'display:block;font-weight:var(--fw-medium);margin-top:2px' }, [surgeryNote]));
-      } else {
-        visitDesc.append(el('span', { class: 'subtle' }, [slidePrompt]));
-      }
-    }
-    function setVisit(n) { visitNum = n; visitRange.value = String(n); paintVisit(); }
-    // A range input only fires `input` when the value CHANGES. With nothing
-    // chosen the thumb already sits at 1, so a patient who wants option 1 and
-    // slides/taps there produces no event at all — and is then refused at Next
-    // with "please choose what you need today", which reads as the form kicking
-    // them back for an answer they did give. Commit on any interaction.
-    const commitVisit = () => setVisit(Number(visitRange.value));
-    visitRange.addEventListener('input', commitVisit);
-    visitRange.addEventListener('change', commitVisit);
-    visitRange.addEventListener('click', commitVisit);
-    visitRange.addEventListener('keyup', commitVisit);
-    paintVisit();
-    const visitField = el('div', { class: 'highlight-field' }, [
-      el('span', { class: 'field-label' }, [visitQ]),
-      visitDesc,
-      visitRange,
-      el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, visitTicks),
-    ]);
-
-    const node = el('div', {}, [
-      el('div', { class: 'form-grid' }, [
-        prior.node, gum.node, sores.node, jaw.node, grinding.node, postExt.node, ortho.node,
-      ]),
-      visitField,
-    ]);
-
+    const sec = dentalHistorySection(data.dental_history, { includeVisitType: true });
     return {
       title: t('intake.s_dental'),
-      node,
+      node: sec.node,
       collect: () => {
-        // Every dental question is required now. Each refusal names the question
-        // it is about — a bare "please complete this step" on a screen of seven
-        // near-identical Yes/No rows is the reason people give up on a form.
-        if (!prior.get()) { toast(t('common.required') + ': ' + t('intake.priorDentist'), 'error'); return false; }
-        const missing = YN_FIELDS.find((f) => !f.field.get());
-        if (missing) { toast(t('common.required') + ': ' + missing.label, 'error'); return false; }
-        if (!visitNum) { toast(L({ en: 'Please choose what you need today.', es: 'Por favor elija qué necesita hoy.', ru: 'Пожалуйста, выберите, что вам нужно сегодня.' }), 'error'); return false; }
-        const vopt = VOPTS[visitNum - 1];
-        Object.assign(dh, {
-          prior_dentist: prior.get(),
-          gum_bleeding: gum.get(), sores: sores.get(), jaw_injury: jaw.get(), grinding: grinding.get(),
-          post_extraction_bleeding: postExt.get(), ortho: ortho.get(),
-          visit_type: vopt.key,
-          may_need_extraction: vopt.surgery ? 'yes' : 'no',
-        });
+        const out = sec.collect();
+        if (!out) return false;
+        data.dental_history = out;
         return true;
       },
     };
@@ -743,115 +351,20 @@ export function renderKiosk(ctx) {
     };
   }
 
-  // The demographic half of the grant survey, asked at the end of registration
-  // while the patient is sitting and waiting anyway. Choice-only, like the rest
-  // of it — nothing here is typed.
-  //
-  // Entirely optional: this is a free clinic, and a question about somebody's
-  // income must never sit between them and care. A patient who skips it is
-  // recorded as having been asked and declined, which is a different and more
-  // honest figure than never having been asked.
-  function stepSurvey() {
-    const answers = data.survey.answers;
-    let declined = data.survey.declined === true;
-
-    const questionNode = (q) => {
-      const isMulti = q.type === 'multi';
-      const isOn = (v) => (isMulti ? (answers[q.key] || []).includes(v) : answers[q.key] === v);
-      const group = el('div', { class: 'survey-options' + (q.options.length > 6 ? ' survey-options--dense' : '') });
-      const repaint = () => [...group.children].forEach((b, i) => {
-        const on = isOn(q.options[i].value);
-        b.classList.toggle('is-on', on);
-        b.setAttribute('aria-pressed', on ? 'true' : 'false');
-      });
-      q.options.forEach((o) => group.append(el('button', {
-        type: 'button', class: 'survey-opt', 'aria-pressed': 'false',
-        onClick: () => {
-          declined = false;
-          if (isMulti) {
-            const cur = new Set(answers[q.key] || []);
-            // "None" and "Prefer not to answer" are answers ABOUT the list, so
-            // they replace it rather than joining it.
-            const exclusive = o.value === 'none' || o.value === 'pna';
-            if (cur.has(o.value)) cur.delete(o.value);
-            else if (exclusive) { cur.clear(); cur.add(o.value); }
-            else { cur.delete('none'); cur.delete('pna'); cur.add(o.value); }
-            if (cur.size) answers[q.key] = [...cur]; else delete answers[q.key];
-          } else if (answers[q.key] === o.value) delete answers[q.key];
-          else answers[q.key] = o.value;
-          repaint();
-          syncSkip();
-        },
-      }, [el('span', { class: 'survey-opt-box' }), el('span', {}, [o[getLang()] || o.en])])));
-      repaint();
-      return el('div', { class: 'survey-q' }, [
-        el('div', { class: 'survey-q-head' }, [
-          el('span', { class: 'survey-q-text' }, [q[getLang()] || q.en]),
-          el('span', { class: 'survey-q-opt' }, [L({ en: 'Optional', es: 'Opcional' })]),
-        ]),
-        (getLang() === 'es' ? q.hintEs : q.hintEn)
-          ? el('p', { class: 'survey-q-hint' }, [getLang() === 'es' ? q.hintEs : q.hintEn]) : null,
-        group,
-      ]);
-    };
-
-    const skipBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, []);
-    function syncSkip() {
-      skipBtn.replaceChildren(declined
-        ? L({ en: 'Skipped — tap any answer to change your mind', es: 'Omitida — toque cualquier respuesta para cambiar' })
-        : L({ en: 'I would rather not answer these', es: 'Prefiero no responder estas preguntas' }));
-      skipBtn.classList.toggle('chip-btn--on', declined);
-    }
-    skipBtn.addEventListener('click', () => {
-      declined = !declined;
-      if (declined) for (const k of Object.keys(answers)) delete answers[k];
-      syncSkip();
-      paintSurvey();
-    });
-
-    const body = el('div', {});
-    function paintSurvey() {
-      body.replaceChildren(...REGISTRATION_SECTIONS.map((sec) => el('section', { class: 'survey-section' }, [
-        el('h3', { class: 'survey-section-title' }, [sec[getLang()] || sec.en]),
-        ...sec.questions.map(questionNode),
-      ])));
-    }
-    paintSurvey();
-    syncSkip();
-
-    const node = el('div', { class: 'survey-inline' }, [
-      el('div', { class: 'survey-lede' }, [
-        el('p', {}, [L({
-          en: 'These last questions help Mission Minded Worldwide show what this clinic did for the community, and apply for the funding that keeps it free.',
-          es: 'Estas últimas preguntas ayudan a Mission Minded Worldwide a mostrar lo que esta clínica hizo por la comunidad y a solicitar los fondos que la mantienen gratuita.',
-        })]),
-        el('p', { class: 'survey-privacy' }, [icon('lock', { size: 14 }), el('span', {}, [L({
-          en: 'Every question is optional, your answers are reported as totals only, and none of this changes the care you receive today.',
-          es: 'Cada pregunta es opcional, sus respuestas se reportan solo como totales y nada de esto cambia la atención que recibe hoy.',
-        })])]),
-      ]),
-      body,
-      el('div', { class: 'inline-row', style: 'justify-content:center;margin-top:8px' }, [skipBtn]),
-    ]);
-
-    return {
-      title: L({ en: 'A few last questions', es: 'Unas últimas preguntas', ru: 'Несколько последних вопросов' }),
-      node,
-      collect: () => {
-        data.survey.answers = answers;
-        // Answering anything overrides a skip; skipping with nothing answered is
-        // recorded as a decline so "asked and declined" stays distinguishable
-        // from "never asked".
-        data.survey.declined = declined && Object.keys(answers).length === 0;
-        return true;
-      },
-    };
-  }
-
   function stepReview() {
-    const m = data.medical_history, dh = data.dental_history;
-    const condLabels = conditions().filter((c) => (m.conditions || []).includes(c.key)).map((c) => c.label);
-    const allergyLabels = allergies().filter((a) => (m.allergies || []).includes(a.key)).map((a) => a.label);
+    const dh = data.dental_history;
+    // What the patient told us, read back in their language before they sign:
+    // the allergy answer (with anything typed), the conditions answered Yes and
+    // those they were unsure of, and every medication — the things a dentist
+    // acts on, so the things worth a second look.
+    const md = medicalDisplay(data.medical_history, getLang());
+    // A checklist medication is STORED under its canonical English name (the
+    // blood-thinner rules read it), but the patient ticked it in their own
+    // language and confirms it in that language; a typed one reads as typed.
+    const medLabel = new Map(medChecklist().map((x) => [x.key, x.label]));
+    const allergyText = md.allergyStatus === 'nkda' ? t('intake.nkda')
+      : md.allergyStatus === 'unsure' ? t('intake.unsure')
+        : md.allergies.map((a) => a.label).join(', ');
     const row = (label, val) => el('div', { class: 'review-row' }, [
       el('span', { class: 'review-label' }, [label]), el('span', { class: 'review-val' }, [val || '—']),
     ]);
@@ -862,8 +375,14 @@ export function renderKiosk(ctx) {
         row(t('intake.firstName') + ' / ' + t('intake.lastName'), `${data.first_name} ${data.last_name}`),
         row(t('intake.dob'), data.dob),
         row(t('intake.phone'), data.phone),
-        row(t('intake.allergiesTitle'), allergyLabels.join(', ')),
-        row(t('intake.conditionsTitle'), condLabels.join(', ')),
+        row(t('intake.city'), [data.demographics.city, data.demographics.state].filter(Boolean).join(', ')),
+        row(t('intake.allergiesTitle'), allergyText),
+        row(t('intake.conditionsTitle'), md.yes.map((c) => c.label).join(', ') || (md.conditionsNone ? t('common.none') : '')),
+        md.unsure.length ? row(t('intake.unsure'), md.unsure.map((c) => c.label).join(', ')) : null,
+        row(t('intake.medsTitle'), md.medsNone ? t('intake.noMeds') : md.meds.map((x) => medLabel.get(x.key) || x.name).join(', ')),
+        row(t('intake.majorSurgery'), md.surgery === 'yes' && md.surgerySites.length
+          ? `${answerLabel('yes')} — ${md.surgerySites.join(', ')}` : answerLabel(md.surgery)),
+        row(t('intake.tobacco'), answerLabel(md.smoke)),
         row(L({ en: 'What you need today', es: 'Qué necesita hoy', ru: 'Что вам нужно сегодня' }), visitTypeLabel(dh.visit_type)),
         row(t('intake.priorDentist'), priorDentistLabel(dh.prior_dentist)),
         row(
@@ -872,13 +391,9 @@ export function renderKiosk(ctx) {
             : routeForVisitType(dh.visit_type) === 'dentist' ? L({ en: 'Dentist', es: 'Dentista', ru: 'Стоматолог' })
             : ''
         ),
-        row(t('intake.s_consent'), data.consents.map((c) => c.type === 'general' ? 'General — signed' : 'Oral Surgery — signed').join(' · ')),
-        row(
-          L({ en: 'Community questions', es: 'Preguntas de la comunidad', ru: 'Вопросы сообщества' }),
-          Object.keys(data.survey.answers).length
-            ? L({ en: `${Object.keys(data.survey.answers).length} answered`, es: `${Object.keys(data.survey.answers).length} respondidas` })
-            : L({ en: 'Skipped', es: 'Omitidas' }),
-        ),
+        row(t('intake.s_consent'), data.consents.map((c) => (c.type === 'general'
+          ? L({ en: 'General — signed', es: 'General — firmado', ru: 'Общее — подписано' })
+          : L({ en: 'Oral Surgery — signed', es: 'Cirugía oral — firmado', ru: 'Операция — подписано' }))).join(' · ')),
       ]),
     ]);
     return { title: t('intake.s_review'), node, collect: () => true };
@@ -944,11 +459,17 @@ export function renderKiosk(ctx) {
   }
 
   // Boot: show the language gate, then refine it with the active event's
-  // enabled language packs once they load.
+  // enabled language packs (and its City list) once they load. Never waits more
+  // than a moment: a patient must not be stranded on the gate because the
+  // event could not be read — the City box simply stays a text box.
   setLang('en');
   renderGate();
-  api.activeEvent().then((ev) => {
-    if (ev && ev.languages) { eventLangs = ev.languages; if (!started) renderGate(); }
-  }).catch(() => {});
+  const eventLoaded = Promise.race([
+    api.activeEvent().then((ev) => {
+      eventCityList = eventCities(ev);
+      if (ev && ev.languages) { eventLangs = ev.languages; if (!started) renderGate(); }
+    }).catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 1500)),
+  ]);
   return root;
 }

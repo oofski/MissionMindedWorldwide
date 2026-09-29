@@ -46,45 +46,23 @@ export function selectField(label, options, { value = '', required = false } = {
   return { node, get: () => sel.value, set: (v) => { sel.value = v; }, input: sel };
 }
 
-// Yes/No toggle (returns 'yes' | 'no' | '').
-//
-// `naText` adds a third choice, returning 'na'. It is for a question that a
-// required form must still let everyone answer honestly — where neither Yes nor
-// No is true of the patient, rather than where the patient would rather not say.
-export function yesNo(label, { value = '', yesText = 'Yes', noText = 'No', naText = '' } = {}) {
-  let val = value;
-  const btns = [];
-  const mkBtn = (v, txt) => {
-    const b = el('button', {
-      type: 'button',
-      class: 'chip-btn' + (val === v ? ' chip-btn--on' : ''),
-      onClick: () => { val = val === v ? '' : v; sync(); },
-    }, [txt]);
-    btns.push([v, b]);
-    return b;
-  };
-  const row = [mkBtn('yes', yesText), mkBtn('no', noText)];
-  if (naText) row.push(mkBtn('na', naText));
-  function sync() {
-    btns.forEach(([v, b]) => b.classList.toggle('chip-btn--on', val === v));
-  }
-  const node = el('div', { class: 'field' }, [
-    el('span', { class: 'field-label' }, [label]),
-    el('div', { class: 'chip-row' }, row),
-  ]);
-  return { node, get: () => val, set: (v) => { val = v; sync(); } };
-}
-
 // Multi-select chip grid from [{key,label,flag?}].
+//
+// `set()` repaints the chips as well as the selection, so a caller enforcing a
+// rule ("No medications" clears the rest) cannot leave a chip lit that is no
+// longer selected. Each chip carries its key in data-key for the same reason.
 export function chipGrid(label, items, { selected = [], hint = '' } = {}) {
   const sel = new Set(selected);
   const grid = el('div', { class: 'chip-grid' });
+  const btns = [];
   items.forEach((it) => {
     const btn = el('button', {
       type: 'button',
       class: 'chip-select' + (sel.has(it.key) ? ' chip-select--on' : '') + (it.flag ? ' chip-select--flag' : ''),
+      dataset: { key: it.key },
       onClick: () => { if (sel.has(it.key)) sel.delete(it.key); else sel.add(it.key); btn.classList.toggle('chip-select--on'); },
     }, [it.label]);
+    btns.push([it.key, btn]);
     grid.append(btn);
   });
   const node = el('div', { class: 'field' }, [
@@ -92,5 +70,10 @@ export function chipGrid(label, items, { selected = [], hint = '' } = {}) {
     hint ? el('span', { class: 'field-hint' }, [hint]) : null,
     grid,
   ]);
-  return { node, get: () => Array.from(sel), set: (arr) => { sel.clear(); (arr || []).forEach((k) => sel.add(k)); } };
+  const set = (arr) => {
+    sel.clear();
+    (arr || []).forEach((k) => sel.add(k));
+    btns.forEach(([k, b]) => b.classList.toggle('chip-select--on', sel.has(k)));
+  };
+  return { node, get: () => Array.from(sel), set };
 }

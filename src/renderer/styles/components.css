@@ -79,6 +79,19 @@
 .med-rows,.tx-rows{ display:flex; flex-direction:column; gap:7px; margin-bottom:8px; }
 .med-row{ display:grid; grid-template-columns:1.4fr 1fr 1.4fr auto; gap:7px; }
 .tx-row{ display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)) auto; gap:7px; align-items:center; }
+/* A typed "Other" medication: the name only (the checklist has no dose). */
+.med-row--name{ grid-template-columns:1fr auto; }
+
+/* The medical history's 25 conditions, one compact dropdown each — two columns
+   on a tablet so the whole list reads without a scroll per question. */
+.intake-block{ margin-top:var(--space-4); }
+.intake-block-title{ font-size:var(--fs-sm); color:var(--text-strong); }
+.tri-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:6px 16px; margin:4px 0 10px; }
+.tri-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:var(--divider); }
+.tri-label{ font-size:var(--fs-sm); font-weight:var(--fw-medium); color:var(--text); line-height:1.3; }
+.tri-row--flag .tri-label{ color:var(--text-strong); }
+.tri-row .select{ width:150px; flex:none; }
+.kiosk .tri-row .input{ height:40px; }
 
 /* ===== Tables ===== */
 .data-table{ width:100%; border-collapse:collapse; }
@@ -893,12 +906,6 @@ body.survey-open{ overflow:hidden; }
 .sigfield-tabs .chip-btn{ display:inline-flex; align-items:center; gap:7px; }
 .sigfield-preview{ border:var(--border-line); border-radius:var(--radius-sm); background:#fff; padding:10px; min-height:96px; display:flex; align-items:center; justify-content:center; }
 .sigfield-img{ max-width:100%; height:auto; display:block; }
-
-/* The survey rendered inline inside the registration wizard (rather than as the
-   full-screen overlay used at check-out). */
-.survey-inline .survey-lede{ margin-bottom:20px; }
-.survey-inline .survey-section{ margin-bottom:24px; }
-.survey-inline .survey-q{ padding:14px 16px; }
 
 /* Supplies — the ledger view. */
 .inv-count{ font-variant-numeric:tabular-nums; font-size:var(--fs-base); }

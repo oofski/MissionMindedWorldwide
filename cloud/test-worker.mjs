@@ -5,6 +5,9 @@
 // Run: node test-worker.mjs   (exits non-zero on any failed check)
 
 import worker from './worker.js';
+// The walk-in form's own definition of a complete medical history. The online
+// form must store exactly what it would, so the checks below compare the two.
+import { normalizeMedical, INTAKE_CONDITIONS } from '../src/renderer/js/medicalHistory.js';
 
 const CLINIC_KEY = 'super-secret-clinic-key';
 
@@ -159,7 +162,7 @@ async function main() {
       h.data &&
       h.data.ok === true &&
       h.data.service === 'mmw-sync' &&
-      h.data.version === '1.6.6' &&
+      h.data.version === '1.7.0' &&
       h.data.seq === true &&
       typeof h.data.time === 'string'
   );
@@ -402,12 +405,19 @@ async function main() {
   // --- Pre-registration (public /checkin) — event 'evt-1' was pushed above ---
   // v1.6.2 requires an emergency contact and an answer to every history
   // question, so every submission below carries them unless it is the one
-  // deliberately leaving something out.
+  // deliberately leaving something out. v0.0.15: the history is Dr. Trinh's
+  // form — 25 conditions answered, the allergy gate, medications (or none),
+  // major surgery, "Do you smoke?" — and Step 3 is his eight questions.
+  const NO_CONDITIONS = Object.fromEntries(INTAKE_CONDITIONS.map((k) => [k, k === 'pregnant' ? 'na' : 'no']));
   const REQ = {
+    form_version: 2,
+    // Required online since v0.0.15, as it always was at the kiosk.
+    phone: '5550002222',
     emergency_name: 'Kin Contact', emergency_phone: '5550001111',
-    under_treatment: 'no', hospitalized: 'no', tobacco: 'no', pregnancy: 'no',
-    gum_bleeding: 'no', sores: 'no', jaw_injury: 'no', grinding: 'no',
-    post_extraction_bleeding: 'no', ortho: 'no',
+    under_treatment: 'no', condition_answers: NO_CONDITIONS, medications_none: true,
+    major_surgery: 'no', tobacco: 'no', allergy_status: 'nkda',
+    pain_cold: 'no', pain_hot: 'no', pain_eating: 'no', toothache_night: 'no',
+    pain_touch: 'no', grinding_night: 'no', jaw_pain_waking: 'no', sores: 'no',
     // Required since the last-dental-visit question became a closed dropdown.
     prior_dentist: 'about_2_years',
     // Required since the online form started asking which clinics to queue for.
@@ -429,9 +439,13 @@ async function main() {
     body: { ...REQ,
       first_name: 'Pre', last_name: 'Reg', dob: '1990-01-02', gender: 'female', phone: '(555) 123-4567', language: 'es',
       address: '1 Main St', city: 'Sandy', state: 'OR', emergency_name: 'Kin', emergency_phone: '5550001111',
-      visit_type: 'filling', allergies: ['penicillin', 'other'], allergies_other: 'shellfish',
-      conditions: ['diabetes', 'pain_mgmt'], medications: ['Metformin', 'Lisinopril'],
-      under_treatment: 'yes', tobacco: 'no', gum_bleeding: 'yes', prior_dentist: 'about_2_years',
+      visit_type: 'filling', allergy_status: 'yes', allergies: ['penicillin', 'other', 'made_up'], allergies_other: 'shellfish',
+      condition_answers: { ...NO_CONDITIONS, diabetes: 'yes', bleeding: 'unsure' }, conditions_other: 'Gout',
+      medications_none: false, med_keys: ['metformin', 'warfarin', 'not_a_drug'], medications_other: ['Fish oil'],
+      major_surgery: 'yes', surgery_sites: ['knee', 'spleen'],
+      under_treatment: 'yes', tobacco: 'no', pain_cold: 'yes', prior_dentist: 'about_2_years',
+      // A retired Step 3 question posted straight to the endpoint.
+      gum_bleeding: 'yes',
       consent_agree: true, signer_name: 'Pre Reg', relationship: 'Self', signature_png: 'data:image/png;base64,AAAA',
     },
   });
@@ -446,8 +460,37 @@ async function main() {
   const dh = pd ? JSON.parse(pd.dental_history) : null;
   check('pre-registration maps ALL the in-person options natively (parity)',
     !!demo && demo.preregistered === true && demo.address === '1 Main St' && demo.city === 'Sandy' && demo.state === 'OR' && demo.emergency_name === 'Kin' && pd.phone === '5551234567' &&
-    !!mh && mh.allergies.includes('penicillin') && mh.allergies_other === 'shellfish' && mh.conditions.includes('diabetes') && mh.conditions.includes('pain_mgmt') && mh.medications.length === 2 && mh.under_treatment === 'yes' && mh.tobacco === 'no' &&
-    !!dh && dh.visit_type === 'filling' && dh.gum_bleeding === 'yes' && dh.prior_dentist === 'about_2_years');
+    !!mh && mh.history_version === 2 && mh.allergy_status === 'yes' && mh.allergies.includes('penicillin') && mh.allergies_other === 'shellfish' &&
+    mh.condition_answers.diabetes === 'yes' && mh.condition_answers.bleeding === 'unsure' && mh.under_treatment === 'yes' && mh.tobacco === 'no' &&
+    !!dh && dh.visit_type === 'filling' && dh.pain_cold === 'yes' && dh.prior_dentist === 'about_2_years');
+  // The walk-in form's own normaliser, run over the same answers, must produce
+  // the very history the online form stored — derived fields and all. This is
+  // what makes the blood-thinner rules, the report counts and the flags read a
+  // pre-registration exactly as they read a walk-in.
+  {
+    const expected = normalizeMedical({
+      under_treatment: 'yes', condition_answers: { ...NO_CONDITIONS, diabetes: 'yes', bleeding: 'unsure' }, conditions_other: 'Gout',
+      medications: [{ key: 'metformin', name: 'Metformin (Glucophage)' }, { key: 'warfarin', name: 'Warfarin (Coumadin)' }, { key: 'other', name: 'Fish oil' }],
+      major_surgery: 'yes', surgery_sites: ['knee'], tobacco: 'no',
+      allergy_status: 'yes', allergies: ['penicillin', 'other'], allergies_other: 'shellfish',
+    });
+    // Key order is not meaning, so both sides are compared with their keys
+    // sorted at EVERY depth. (A replacer array would not do: it filters nested
+    // keys too, and condition_answers and each medication row compared as {}.)
+    const stable = (v) => (Array.isArray(v) ? v.map(stable)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v);
+    const sorted = (o) => JSON.stringify(stable(o));
+    check('the comparison below sees the answers and the medications themselves',
+      sorted({ a: { x: 1 }, m: [{ key: 'warfarin' }] }) !== sorted({ a: { x: 2 }, m: [{ key: 'aspirin' }] }));
+    check('the online history is exactly what the walk-in form would store for the same answers', !!mh && sorted(mh) === sorted(expected));
+    check('derived for the report and the flags: conditions = the Yes answers plus the typed one',
+      !!mh && JSON.stringify(mh.conditions) === JSON.stringify(['diabetes', 'other']) && mh.conditions_other === 'Gout');
+    check('checklist medications are stored by key with the canonical name the blood-thinner rules recognise',
+      !!mh && mh.medications.some((x) => x.key === 'warfarin' && x.name === 'Warfarin (Coumadin)') && mh.medications.some((x) => x.key === 'other' && x.name === 'Fish oil'));
+    check('only keys the form offers are stored (an invented allergy, drug or body site is dropped)',
+      !!mh && !mh.allergies.includes('made_up') && !mh.medications.some((x) => x.key === 'not_a_drug') && JSON.stringify(mh.surgery_sites) === '["knee"]');
+    check('a retired Step 3 answer posted straight to the endpoint is not stored', !!dh && dh.gum_bleeding === undefined);
+  }
   // The free-text reason is gone from BOTH forms. If the online one kept posting
   // it, pre-registrations would be the only records carrying it and the report
   // would show a split nobody could see.
@@ -458,7 +501,8 @@ async function main() {
       city: 'Sandy', state: 'OR', visit_type: 'cleaning', prior_dentist: 'a while ago',
       consent_agree: true, signer_name: 'Junk Dent', signature_png: 'data:image/png;base64,AAAA' },
   });
-  check('C2: a free-text last-dental-visit posted straight to the endpoint is rejected', junkDent.status === 400);
+  check('C2: a free-text last-dental-visit posted straight to the endpoint is rejected, naming the question',
+    junkDent.status === 400 && /When did you last see a dentist\?/.test(junkDent.data.error));
 
   // The general consent must be written as a consent row bound to that patient.
   const gConsent = Array.from(env.DB._store.values()).find((r) => r.entity === 'consent' && r.patient_uid === stored.uid && JSON.parse(r.data).type === 'general');
@@ -545,8 +589,13 @@ async function main() {
   // The GET form now carries the FULL option set + consent text.
   const fullForm = await getText('/checkin/evt-1');
   check('the pre-registration form carries the full check-in options + consent to sign',
-    /Erythromycin/.test(fullForm.text) && /Rheumatic fever/.test(fullForm.text) && /Weight management program/.test(fullForm.text) &&
+    /Azithromycin \/ Erythromycin \/ Clarithromycin/.test(fullForm.text) && /Osteoporosis \/ Bone Disease/.test(fullForm.text) && /Sleep Apnea/.test(fullForm.text) &&
+    /Warfarin \(Coumadin\)/.test(fullForm.text) && /name="surgery_site" value="knee"/.test(fullForm.text) &&
     /Hold Harmless/.test(fullForm.text) && /Consent for Oral Surgery/.test(fullForm.text) && /id="gsig"/.test(fullForm.text));
+  check('the 25 conditions are each a dropdown with a namespaced id (kidney and liver are surgery sites too)',
+    (fullForm.text.match(/<select id="cond_[a-z_]+">/g) || []).length === 25 && !/id="kidney"|id="liver"/.test(fullForm.text));
+  check('the retired conditions are no longer asked online',
+    !/Rheumatic fever|Weight management program|Heart murmur/.test(fullForm.text));
   // The question wording must match the app's in-person check-in EXACTLY.
   check('the pre-registration questions use the app\'s exact wording',
     fullForm.text.includes('What do you need today?') &&
@@ -554,11 +603,16 @@ async function main() {
     fullForm.text.includes('Within the past 6 months') &&    // C2: the dropdown, not a text box
     fullForm.text.includes('Never') &&
     fullForm.text.includes('Are you currently under a doctor’s care?') &&
-    fullForm.text.includes('Hospitalized in the last 2 years?') &&
+    fullForm.text.includes('Major surgery within the past 6 months?') &&
+    fullForm.text.includes('Do you smoke?') &&
+    fullForm.text.includes('Do you have an allergy or serious reaction to any medication?') &&
+    fullForm.text.includes('No known drug allergies (NKDA)') &&
     fullForm.text.includes('When did you last see a dentist?') &&
-    fullForm.text.includes('History of bleeding after a tooth was pulled?') &&
+    fullForm.text.includes('Does the toothache wake you up at night?') &&
+    !fullForm.text.includes('Hospitalized in the last 2 years?') &&
+    !fullForm.text.includes('History of bleeding after a tooth was pulled?') &&
     fullForm.text.includes('Extraction — no pain') &&
-    fullForm.text.includes('Select all that apply') &&
+    fullForm.text.includes('Check all that apply') &&
     fullForm.text.includes('I have read and understand the above, and I consent.'));
 
   // City + State fields are collected on the pre-registration form (Sandy Oregon grant reporting).
@@ -580,22 +634,27 @@ async function main() {
     /<datalist id="medlist">/.test(fullForm.text) &&
     /value="Atorvastatin"/.test(fullForm.text) && /value="Metformin"/.test(fullForm.text) &&
     (fullForm.text.match(/<option value="[^"]*"><\/option>/g) || []).length >= 100);
-  // Every anaesthetic and antibiotic the clinic carries is offerable as an allergy.
-  check('the form offers the clinic drug list as allergies',
-    /Mepivacaine/.test(fullForm.text) && /Bupivacaine/.test(fullForm.text) && /Prilocaine/.test(fullForm.text) &&
-    /Clindamycin/.test(fullForm.text) && /Azithromycin/.test(fullForm.text) && /Amoxicillin \+ clavulanate/.test(fullForm.text));
+  // Dr. Trinh's allergy list, and none of the retired items.
+  check('the form offers Dr. Trinh\'s allergy list',
+    /name="allergy" value="sulfa">Sulfa antibiotics/.test(fullForm.text) && /Cephalosporins/.test(fullForm.text) &&
+    /Lidocaine \/ local anesthetic/.test(fullForm.text) && /General anesthetic/.test(fullForm.text) && /Clindamycin/.test(fullForm.text) &&
+    (fullForm.text.match(/name="allergy" value=/g) || []).length === 25);
+  check('the retired allergies (Mepivacaine, Articaine…) are no longer offered online',
+    !/Mepivacaine|Articaine|Bupivacaine|Prilocaine|Amoxicillin \+ clavulanate/.test(fullForm.text));
 
   // The two forms must agree about what a COMPLETE medical history is. The
   // walk-in form gives pregnancy a third answer, because making a man or a child
   // tap "No" makes their answer indistinguishable from the clinically loaded No
   // the dentist reads. This form has to accept the same, and only on that
   // question.
-  check('the form offers "Not applicable" on the pregnancy question only',
-    /id="pregnancy"[\s\S]{0,240}?value="na"/.test(fullForm.text) &&
-    !/id="tobacco"[\s\S]{0,240}?value="na"/.test(fullForm.text));
+  const selectBody = (id) => ((fullForm.text.match(new RegExp('<select id="' + id + '">([\\s\\S]*?)</select>')) || [])[1] || '');
+  check('the form offers "Not applicable" on the pregnancy row only',
+    /value="na"/.test(selectBody('cond_pregnant')) && !/value="na"/.test(selectBody('cond_autoimmune')) &&
+    !/value="na"/.test(selectBody('tobacco')) && /value="unsure"/.test(selectBody('cond_diabetes')));
   const naPreg = await call(env, 'POST', '/checkin/evt-1', {
     body: { ...REQ, first_name: 'Not', last_name: 'Applicable', dob: '1970-01-02', gender: 'male',
-      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning', pregnancy: 'na',
+      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning',
+      condition_answers: { ...NO_CONDITIONS, pregnant: 'na' },
       consent_agree: true, signer_name: 'Not Applicable', signature_png: 'data:image/png;base64,AAAA' },
   });
   check('a pregnancy answer of "Not applicable" is accepted, not refused as unanswered', naPreg.status === 200);
@@ -603,13 +662,22 @@ async function main() {
     .filter((r) => r.entity === 'patient').map((r) => JSON.parse(r.data))
     .find((x) => x.last_name === 'Applicable');
   check('and it is stored as "na", the same code the walk-in form uses',
-    !!naRow && JSON.parse(naRow.medical_history).pregnancy === 'na');
+    !!naRow && JSON.parse(naRow.medical_history).condition_answers.pregnant === 'na');
   const junkPreg = await call(env, 'POST', '/checkin/evt-1', {
     body: { ...REQ, first_name: 'Junk', last_name: 'Preg', dob: '1970-01-02', gender: 'male',
-      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning', pregnancy: 'maybe',
+      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning',
+      condition_answers: { ...NO_CONDITIONS, pregnant: 'maybe' },
       consent_agree: true, signer_name: 'Junk Preg', signature_png: 'data:image/png;base64,AAAA' },
   });
-  check('a value that is not yes/no/na is still refused', junkPreg.status === 400);
+  check('a value that is not yes/no/unsure/na is still refused', junkPreg.status === 400);
+  const naElsewhere = await call(env, 'POST', '/checkin/evt-1', {
+    body: { ...REQ, first_name: 'Na', last_name: 'Diabetes', dob: '1970-01-02', gender: 'male',
+      phone: '5551234567', city: 'Sandy', state: 'OR', visit_type: 'cleaning',
+      condition_answers: { ...NO_CONDITIONS, diabetes: 'na' },
+      consent_agree: true, signer_name: 'Na Diabetes', signature_png: 'data:image/png;base64,AAAA' },
+  });
+  check('"Not applicable" is refused on any row but pregnancy, naming the question',
+    naElsewhere.status === 400 && /Diabetes – Type 1 or Type 2/.test(naElsewhere.data.error));
 
   // The English form offers a link to switch to Spanish.
   check('the English form links to the Spanish version',
@@ -716,33 +784,81 @@ async function main() {
     const noKinPhone = await post({ ...full, emergency_phone: '' });
     check('POST /checkin without an emergency contact phone -> 400',
       noKinPhone.status === 400 && /emergency contact phone/i.test(noKinPhone.data.error));
+    // v0.0.15: the phone number is required online, as it always was at the
+    // kiosk — refused by name, in the kiosk's order (after City and State).
+    const noPhone = await post({ ...full, phone: '' });
+    check('POST /checkin without a phone number -> 400, naming it (required at the kiosk, so here)',
+      noPhone.status === 400 && /phone number/i.test(noPhone.data.error) && !/emergency/i.test(noPhone.data.error));
+    const noPhoneEs = await post({ ...full, language: 'es', phone: '(---)' });
+    check('... in Spanish, and punctuation alone is not a phone number',
+      noPhoneEs.status === 400 && /número de teléfono/.test(noPhoneEs.data.error));
     const noKinEs = await post({ ...full, language: 'es', emergency_name: '' });
     check('POST /checkin (es) without an emergency contact -> Spanish 400',
       noKinEs.status === 400 && /contacto de emergencia/i.test(noKinEs.data.error));
 
-    // A blank history answer is not "no" — it has to be asked.
+    // A blank history answer is not "no" — it has to be asked. Each refusal
+    // names the question, as the walk-in form's does.
     const noMed = await post({ ...full, tobacco: '' });
-    check('POST /checkin with an unanswered medical question -> 400',
-      noMed.status === 400 && /every medical and dental history question/i.test(noMed.data.error));
-    const noDent = await post({ ...full, grinding: '' });
-    check('POST /checkin with an unanswered dental question -> 400',
-      noDent.status === 400 && /every medical and dental history question/i.test(noDent.data.error));
-    const noMedEs = await post({ ...full, language: 'es', hospitalized: '' });
-    check('POST /checkin (es) with an unanswered question -> Spanish 400',
-      noMedEs.status === 400 && /historial médico y dental/i.test(noMedEs.data.error));
+    check('POST /checkin with an unanswered medical question -> 400, naming it',
+      noMed.status === 400 && /every medical and dental history question/i.test(noMed.data.error) && /Do you smoke\?/.test(noMed.data.error));
+    const noDent = await post({ ...full, pain_eating: '' });
+    check('POST /checkin with an unanswered dental question -> 400, naming it',
+      noDent.status === 400 && /every medical and dental history question/i.test(noDent.data.error) && /Any pain when eating\?/.test(noDent.data.error));
+    const noMedEs = await post({ ...full, language: 'es', major_surgery: '' });
+    check('POST /checkin (es) with an unanswered question -> Spanish 400, naming it',
+      noMedEs.status === 400 && /historial médico y dental/i.test(noMedEs.data.error) && /Cirugía mayor/.test(noMedEs.data.error));
+    // v0.0.15 closes the gap: allergies, conditions and medications were
+    // optional online while the walk-in form required them.
+    const needs = async (body, re, name) => { const r = await post(body); check(name, r.status === 400 && re.test(r.data.error)); };
+    const noCond = { ...NO_CONDITIONS }; delete noCond.stroke;
+    await needs({ ...full, condition_answers: noCond }, /Stroke \/ TIA/, 'a condition left unanswered is refused by name');
+    await needs({ ...full, allergy_status: '' }, /allergy or serious reaction/, 'the allergy question is required online');
+    await needs({ ...full, allergy_status: 'yes', allergies: [] }, /Medication allergies/, 'an allergy answer of Yes requires one ticked');
+    await needs({ ...full, allergy_status: 'yes', allergies: ['other'], allergies_other: '' }, /Other allergy/, 'an Other allergy requires its name');
+    await needs({ ...full, medications_none: false }, /Current medications/, 'medications are required online (a medication, or "No medications")');
+    await needs({ ...full, major_surgery: 'yes', surgery_sites: [] }, /If so, where\?/, 'a Yes to major surgery requires where');
+    await needs({ ...full, visit_type: '' }, /what you need today/i, 'what the patient needs today is required online, as at the kiosk');
+    const unsureOk = await post({ ...full, first_name: 'Unsure', last_name: 'Allergy', allergy_status: 'unsure' });
+    const unsureRow = Array.from(env.DB._store.values()).filter((r) => r.entity === 'patient').map((r) => JSON.parse(r.data)).find((x) => x.last_name === 'Allergy');
+    check('an allergy answer of Unsure is accepted and stored as unsure, never as "none"',
+      unsureOk.status === 200 && !!unsureRow && JSON.parse(unsureRow.medical_history).allergy_status === 'unsure' &&
+      JSON.stringify(JSON.parse(unsureRow.medical_history).allergies) === '[]' && !JSON.parse(unsureRow.medical_history).allergies_none);
 
     // The form itself marks them required and blocks submit.
     const f = await getText('/checkin/evt-1');
+    check('the form marks the phone number required and blocks submit without one',
+      /Phone number <span class="req">\*<\/span><\/label><input type="tel" id="phone"/.test(f.text) && f.text.includes('T.errPhone'));
+    check('the page says which form it is, from the one constant the server checks', f.text.includes('var payload={form_version:2,'));
     check('the form marks the emergency contact required',
       /id="emergency_name"/.test(f.text) && /Emergency contact name <span class="req">\*<\/span>/.test(f.text) &&
       f.text.includes("if(!val('emergency_name')"));
     check('the form marks every history question required and blocks submit',
-      /Do you use tobacco\? <span class="req">\*<\/span>/.test(f.text) &&
-      /Do your gums bleed\? <span class="req">\*<\/span>/.test(f.text) &&
-      /var MEDQ=/.test(f.text) && /var DENTQ=/.test(f.text) && f.text.includes('T.errMedical'));
+      /Do you smoke\? <span class="req">\*<\/span>/.test(f.text) &&
+      /Any pain when drinking cold water\? <span class="req">\*<\/span>/.test(f.text) &&
+      /var CONDQ=/.test(f.text) && /var DENTQ=/.test(f.text) && f.text.includes('function missingHistory') && f.text.includes('T.errMedical'));
+    // The page posts Step 3 from the same list it renders and the server checks,
+    // so the three can never name different questions.
+    check('the Step 3 answers are posted from the list the page renders, not a hand-kept copy',
+      f.text.includes('DENTQ.forEach(function(k){payload[k]=val(k);})') && !/gum_bleeding|post_extraction_bleeding/.test(f.text));
+    // A page opened before v0.0.15 posts the old shape; it is told to reload.
+    const oldPage = await post({ first_name: 'Old', last_name: 'Page', dob: '1990-01-01', gender: 'female', city: 'Sandy', state: 'OR',
+      emergency_name: 'K', emergency_phone: '5550001111', services: ['dental'], visit_type: 'cleaning',
+      under_treatment: 'no', hospitalized: 'no', tobacco: 'no', pregnancy: 'no', allergies: ['none'], conditions: ['none'], medications_none: true,
+      gum_bleeding: 'no', sores: 'no', jaw_injury: 'no', grinding: 'no', post_extraction_bleeding: 'no', ortho: 'no', prior_dentist: 'never',
+      survey: { first_time: 'yes' }, survey_declined: false,
+      consent_agree: true, signer_name: 'Old Page', signature_png: 'data:image/png;base64,AAAA' });
+    check('a page opened before v0.0.15 is refused with "reload the page", not a list of questions it never showed',
+      oldPage.status === 400 && /reload the page/i.test(oldPage.data.error));
+    const oldPageEs = await post({ first_name: 'Vieja', last_name: 'Pagina', language: 'es', hospitalized: 'no', gum_bleeding: 'no' });
+    check('... in Spanish too', oldPageEs.status === 400 && /cargar la página/i.test(oldPageEs.data.error));
+    // From v0.0.15 a page says which form it is; one that is not this form is
+    // told to reload however complete its answers look.
+    const otherForm = await post({ ...full, first_name: 'Other', last_name: 'Version', form_version: 3 });
+    check('a page that says it is a different form is told to reload the page',
+      otherForm.status === 400 && /reload the page/i.test(otherForm.data.error));
   }
 
-  // --- Online parity: services, referral and the registration survey ---
+  // --- Online parity: services, referral, no survey, the City list ---
   // Everything the online form fails to ask has to be asked again at the desk,
   // which is the whole point of pre-registering.
   {
@@ -798,74 +914,80 @@ async function main() {
     check('a junk referral posted straight to the endpoint is rejected (never stored as prose)',
       refJunk.status === 200 && (demoOf('Dream') || {}).referral === '');
 
-    // --- GAP 1: the 22 end-of-registration survey questions ---
-    check('the online form asks all 22 end-of-registration survey questions',
-      (en.text.match(/class="svq"/g) || []).length === 22 &&
-      ['About your visit', 'Your household', 'Work and income', 'Insurance and access to care'].every((t) => en.text.includes(t)));
-    check('the survey questions carry the app\'s exact wording, in English',
-      en.text.includes('Is this your first time receiving services from a free community health clinic?') &&
-      en.text.includes('How many people live in your household, including yourself?') &&
-      en.text.includes('What is your current employment status?') &&
-      en.text.includes('In the past 12 months, have you delayed or avoided healthcare because of cost?') &&
-      en.text.includes('Prefer not to answer') && en.text.includes('Select all that apply.'));
-    check('the survey questions carry the app\'s exact wording, in Spanish',
-      (es.text.match(/class="svq"/g) || []).length === 22 &&
-      es.text.includes('Sobre su visita') && es.text.includes('Trabajo e ingresos') && es.text.includes('Seguro y acceso a la atención') &&
-      es.text.includes('¿Es esta la primera vez que recibe servicios en una clínica comunitaria gratuita?') &&
-      es.text.includes('¿Cuál es su situación laboral actual?') &&
-      es.text.includes('Prefiero no responder') && es.text.includes('Seleccione todas las que correspondan.'));
-    check('every survey question is marked optional and the whole survey is skippable',
-      /class="opt">Optional</.test(en.text) && /class="opt">Opcional</.test(es.text) &&
-      /id="survey_skip"/.test(en.text) && en.text.includes('I would rather not answer these') &&
-      es.text.includes('Prefiero no responder estas preguntas'));
-    // Select-all questions are checkboxes, one-choice questions radio groups —
-    // choice-only either way, so the blob carries no free text.
-    check('the survey offers choice-only controls (no free text)',
-      /name="sv_household_size" value="6_or_more"/.test(en.text) &&
-      /type="checkbox" name="svm_assistance" value="snap"/.test(en.text) &&
-      /type="radio" name="sv_first_time"/.test(en.text));
+    // --- v0.0.15: the survey moved to check-out ("Step 5 — remove entire step") ---
+    // Registration asks no survey question, online or at the kiosk: the whole
+    // grant survey is asked in one sitting at check-out, which files the row.
+    check('the online form no longer carries the survey card, its copy or its script',
+      !/class="svq"/.test(en.text) && !/id="survey_skip"/.test(en.text) && !/var SVQ=/.test(en.text) &&
+      !en.text.includes('skipBox') && !en.text.includes('function survey()') && !en.text.includes('A few last questions') &&
+      !/class="svq"/.test(es.text) && !es.text.includes('Unas últimas preguntas'));
+    const withSurvey = await post({ ...base, first_name: 'Survey', last_name: 'Posted',
+      survey: { first_time: 'yes', household_size: '4' }, survey_declined: true });
+    check('survey answers posted by an old cached page are ignored — the registration still succeeds',
+      withSurvey.status === 200 && !!patientNamed('Posted'));
+    check('a pre-registration files NO survey row (check-out creates it)',
+      !surveyOf('Posted') && !Array.from(env.DB._store.values()).some((r) => r.entity === 'survey'));
+    const postedP = patientNamed('Posted');
+    check('the patient and its consent are still filed',
+      !!postedP && Array.from(env.DB._store.values()).some((r) => r.entity === 'consent' && r.patient_uid === postedP.uid));
 
-    const answered = await post({ ...base, first_name: 'Survey', last_name: 'Answered',
-      survey: { first_time: 'yes', household_size: '4', income: '0_15k', assistance: ['snap', 'medicaid'], food_insecurity: 'no' } });
-    const sv = surveyOf('Answered');
-    check('a pre-registration survey is stored as a survey row bound to that patient',
-      answered.status === 200 && !!sv && sv.row.event_uid === 'evt-1' && /@prereg-s$/.test(String(sv.row.updated_at)) && sv.row.deleted === 0);
-    check('the survey row carries the answers the patient gave',
-      !!sv && JSON.parse(sv.data.answers).household_size === '4' && JSON.parse(sv.data.answers).first_time === 'yes' &&
-      JSON.stringify(JSON.parse(sv.data.answers).assistance) === JSON.stringify(['snap', 'medicaid']));
-    // The registration half is done; check-out still has its twelve to ask.
-    check('the survey row records the registration half and leaves check-out\'s open',
-      !!sv && sv.data.registration_status === 'completed' && sv.data.exit_status === null &&
-      sv.data.declined === 0 && sv.data.version === 'mmw-exit-v1');
-    check('the survey row carries exactly the columns the app syncs',
-      !!sv && JSON.stringify(Object.keys(sv.data)) === JSON.stringify(
-        ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status']));
+    // --- v0.0.15: City from the event's own list ---
+    // The admin sets the towns on the event; the list travels to the server in
+    // the event row, and the online form offers exactly the kiosk's list.
+    await call(env, 'POST', '/v1/push', {
+      auth: CLINIC_KEY,
+      body: { device_id: 'd1', rows: [{ entity: 'event', uid: 'evt-cities', event_uid: null, updated_at: '2026-08-05T00:00:00.000Z',
+        data: { name: 'Towns Clinic', active: 1, cities: JSON.stringify(['Sandy', 'Boring', ' sandy ', 'Other', '']) } }] },
+    });
+    const cityForm = await getText('/checkin/evt-cities');
+    check('an event with a city list serves City as a dropdown of those towns, plus Other',
+      /<select id="city"[^>]*>/.test(cityForm.text) && /<option value="Sandy">Sandy<\/option>/.test(cityForm.text) &&
+      /<option value="Boring">Boring<\/option>/.test(cityForm.text) && /<option value="other">Other<\/option>/.test(cityForm.text) &&
+      (cityForm.text.match(/<option value="Sandy">/g) || []).length === 1 && /id="city_other"/.test(cityForm.text) &&
+      /City <span class="req">\*<\/span>/.test(cityForm.text) && cityForm.text.includes("if(!val('city'))"));
+    check('without a list, City stays the text box it always was', /<input type="text" id="city"/.test(en.text) && !/id="city_other"/.test(en.text));
+    const cityPost = (body) => call(env, 'POST', '/checkin/evt-cities', { body: { ...base, ...body } });
+    const cityOf = (last) => { const r = Array.from(env.DB._store.values()).find((x) => x.entity === 'patient' && x.event_uid === 'evt-cities' && JSON.parse(x.data).last_name === last); return r ? JSON.parse(JSON.parse(r.data).demographics).city : null; };
+    await cityPost({ first_name: 'Listed', last_name: 'Town', city: 'Boring' });
+    check('a listed town is stored by its name', cityOf('Town') === 'Boring');
+    await cityPost({ first_name: 'Typed', last_name: 'Elsewhere', city: 'other', city_other: '  Estacada ' });
+    check('"Other" stores the typed town in the same field (never the word "other")', cityOf('Elsewhere') === 'Estacada');
+    await cityPost({ first_name: 'Typed', last_name: 'Listed', city: 'other', city_other: 'sandy' });
+    check('a typed town that is really a listed one is stored in the listed spelling', cityOf('Listed') === 'Sandy');
+    await cityPost({ first_name: 'Direct', last_name: 'Cased', city: 'BORING' });
+    check('a differently-cased listed town posted straight to the endpoint is canonicalised', cityOf('Cased') === 'Boring');
+    // The admin cleared the list while a patient had the page open: "Other"
+    // with a typed town still stores the town, never the word "other".
+    const staleOther = await post({ ...base, first_name: 'Stale', last_name: 'Page', city: 'other', city_other: 'Gresham' });
+    check('"Other" posted to an event whose list was since cleared stores the typed town',
+      staleOther.status === 200 && (demoOf('Page') || {}).city === 'Gresham');
+    const typedOther = await post({ ...base, first_name: 'Typed', last_name: 'Word', city: 'other' });
+    check('with no list, whatever is typed in the City box is kept, as at the kiosk',
+      typedOther.status === 200 && (demoOf('Word') || {}).city === 'other');
+    const blankOther = await cityPost({ first_name: 'Blank', last_name: 'Other', city: 'other', city_other: '' });
+    check('"Other" with nothing typed is refused as a missing city', blankOther.status === 400 && /city/i.test(blankOther.data.error));
+    const longTown = '  Far   Away ' + 'x'.repeat(100);
+    await cityPost({ first_name: 'Long', last_name: 'Townname', city: 'other', city_other: longTown });
+    check('a typed town is stored cleaned as the kiosk cleans it (one space, trimmed, 80 characters)',
+      cityOf('Townname') === ('Far Away ' + 'x'.repeat(100)).slice(0, 80));
+    check('the online City boxes stop at 80 characters, as the kiosk\'s do',
+      /id="city_other" maxlength="80"/.test(cityForm.text) && /id="city" autocomplete="address-level2" maxlength="80"/.test(en.text));
 
-    const junkSurvey = await post({ ...base, first_name: 'Survey', last_name: 'Nonsense',
-      survey: { household_size: '400', made_up_question: 'yes', income: '0_15k', assistance: ['snap', 'bitcoin'] } });
-    const jsv = surveyOf('Nonsense');
-    check('a junk survey answer posted straight to the endpoint is rejected (never stored)',
-      junkSurvey.status === 200 && !!jsv && (() => { const a = JSON.parse(jsv.data.answers);
-        return a.household_size === undefined && a.made_up_question === undefined && a.income === '0_15k' &&
-          JSON.stringify(a.assistance) === JSON.stringify(['snap']); })());
-    const exclusive = await post({ ...base, first_name: 'Survey', last_name: 'Exclusive',
-      survey: { assistance: ['snap', 'none'], access_barriers: ['cost', 'pna'] } });
-    check('"None" and "Prefer not to answer" replace the list rather than joining it',
-      exclusive.status === 200 && (() => { const a = JSON.parse(surveyOf('Exclusive').data.answers);
-        return JSON.stringify(a.assistance) === JSON.stringify(['none']) && JSON.stringify(a.access_barriers) === JSON.stringify(['pna']); })());
-
-    const skipped = await post({ ...base, first_name: 'Survey', last_name: 'Skipped', survey: {}, survey_declined: true });
-    const ssv = surveyOf('Skipped');
-    check('skipping the survey is recorded as asked-and-declined, not as never-asked',
-      skipped.status === 200 && !!ssv && ssv.data.registration_status === 'declined' &&
-      ssv.data.answers === '{}' && ssv.data.exit_status === null && ssv.data.declined === 0);
-    const bothWays = await post({ ...base, first_name: 'Survey', last_name: 'Both', survey: { first_time: 'no' }, survey_declined: true });
-    check('answering anything overrides a skip, so the record cannot say both',
-      bothWays.status === 200 && surveyOf('Both').data.registration_status === 'completed');
-    const untouched = await post({ ...base, first_name: 'Survey', last_name: 'Untouched' });
-    check('a submission that never mentions the survey still files the row check-out needs',
-      untouched.status === 200 && surveyOf('Untouched').data.registration_status === 'completed' &&
-      surveyOf('Untouched').data.exit_status === null);
+    // A laptop still on v0.0.14 knows nothing of the City list: when it saves
+    // the event, its row simply leaves the list out. That must not take the
+    // list off the online form (every station is meant to be upgraded first,
+    // but a straggler must not be able to undo an admin's list).
+    const pushEvent = (stamp, data) => call(env, 'POST', '/v1/push', { auth: CLINIC_KEY,
+      body: { device_id: 'old', rows: [{ entity: 'event', uid: 'evt-cities', event_uid: null, updated_at: stamp, data }] } });
+    const oldBuild = await pushEvent('2026-08-06T00:00:00.000Z', { name: 'Towns Clinic (renamed)', active: 1 });
+    const afterOld = await getText('/checkin/evt-cities');
+    check('an older laptop re-saving the event keeps the City list online, and its own change still lands',
+      oldBuild.data.applied === 1 && /<select id="city"/.test(afterOld.text) && /<option value="Boring">Boring<\/option>/.test(afterOld.text)
+      && afterOld.text.includes('Towns Clinic (renamed)'));
+    await pushEvent('2026-08-07T00:00:00.000Z', { name: 'Towns Clinic', active: 1, cities: null });
+    const cleared = await getText('/checkin/evt-cities');
+    check('an admin clearing the list (an explicit empty value) still clears it online',
+      /<input type="text" id="city"/.test(cleared.text) && !/id="city_other"/.test(cleared.text));
   }
 
   // --- v1.6.1: a deletion is sticky in the cloud ---

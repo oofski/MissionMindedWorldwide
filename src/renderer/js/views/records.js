@@ -1,11 +1,11 @@
 import { el, clear, toast, modal } from '../dom.js';
 import { limitDigits } from '../forms.js';
-import { t, conditions, allergies, referralLabel, languageList, visitTypeLabel, priorDentistLabel } from '../i18n.js';
+import { t, languageList } from '../i18n.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { statusPill } from './dashboard.js';
-import { incompleteBanner, historyAnswer } from '../components/patientHistory.js';
+import { incompleteBanner, demographicsRows, medicalHistoryParts, dentalHistoryParts } from '../components/patientHistory.js';
 import { bloodThinnerText, bpStatus } from '../medFlags.js';
 import { sortedByName } from '../patientSort.js';
 
@@ -103,12 +103,11 @@ export function renderRecords(ctx, params = {}) {
   async function detail(id) {
     ctx.setDetail && ctx.setDetail(true);
     const p = await api.getPatient(id);
-    const condLabels = conditions().filter((c) => (p.medical_history.conditions || []).includes(c.key)).map((c) => ({ label: c.label, flag: c.flag }));
-    const allergyLabels = allergies().filter((a) => (p.medical_history.allergies || []).includes(a.key)).map((a) => a.label);
-    // Include the typed "Other" free-text allergy/condition so it's never hidden.
-    // Typed-in text shows whenever present, ticked or not (see patientHistory.js).
-    if (p.medical_history.allergies_other) allergyLabels.push(p.medical_history.allergies_other);
-    if (p.medical_history.conditions_other) condLabels.push({ label: p.medical_history.conditions_other, flag: false });
+    // The demographic, medical and dental cards are the chart's own
+    // (components/patientHistory.js), so Records cannot show a patient
+    // differently from the screens they were treated on.
+    const med = medicalHistoryParts(p.medical_history);
+    const dent = dentalHistoryParts(p);
 
     const kv = (label, val) => el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, [label]), el('span', { class: 'kv-val' }, [val || '—'])]);
 
@@ -167,45 +166,19 @@ export function renderRecords(ctx, params = {}) {
         el('div', { class: 'col col--wide' }, [
           el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Patient information']),
-            el('div', { class: 'kv-grid' }, [
-              kv('Date of birth', p.dob), kv('Age', p.age != null ? String(p.age) : '—'),
-              kv('Gender', p.gender), kv('Marital status', p.demographics.marital_status),
-              kv('Phone', p.phone), kv('Email', p.email),
-              kv('Address', p.demographics.address), kv('City', p.demographics.city), kv('State', p.demographics.state),
-              kv('Mailing address', p.demographics.mailing_address),
-              kv('Referral', referralDisplay(p.demographics)),
-              kv('Emergency contact', p.demographics.emergency_name), kv('Emergency phone', p.demographics.emergency_phone),
-            ]),
+            el('div', { class: 'kv-grid' }, demographicsRows(p)),
           ]),
           el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Medical history']),
-            el('div', { class: 'kv-grid' }, [
-              kv('Under care', historyAnswer(p.medical_history.under_treatment)), kv('Hospitalized', historyAnswer(p.medical_history.hospitalized)),
-              kv('Tobacco', historyAnswer(p.medical_history.tobacco)), kv('Pregnancy', historyAnswer(p.medical_history.pregnancy)),
-            ]),
+            med.kvGrid,
             el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Vitals']), recVitals(p)]),
             el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Blood thinner']), recThinner(p)]),
-            el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Allergies']),
-              el('div', { class: 'chip-row' }, allergyLabels.length ? allergyLabels.map((a) => el('span', { class: 'pill pill--red' }, [a])) : [el('span', { class: 'muted' }, ['None'])])]),
-            el('div', { class: 'field' }, [el('span', { class: 'field-label' }, ['Conditions']),
-              el('div', { class: 'chip-row' }, condLabels.length ? condLabels.map((c) => el('span', { class: `pill ${c.flag ? 'pill--red' : 'pill--blue'}` }, [c.label])) : [el('span', { class: 'muted' }, ['None'])])]),
-            (p.medical_history.medications || []).length ? el('div', { class: 'field' }, [
-              el('span', { class: 'field-label' }, ['Medications']),
-              el('table', { class: 'data-table data-table--mini' }, [
-                el('thead', {}, [el('tr', {}, ['Medication', 'Dose', 'Reason'].map((h) => el('th', {}, [h])))]),
-                el('tbody', {}, p.medical_history.medications.map((m) => el('tr', {}, [el('td', {}, [m.name]), el('td', {}, [m.dose || '—']), el('td', {}, [m.reason || '—'])]))),
-              ]),
-            ]) : null,
+            ...med.parts,
           ]),
           el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Dental history']),
-            el('div', { class: 'kv-grid' }, [
-              kv('What patient needs', visitTypeLabel(p.dental_history.visit_type)), kv('Reason', (p.triage && p.triage.complaint) || p.dental_history.reason),
-              kv('Last saw a dentist', priorDentistLabel(p.dental_history.prior_dentist)), kv('Gums bleed', p.dental_history.gum_bleeding),
-              kv('Sores / lumps', p.dental_history.sores), kv('Head/neck/jaw injury', p.dental_history.jaw_injury),
-              kv('Grinding / clenching', p.dental_history.grinding), kv('Bleeding after extraction', p.dental_history.post_extraction_bleeding),
-              kv('Orthodontic history', p.dental_history.ortho),
-            ]),
+            dent.kvGrid,
+            dent.legacy,
           ]),
           el('div', { class: 'card' }, [
             el('h3', { class: 'card-title' }, ['Consents & signatures']),
@@ -358,16 +331,6 @@ export function renderRecords(ctx, params = {}) {
 function languageLabel(code) {
   const l = languageList().find((x) => x.code === code);
   return l ? l.native : (code || 'English');
-}
-
-// F4 — render the "how did you hear" referral via its localized label, appending
-// the free-text detail when the stored key is 'other'.
-function referralDisplay(demographics = {}) {
-  const key = demographics.referral;
-  if (!key) return '';
-  const label = referralLabel(key);
-  if (key === 'other' && demographics.referral_other) return `${label}: ${demographics.referral_other}`;
-  return label;
 }
 
 function treatmentSummary(p) {
