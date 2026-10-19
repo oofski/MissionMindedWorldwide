@@ -36,10 +36,12 @@ function init(userDataDir) {
 }
 
 function migrate() {
+  // users.username carries no UNIQUE of its own since v0.0.16: usernames are
+  // unique per event (idx_users_username_event, see scopeUsernamesToEvent).
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      username     TEXT UNIQUE NOT NULL,
+      username     TEXT NOT NULL,
       full_name    TEXT NOT NULL,
       role         TEXT NOT NULL CHECK (role IN ('admin','doctor','triage','emt','checkout','hygienist')),
       salt         TEXT NOT NULL,
@@ -278,6 +280,10 @@ function migrate() {
     addColumn(tbl, 'synced_rev', 'TEXT');   // sig last confirmed synced (== sig means clean)
     addColumn(tbl, 'content_rev', 'TEXT');  // sig that updated_at currently corresponds to
   }
+  // v0.0.16: the same person can be set up for one event and again for the
+  // next, so usernames are unique per event instead of across the database.
+  // After the columns above, because the index is on event_id.
+  scopeUsernamesToEvent();
   // v1.4.6: which event the clinic is CURRENTLY on is synced across laptops via a
   // globally-ordered "selected_at" stamp (the event with the greatest one, that is
   // still turned on, is the active event everywhere). Before this, "Set active" was
@@ -491,42 +497,91 @@ function recreateUsersRoleCheck() {
   if (!row) return;
   const missingRole = ROLES.some((r) => !new RegExp(`'${r}'`).test(row.sql));
   if (!missingRole) return;
-  // Preserve every column that currently exists (incl. event_id on later
-  // upgrades) so no accounts, roles, active flags, or event scoping are lost.
-  const existingCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
-  const rolesSql = ROLES.map((r) => `'${r}'`).join(',');
-  // Carry EVERY column that currently exists — including the cloud-sync bookkeeping
-  // columns (uid/updated_at/synced_rev/content_rev) so a future role addition never
-  // strips a staff account's sync identity (which would re-duplicate them on sync).
-  const carried = ['id', 'username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at', 'event_id', 'uid', 'updated_at', 'synced_rev', 'content_rev']
-    .filter((c) => existingCols.includes(c));
+  rebuildUsersTable();
+}
+
+// Usernames are unique PER EVENT (v0.0.16). A staff account belongs to one
+// event, and the person who worked the Oct 18 clinic is set up again for the
+// Oct 25 one: "ana" twice, two accounts, each with its own password. Until now
+// the column itself was UNIQUE, so the second "ana" was refused outright with
+// "That username already exists." Administrators (event_id NULL) count as one
+// more event of their own, so no two of them share a username; that staff
+// never take an administrator's username is createUser's to refuse, because
+// an index cannot say it.
+const USERNAME_INDEX_SQL = 'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_event ON users(username, IFNULL(event_id, 0))';
+// The column-level UNIQUE every database made before v0.0.16 has
+// ("username TEXT UNIQUE NOT NULL").
+const USERNAME_COLUMN_UNIQUE = /\busername\b[^,]*\bUNIQUE\b/i;
+// Takes the column UNIQUE out once — read from the stored table definition, so
+// a database already rebuilt is never rebuilt again — and makes sure the
+// per-event index is there.
+function scopeUsernamesToEvent() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get();
+  if (!row) return;
+  if (USERNAME_COLUMN_UNIQUE.test(row.sql)) rebuildUsersTable();
+  db.exec(USERNAME_INDEX_SQL);
+}
+
+// The users table as this release defines it. ONE definition, used by every
+// rebuild: when the role rebuild kept a copy of its own, a later role would
+// have quietly put the global username UNIQUE back — and failed outright on a
+// database already holding two events' "ana".
+const USER_COLUMN_DEFS = () => [
+  ['id', 'INTEGER PRIMARY KEY AUTOINCREMENT'],
+  ['username', 'TEXT NOT NULL'],
+  ['full_name', 'TEXT NOT NULL'],
+  ['role', `TEXT NOT NULL CHECK (role IN (${ROLES.map((r) => `'${r}'`).join(',')}))`],
+  ['salt', 'TEXT NOT NULL'],
+  ['hash', 'TEXT NOT NULL'],
+  ['active', 'INTEGER NOT NULL DEFAULT 1'],
+  ['created_at', 'TEXT NOT NULL'],
+  ['event_id', 'INTEGER'],
+  ['uid', 'TEXT'],
+  ['updated_at', 'TEXT'],
+  ['synced_rev', 'TEXT'],
+  ['content_rev', 'TEXT'],
+];
+
+// Recreate the users table in that shape, every account copied verbatim.
+//  - Every column that exists is carried, the sync bookkeeping included
+//    (uid/updated_at/synced_rev/content_rev): an account that lost its uid
+//    would be duplicated by the next sync, and one whose stamps changed would
+//    be pushed again as if just edited. A column some later release adds and
+//    this list does not know is carried with its declared type.
+//  - ids are kept: triage, treatments, consents, supplies, surveys and the
+//    audit log point at users(id).
+//  - The AUTOINCREMENT counter is kept too. Copying the rows resets it to the
+//    highest id still present, and handing out a deleted account's id again
+//    would put a new person's name on whatever that id still points at.
+// foreign_keys is switched OUTSIDE the transaction: SQLite ignores it inside one.
+function rebuildUsersTable() {
+  const defs = USER_COLUMN_DEFS();
+  const known = new Set(defs.map(([n]) => n));
+  const existing = db.prepare('PRAGMA table_info(users)').all();
+  const extra = existing.filter((c) => !known.has(c.name))
+    .map((c) => [c.name, `${c.type || ''}${c.dflt_value != null ? ' DEFAULT ' + c.dflt_value : ''}`]);
+  const carried = [...defs, ...extra].map(([n]) => n).filter((n) => existing.some((c) => c.name === n));
+  const seq = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'users'").get();
   db.pragma('foreign_keys = OFF');
-  const tx = db.transaction(() => {
-    db.exec(`
-      CREATE TABLE users_new (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        username     TEXT UNIQUE NOT NULL,
-        full_name    TEXT NOT NULL,
-        role         TEXT NOT NULL CHECK (role IN (${rolesSql})),
-        salt         TEXT NOT NULL,
-        hash         TEXT NOT NULL,
-        active       INTEGER NOT NULL DEFAULT 1,
-        created_at   TEXT NOT NULL,
-        event_id     INTEGER,
-        uid          TEXT,
-        updated_at   TEXT,
-        synced_rev   TEXT,
-        content_rev  TEXT
+  try {
+    db.transaction(() => {
+      db.exec(`CREATE TABLE users_new (\n  ${[...defs, ...extra].map(([n, d]) => `${n} ${d}`).join(',\n  ')}\n)`);
+      db.exec(
+        `INSERT INTO users_new (${carried.join(', ')}) SELECT ${carried.join(', ')} FROM users;
+         DROP TABLE users;
+         ALTER TABLE users_new RENAME TO users;`
       );
-    `);
-    db.exec(
-      `INSERT INTO users_new (${carried.join(', ')}) SELECT ${carried.join(', ')} FROM users;
-       DROP TABLE users;
-       ALTER TABLE users_new RENAME TO users;`
-    );
-  });
-  tx();
-  db.pragma('foreign_keys = ON');
+      if (seq) {
+        const after = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'users'").get();
+        if (!after) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?)").run(seq.seq);
+        else if (after.seq < seq.seq) db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'users'").run(seq.seq);
+      }
+      // Dropping the old table dropped its indexes with it.
+      db.exec(USERNAME_INDEX_SQL);
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 // Add a column only if it does not already exist.
@@ -598,7 +653,10 @@ const DEFAULT_ADMIN_PASSWORD = 'admin';
  */
 function ensureBootstrapAdmin() {
   if (getSetting('bootstrap_admin_v1') === 'done') return;
-  const row = db.prepare('SELECT * FROM users WHERE username = ?').get(DEFAULT_ADMIN_USERNAME);
+  // The global 'admin' only (event_id NULL). Since v0.0.16 a username is unique
+  // per event, so a staff account some event calls "admin" is somebody else's
+  // and is never promoted or given the shipped password here.
+  const row = db.prepare('SELECT * FROM users WHERE username = ? AND event_id IS NULL ORDER BY id LIMIT 1').get(DEFAULT_ADMIN_USERNAME);
   if (row && row.active && row.role === 'admin' && verifyPassword(DEFAULT_ADMIN_PASSWORD, row.salt, row.hash)) {
     setSetting('bootstrap_admin_v1', 'done');   // already correct (fresh install)
     return;
@@ -786,10 +844,13 @@ function seed() {
   } else {
     // One-time cleanup for databases seeded by an earlier version: disable the
     // old demo doctor/triage accounts if they still use the default password.
+    // Every event's, now that a username can be on more than one: a demo
+    // password is no safer on the second account than on the first.
     for (const [u, pw] of [['doctor', 'doctor'], ['triage', 'triage']]) {
-      const row = db.prepare("SELECT * FROM users WHERE username = ?").get(u);
-      if (row && row.active && verifyPassword(pw, row.salt, row.hash)) {
-        db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(row.id);
+      for (const row of db.prepare('SELECT * FROM users WHERE username = ?').all(u)) {
+        if (row.active && verifyPassword(pw, row.salt, row.hash)) {
+          db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(row.id);
+        }
       }
     }
   }
@@ -819,9 +880,15 @@ function seed() {
   // v1.0.7: adopt any legacy clinical staff (created before event scoping, so
   // event_id IS NULL) into the active event, so "Start fresh for next event"
   // can clear them like any other event staff. Administrators stay global.
+  // v0.0.16: not one whose username the active event already has — that would
+  // be a second "ana" on the one event, which the per-event index refuses, and
+  // the refusal would stop the app from starting. Such an account (one synced
+  // in from a laptop that never adopted it) stays unscoped and is listed with
+  // the administrators.
   const activeId = Number(getSetting('active_event_id'));
   if (activeId) {
-    db.prepare("UPDATE users SET event_id = ? WHERE event_id IS NULL AND role != 'admin'").run(activeId);
+    db.prepare(`UPDATE users SET event_id = ? WHERE event_id IS NULL AND role != 'admin'
+                AND NOT EXISTS (SELECT 1 FROM users o WHERE o.username = users.username AND o.event_id = ?)`).run(activeId, activeId);
   }
 }
 
@@ -881,13 +948,41 @@ function publicUser(row) {
 /*  Auth & users                                                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Sign in. Since v0.0.16 a username can belong to several accounts — one per
+ * event, each with its own password — so every active account with it is a
+ * candidate, tried in this order, and the first whose password matches wins:
+ *   1. an administrator (administrators are global; no staff account may have
+ *      an administrator's username, so normally there is nothing else);
+ *   2. the account for the event this laptop is on (the active event);
+ *   3. any other event's, newest first.
+ * The active event's account wins whenever its password matches, so a person
+ * set up for two clinics with the same password (Add staff → "Keep the same
+ * password") always signs in as this clinic's account, and their work is
+ * recorded under it.
+ * Falling through to (3) is deliberate. Before v0.0.16 a username had one
+ * account, so every account that signs in today is still found: staff set up
+ * for last week's event keep signing in after the clinic moves on, as they
+ * always have. And no account puts the laptop on another event — every
+ * station works the active event whoever signs in — so the account chosen
+ * decides only whose name the work goes under, and it is the one whose
+ * password was typed. That case is not silent: when the active event has an
+ * account by this name and another event's was used, the audit line says so.
+ */
 function login(username, password) {
-  const row = db
-    .prepare('SELECT * FROM users WHERE username = ? AND active = 1')
-    .get(String(username || '').trim().toLowerCase());
+  const u = String(username || '').trim().toLowerCase();
+  const rows = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').all(u);
+  if (!rows.length) return null;
+  const activeId = Number(getSetting('active_event_id')) || null;
+  const rank = (r) => (r.role === 'admin' ? 0 : activeId && r.event_id === activeId ? 1 : 2);
+  rows.sort((a, b) => rank(a) - rank(b) || b.id - a.id);
+  const row = rows.find((r) => verifyPassword(password, r.salt, r.hash));
   if (!row) return null;
-  if (!verifyPassword(password, row.salt, row.hash)) return null;
-  audit(publicUser(row), 'login', 'user', row.id, null);
+  let detail = null;
+  if (rank(row) === 2 && rows.some((r) => rank(r) === 1)) {
+    detail = `Signed in with the account for ${eventName(row.event_id)}; the one for ${eventName(activeId)} has a different password`;
+  }
+  audit(publicUser(row), 'login', 'user', row.id, detail);
   return publicUser(row);
 }
 
@@ -895,12 +990,48 @@ function listUsers() {
   return db.prepare('SELECT * FROM users ORDER BY role, full_name').all().map(publicUser);
 }
 
-function createUser(actor, { username, full_name, role, password, event_id }) {
+// An event's name for a message, never an id.
+function eventName(eventId) {
+  const e = eventId ? db.prepare('SELECT name FROM events WHERE id = ?').get(eventId) : null;
+  return e ? e.name : 'an event that has since been deleted';
+}
+// "Ana Lopez already has the username ana for Sandy Clinic" — who holds a
+// username, said the way an administrator can act on.
+function holderOf(row) {
+  if (row.role === 'admin') return `${row.full_name} already has the username ${row.username} as an administrator`;
+  if (row.event_id == null) return `${row.full_name} already has the username ${row.username}`;
+  return `${row.full_name} already has the username ${row.username} for ${eventName(row.event_id)}`;
+}
+
+/**
+ * Create an account. A staff account belongs to ONE event (the active event
+ * unless another is given), and since v0.0.16 the same username may be used
+ * again on another event: that is a second account with its own password,
+ * which is how somebody who worked one clinic is set up for the next. Refused:
+ *   - a username this event already has (two "ana" on one event could not be
+ *     told apart at sign-in) — the message names who has it;
+ *   - an administrator's username, for staff, and ANY username in use, for a
+ *     new administrator: administrators are global, and sign-in tries them
+ *     first, so sharing a name with one would make the staff account
+ *     unreachable or the administrator ambiguous.
+ * copy_password_from: the id of an existing staff account whose password the
+ * new one should keep (Add staff → "Copy someone from another event"). The salt
+ * and hash are copied here, in main; neither ever goes to the screen, which
+ * sends only that id. Administrators only, like the rest of this.
+ */
+function createUser(actor, { username, full_name, role, password, event_id, copy_password_from }) {
   const u = String(username || '').trim().toLowerCase();
-  if (!u || !full_name || !role || !password) throw new Error('Missing required fields.');
+  let source = null;
+  if (copy_password_from != null && copy_password_from !== '') {
+    requireAdmin(actor, 'copy a password to a new account');
+    source = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(copy_password_from));
+    if (!source) throw new Error('The account to copy the password from no longer exists.');
+    if (source.role === 'admin' || role === 'admin') {
+      throw new Error('Only a staff account\'s password can be kept for another staff account.');
+    }
+  }
+  if (!u || !full_name || !role || (!password && !source)) throw new Error('Missing required fields.');
   if (!ROLES.includes(role)) throw new Error('Invalid role.');
-  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(u);
-  if (exists) throw new Error('That username already exists.');
   // Administrators are always global (event_id NULL). Clinical staff are scoped
   // to an event so they can be cleared out when the clinic moves on (v1.0.7).
   // A scoped role with no event given falls back to the active event.
@@ -908,12 +1039,25 @@ function createUser(actor, { username, full_name, role, password, event_id }) {
   if (role !== 'admin') {
     eid = event_id != null ? Number(event_id) : Number(getSetting('active_event_id')) || null;
   }
-  const { salt, hash } = hashPassword(password);
+  const holders = db.prepare('SELECT * FROM users WHERE username = ? ORDER BY id').all(u);
+  if (role === 'admin') {
+    const taken = holders[0];
+    if (taken) {
+      throw new Error(`${holderOf(taken)}. An administrator works every event, so an administrator's username cannot be anyone else's — choose another.`);
+    }
+  } else {
+    const admin = holders.find((r) => r.role === 'admin');
+    if (admin) throw new Error(`${holderOf(admin)}. Staff cannot share an administrator's username — choose another.`);
+    const here = holders.find((r) => (r.event_id == null ? null : r.event_id) === eid);
+    if (here) throw new Error(`${holderOf(here)}.`);
+  }
+  const { salt, hash } = source ? { salt: source.salt, hash: source.hash } : hashPassword(password);
   const info = db.prepare(
     `INSERT INTO users (username, full_name, role, salt, hash, active, created_at, event_id)
      VALUES (?,?,?,?,?,1,?,?)`
   ).run(u, full_name, role, salt, hash, now(), eid);
-  audit(actor, 'create', 'user', info.lastInsertRowid, `${u} (${role})`);
+  audit(actor, 'create', 'user', info.lastInsertRowid,
+    `${u} (${role})` + (source ? `, keeping the password of ${source.username} for ${eventName(source.event_id)}` : ''));
   return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid));
 }
 
@@ -948,6 +1092,15 @@ function updateUser(actor, id, { full_name, role, active, password }) {
   const vals = [];
   if (full_name != null) { fields.push('full_name = ?'); vals.push(full_name); }
   if (role != null) { fields.push('role = ?'); vals.push(role); }
+  // Made an administrator: administrators are global, so the account leaves
+  // its event — and, as for a new administrator, only if nobody else (on any
+  // event) has the username, or sign-in could no longer reach that other
+  // account.
+  if (role === 'admin' && row.role !== 'admin') {
+    const other = db.prepare('SELECT * FROM users WHERE username = ? AND id != ? ORDER BY id').get(row.username, id);
+    if (other) throw new Error(`${holderOf(other)}. An administrator's username cannot be anyone else's, so ${row.full_name} cannot be made an administrator under it.`);
+    fields.push('event_id = NULL');
+  }
   if (active != null) { fields.push('active = ?'); vals.push(active ? 1 : 0); }
   if (password) {
     const { salt, hash } = hashPassword(password);
@@ -976,6 +1129,19 @@ function detachUserRefs(ids) {
   db.prepare(`UPDATE triage SET routed_by_name = COALESCE(routed_by_name, (SELECT full_name FROM users WHERE id = routed_by)) WHERE routed_by IN (${ph})`).run(...ids);
   db.prepare(`UPDATE treatments SET completed_by_name = COALESCE(completed_by_name, (SELECT full_name FROM users WHERE id = completed_by)) WHERE completed_by IN (${ph})`).run(...ids);
   db.prepare(`UPDATE patients SET dismissed_by_name = COALESCE(dismissed_by_name, (SELECT full_name FROM users WHERE id = dismissed_by)) WHERE dismissed_by IN (${ph})`).run(...ids);
+  // v0.0.16: a supply movement and a check-out survey point at users(id) too
+  // (a foreign key), and were missed here — so "Start fresh for next event",
+  // and Delete, failed with "FOREIGN KEY constraint failed" for anyone who had
+  // recorded supplies or taken a survey: every check-out volunteer. Their names
+  // are stored beside the id when the row is written, so only the id goes.
+  // The Treatment Waiting stamp has no foreign key, but a dangling id is
+  // cleared all the same, its name kept first, like the others.
+  db.prepare(`UPDATE triage SET treatment_waiting_by_name = COALESCE(treatment_waiting_by_name, (SELECT full_name FROM users WHERE id = treatment_waiting_by)) WHERE treatment_waiting_by IN (${ph})`).run(...ids);
+  db.prepare(`UPDATE inventory_moves SET created_by_name = COALESCE(created_by_name, (SELECT full_name FROM users WHERE id = created_by)) WHERE created_by IN (${ph})`).run(...ids);
+  db.prepare(`UPDATE exit_surveys SET completed_by_name = COALESCE(completed_by_name, (SELECT full_name FROM users WHERE id = completed_by)) WHERE completed_by IN (${ph})`).run(...ids);
+  db.prepare(`UPDATE triage SET treatment_waiting_by = NULL WHERE treatment_waiting_by IN (${ph})`).run(...ids);
+  db.prepare(`UPDATE inventory_moves SET created_by = NULL WHERE created_by IN (${ph})`).run(...ids);
+  db.prepare(`UPDATE exit_surveys SET completed_by = NULL WHERE completed_by IN (${ph})`).run(...ids);
   db.prepare(`UPDATE audit_log SET user_id = NULL WHERE user_id IN (${ph})`).run(...ids);
   db.prepare(`UPDATE triage SET triaged_by = NULL WHERE triaged_by IN (${ph})`).run(...ids);
   db.prepare(`UPDATE triage SET vitals_by = NULL WHERE vitals_by IN (${ph})`).run(...ids);
@@ -4427,6 +4593,13 @@ function applyRemoteRows(remoteRows) {
       // deletion it is only now catching up on.
       if (hit && hit.updated_at && env.updated_at && String(hit.updated_at) >= String(env.updated_at)) { skipped++; return; }
       if (hit) {
+        // A staff account is pointed at by everything it did on THIS laptop —
+        // its sign-ins in the audit log at the least — which no tombstone from
+        // elsewhere will ever clear. So its deletion failed the foreign key
+        // here and was held back as "children still to come" for good: "Start
+        // fresh" and Delete never reached a laptop the person had used, and
+        // they kept signing in on it. Detached first, as deleteUser does.
+        if (entity === 'user') detachUserRefs([hit.id]);
         try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(hit.id); deleted++; }
         catch (e) {
           // Still has children here (their tombstones are in a later page).
@@ -4491,13 +4664,19 @@ function applyRemoteRows(remoteRows) {
       parentCol = 'event_id';
       if (env.event_uid) { parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
       else parentId = null;
-      // UNIQUE(username) guard: if a DIFFERENT local row already owns this username
-      // (every device seeds its own 'admin'; two admins could also create the same
-      // username offline), adopt that row's identity instead of a colliding INSERT
-      // that would otherwise skip this account forever. LWW then reconciles fields.
+      // Username guard: if a DIFFERENT local row already owns this username ON THE
+      // SAME EVENT (every device seeds its own 'admin'; two admins could also
+      // create the same username offline), adopt that row's identity instead of a
+      // colliding INSERT that would otherwise skip this account forever. LWW then
+      // reconciles fields. Same event only, as the per-event index is: since
+      // v0.0.16 "ana" for the Oct 18 clinic and "ana" for the Oct 25 one are two
+      // accounts, and adopting by username alone merged them into one on every
+      // laptop. parentId is the event the row arrived for (NULL for an admin).
       if (!existing) {
         const uname = env.data && env.data.username;
-        const dupe = uname ? db.prepare('SELECT id FROM users WHERE username = ?').get(uname) : null;
+        const dupe = uname
+          ? db.prepare('SELECT id FROM users WHERE username = ? AND IFNULL(event_id, 0) = IFNULL(?, 0)').get(uname, parentId)
+          : null;
         if (dupe) { db.prepare('UPDATE users SET uid = ? WHERE id = ?').run(env.uid, dupe.id); return applyOne(env); }
       }
     }

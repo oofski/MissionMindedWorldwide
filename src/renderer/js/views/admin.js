@@ -212,6 +212,20 @@ export function renderAdmin(ctx, params = {}) {
     }
   }
 
+  // The people Add staff can copy into the active event: staff accounts on
+  // OTHER events, minus anyone whose username this event already has (a second
+  // "ana" here would be refused). Each account is listed with its event, since
+  // the same person may be on several.
+  async function copyCandidates(active) {
+    const [users, events] = await Promise.all([api.listUsers(), api.listEvents()]);
+    const names = new Map(events.map((e) => [e.id, e.name]));
+    const here = new Set(users.filter((x) => x.event_id === active.id).map((x) => x.username));
+    return users
+      .filter((x) => x.role !== 'admin' && x.event_id != null && x.event_id !== active.id && !here.has(x.username))
+      .map((x) => ({ ...x, event_name: names.get(x.event_id) || 'a deleted event' }))
+      .sort((a, b) => a.full_name.localeCompare(b.full_name) || a.event_name.localeCompare(b.event_name));
+  }
+
   // `forceAdmin` locks the role to admin (used by "Add administrator").
   async function editUser(u, active, forceAdmin) {
     const isNew = !u || !u.id;
@@ -231,12 +245,58 @@ export function renderAdmin(ctx, params = {}) {
     if (forceAdmin) role.disabled = true;
     const pass = el('input', { class: 'input', type: 'password', placeholder: isNew ? 'Password' : 'New password (leave blank to keep)' });
 
+    // A staff account belongs to one event, so somebody who worked another
+    // clinic is set up again for this one — the same username is allowed on
+    // each event (v0.0.16). Picking them here fills in their name, username
+    // and role, and "Keep the same password" lets them sign in as they did
+    // there. Only the account's id goes to main; the password itself never
+    // comes to this screen. Typing someone in by hand works as it always has.
+    const copyable = isNew && !forceAdmin && active ? await copyCandidates(active) : [];
+    const copyFrom = el('select', { class: 'input select' }, [
+      el('option', { value: '' }, ['No one — type a new person in below']),
+      ...copyable.map((x) => el('option', { value: String(x.id) }, [`${x.full_name} — ${t(`roles.${x.role}`)} — ${x.event_name}`])),
+    ]);
+    const keepPw = el('input', { type: 'checkbox' });
+    const keepText = el('span', {}, ['Keep the same password']);
+    const keepRow = el('label', { class: 'form-check', style: 'display:none;' }, [keepPw, keepText]);
+    const picked = () => copyable.find((x) => String(x.id) === copyFrom.value) || null;
+    const keeping = () => !!picked() && keepPw.checked;
+    const showPassword = () => {
+      const p = picked();
+      pass.disabled = keeping();
+      if (keeping()) pass.value = '';
+      pass.placeholder = keeping() ? `The password ${p.full_name} uses for ${p.event_name}` : 'Password';
+    };
+    copyFrom.addEventListener('change', () => {
+      const p = picked();
+      keepRow.style.display = p ? '' : 'none';
+      if (!p) keepPw.checked = false;
+      if (p) {
+        name.value = p.full_name;
+        uname.value = p.username;
+        // The retired 'triage' role is not offered for new staff; the role is
+        // then left for the administrator to choose.
+        if (Array.from(role.options).some((o) => o.value === p.role)) role.value = p.role;
+        keepText.textContent = `Keep the same password as for ${p.event_name}`;
+      }
+      showPassword();
+    });
+    keepPw.addEventListener('change', showPassword);
+
     const fields = [
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Full name']), name]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Username']), uname]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Role']), role]),
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Password']), pass]),
     ];
+    if (copyable.length) {
+      fields.unshift(el('label', { class: 'field span-2' }, [
+        el('span', { class: 'field-label' }, ['Copy someone from another event']),
+        copyFrom,
+        el('span', { class: 'field-hint' }, ['Optional. Fills in their name, username and role. They get a separate account for this event.']),
+      ]));
+      fields.push(el('div', { class: 'field span-2' }, [keepRow]));
+    }
     // On a new event-scoped staff member, make the scope obvious.
     if (isNew && !forceAdmin && active) {
       fields.push(el('div', { class: 'field span-2' }, [
@@ -248,14 +308,19 @@ export function renderAdmin(ctx, params = {}) {
     const ok = await modal({ title: isNew ? 'Add staff member' : 'Edit staff', body: form, confirmText: 'Save', cancelText: 'Cancel' });
     if (!ok) return;
     try {
+      const p = picked();
+      const kept = keeping();
       if (isNew) {
         // Omit event_id: the backend scopes non-admins to the active event and
         // keeps admins global automatically.
-        await api.createUser({ username: uname.value.trim(), full_name: name.value.trim(), role: role.value, password: pass.value });
+        await api.createUser({
+          username: uname.value.trim(), full_name: name.value.trim(), role: role.value,
+          ...(kept ? { copy_password_from: p.id } : { password: pass.value }),
+        });
       } else {
         await api.updateUser({ id: u.id, full_name: name.value.trim(), role: role.value, password: pass.value || undefined });
       }
-      toast('Saved', 'success'); paint();
+      toast(kept ? `Saved — ${name.value.trim()} signs in with the same password as for ${p.event_name}.` : 'Saved', 'success'); paint();
       // A password change here may have retired the shipped admin/admin, which
       // the standing warning is watching for.
       if (ctx.refreshSecurity) ctx.refreshSecurity();
