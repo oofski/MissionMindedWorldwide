@@ -109,16 +109,33 @@ function lanAddresses() {
   }
   return out.sort((x, y) => Number(y.preferred) - Number(x.preferred));
 }
+// A network's own broadcast address (192.168.1.23/24 → 192.168.1.255), or ''.
+function directedBroadcast(a) {
+  const ip = a.address.split('.').map(Number), mask = String(a.netmask || '').split('.').map(Number);
+  return ip.length === 4 && mask.length === 4 && mask.every((n) => n >= 0 && n <= 255) ? ip.map((n, i) => (n | (~mask[i] & 255))).join('.') : '';
+}
 // Where a broadcast goes: everywhere this laptop's default route reaches, and
 // each network's own broadcast address. Windows sends 255.255.255.255 out of
 // one adapter only, so a laptop with Wi-Fi and a cable would otherwise be
 // heard on just one of them.
 function broadcastTargets() {
   const set = new Set(['255.255.255.255']);
-  for (const a of lanAddresses()) {
-    const ip = a.address.split('.').map(Number), mask = String(a.netmask || '').split('.').map(Number);
-    if (ip.length === 4 && mask.length === 4 && mask.every((n) => n >= 0 && n <= 255)) set.add(ip.map((n, i) => (n | (~mask[i] & 255))).join('.'));
-  }
+  for (const a of lanAddresses()) { const b = directedBroadcast(a); if (b) set.add(b); }
+  return [...set];
+}
+// Where the HOST announces itself: only the private networks it is on — the
+// kind a clinic's router makes. Hosting resumes by itself whenever the app
+// opens, so a host laptop opened later on a hotel's or a hotspot's network
+// announced the clinic network's name and id there too, every few seconds.
+// The everywhere-address goes out by whichever network the laptop's default
+// route is on, which cannot be told from here, so it is used only while every
+// real network this laptop is on is a private one. A laptop looking for the
+// host still asks everywhere (broadcastTargets), and the host answers it
+// directly, so a clinic router on an unusual range is still found.
+function hostBroadcastTargets(addresses = lanAddresses()) {
+  const set = new Set();
+  for (const a of addresses) { const b = a.preferred ? directedBroadcast(a) : ''; if (b) set.add(b); }
+  if (set.size && addresses.every((a) => a.preferred || VIRTUAL.test(a.iface))) set.add('255.255.255.255');
   return [...set];
 }
 
@@ -174,11 +191,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // firewall drops unasked-for broadcasts still find the host (Windows lets a
 // reply to its own broadcast in). One entry per host, with every address it
 // was heard at — a host on Wi-Fi and a cable is one host.
+//
+// A host is its id AND the start of its fingerprint. Anyone on the Wi-Fi can
+// send a beacon, and merged by id alone, a look-alike announcing the host's
+// id first lent the entry its own fingerprint: a joined laptop then skipped
+// every address the real host was heard at (cloud.refind), and could not
+// follow it to a new port. So a beacon with the same id and another
+// fingerprint is an entry of its own, listed as what it is.
 async function scan({ ms = 2500, port = defaults.beaconPort, queryPort = defaults.queryPort, targets = defaults.targets } = {}) {
   const found = new Map();
   const add = (b) => {
-    const had = found.get(b.hostId);
-    if (!had) { found.set(b.hostId, { ...b, urls: [b.url] }); return; }
+    const k = b.hostId + '|' + b.fp;
+    const had = found.get(k);
+    if (!had) { found.set(k, { ...b, urls: [b.url] }); return; }
     if (!had.urls.includes(b.url)) had.urls.push(b.url);
   };
   const stop = listen(add, { port });
@@ -297,8 +322,11 @@ async function learnPin(url, key, { expectPrefix = '', expectHost = '', timeoutM
   if (expectHost && j.host !== expectHost) {
     throw Object.assign(new Error('The host\'s certificate does not match.'), { pinMismatch: true, presented: r.pin });
   }
+  // Not "refused the clinic key": that sent a director to retype a key that
+  // was right, when the answer came from a look-alike listed under the
+  // clinic's name (a beacon's name proves nothing). Either is possible here.
   if (!sameHex(j.proof, helloProof(key, nonce, r.pin, j.host))) {
-    throw Object.assign(new Error('unauthorized'), { status: 401 });
+    throw Object.assign(new Error('The host could not show it holds the clinic key.'), { noProof: true });
   }
   return { pin: r.pin, hostId: typeof j.host === 'string' ? j.host : '', name: cleanText(j.name, 80) };
 }
@@ -312,7 +340,9 @@ const MESSAGES = {
   timeout: (a) => `The clinic network host at ${a} did not answer in time. Check this laptop is on the clinic's Wi-Fi, then try again.`,
   pin_mismatch: (a) => `The laptop at ${a} is not this clinic's host: its security certificate does not match, so nothing was sent to it. If the clinic network was set up again on the host, copy a new connection code from it.`,
   wrong_key: () => 'The host answered, but refused the clinic key. Copy the connection code again from the host laptop, or type the key exactly as its Cloud tab shows it.',
+  no_proof: (a) => `The laptop at ${a} could not show it holds this clinic key, so the key was not sent to it. Check the key is typed exactly as the host's Cloud tab shows it — or, if this clinic network is listed twice, choose the other one, or paste the host's connection code.`,
   not_mmw: (a) => `Something answered at ${a}, but it is not a Mission Minded clinic network host.`,
+  too_large: (a) => `The host at ${a} refused this laptop's latest changes as too large to send at once (more than 100 MB — usually many x-ray images together). They are kept on this laptop; ask whoever looks after the app.`,
 };
 const say = (code, addr) => MESSAGES[code](addr);
 
@@ -321,7 +351,13 @@ function classify(err) {
   if (!err) return 'not_mmw';
   if (err.pinMismatch) return 'pin_mismatch';
   if (err.status === 401) return 'wrong_key';
+  if (err.noProof) return 'no_proof';
+  if (err.status === 413) return 'too_large';
   if (err.notHub) return 'not_mmw';
+  // Something answered, but not in TLS: a plain web server, or another
+  // program on the port now. "No host answered" was untrue, and is the one
+  // thing the test is there to tell apart.
+  if (err.network && (String(err.code || '').startsWith('ERR_SSL_') || err.code === 'EPROTO')) return 'not_mmw';
   if (err.network && err.code === 'ECONNREFUSED') return 'not_hosting';
   if (err.network && (err.name === 'AbortError' || err.code === 'ETIMEDOUT')) return 'timeout';
   if (err.network) return 'not_found';
@@ -339,11 +375,14 @@ function explain(err, addr) {
 // something is stopping the connection; not heard, it is not here at all.
 // Heard at ANOTHER address, it moved (the router gave it another, or its port
 // was taken): movedTo says where, for the caller to follow once the
-// certificate there is checked (cloud.testClinicNetwork).
+// certificate there is checked (cloud.testClinicNetwork) — and movedToAll
+// every address it was heard at, since a look-alike can copy the start of a
+// fingerprint from the host's own beacon and be heard first.
 //
 // The key is sent only to a pinned host. Without a pin this says only why
-// the host does not answer, or that it does ('unpinned').
-async function diagnose({ url, key, pin, hostId, listenMs = 3500, timeoutMs = 6000, scanOpts = {} }) {
+// the host does not answer, or that it does ('unpinned'). fp: the start of
+// the fingerprint the host was listed with, when there is no pin yet.
+async function diagnose({ url, key, pin, hostId, fp = '', listenMs = 3500, timeoutMs = 6000, scanOpts = {} }) {
   const addr = (() => { try { return new URL(url).host; } catch (_) { return String(url); } })();
   const origin = (() => { try { return new URL(url).origin; } catch (_) { return String(url); } })();
   const heard = scan({ ms: listenMs, ...scanOpts });
@@ -355,12 +394,20 @@ async function diagnose({ url, key, pin, hostId, listenMs = 3500, timeoutMs = 60
     if (r.status !== 200 || !health || health.ok !== true || health.service !== 'mmw-sync') { heard.catch(() => {}); return result('not_mmw'); }
   } catch (e) {
     const code = classify(e);
-    if (code === 'timeout' || code === 'not_found' || code === 'not_hosting') {
+    // Not answering here — or something else is, on the port the host had:
+    // why, or where the host is now. With a pin, only a beacon carrying the
+    // start of that fingerprint counts as the host (see scan).
+    if (code === 'timeout' || code === 'not_found' || code === 'not_hosting' || code === 'not_mmw') {
       const hosts = await heard.catch(() => []);
-      const here = hosts.find((h) => (hostId ? h.hostId === hostId : h.address === hostPort(url).host));
-      if (here && !here.urls.includes(origin)) return result(code, { movedTo: here.urls[0] });
-      if (code === 'not_hosting') return result('not_hosting');
-      return result(here ? 'blocked' : 'not_found');
+      const p = normPin(pin);
+      const fpOk = (h) => (p ? p.startsWith(h.fp) : (!fp || h.fp === String(fp).toLowerCase()));
+      const mine = hosts.filter((h) => (hostId ? h.hostId === hostId : h.address === hostPort(url).host) && fpOk(h));
+      const elsewhere = [...new Set(mine.flatMap((h) => h.urls))].filter((u) => u !== origin);
+      if (mine.length && !mine.some((h) => h.urls.includes(origin)) && elsewhere.length) {
+        return result(code, { movedTo: elsewhere[0], movedToAll: elsewhere });
+      }
+      if (code === 'not_hosting' || code === 'not_mmw') return result(code);
+      return result(mine.length ? 'blocked' : 'not_found');
     }
     heard.catch(() => {});
     return result(code || 'not_mmw');
@@ -379,7 +426,7 @@ module.exports = {
   APP_ID, DEFAULT_PORT, BEACON_PORT, BEACON_MS, FP_PREFIX, defaults,
   normPin, isPin, showPin,
   beaconMessage, readBeacon, isQuery, QUERY,
-  lanAddresses, broadcastTargets, listen, scan,
+  lanAddresses, broadcastTargets, hostBroadcastTargets, listen, scan,
   request, peerPin, helloProof, learnPin,
   classify, explain, diagnose, MESSAGES,
 };

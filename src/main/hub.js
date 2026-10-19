@@ -35,9 +35,20 @@ const WORKER_PATH = path.join(__dirname, '..', '..', 'cloud', 'worker.js');
 // Cloudflare's own request limit, so a push the internet server would refuse
 // is refused here too, and one it takes is taken.
 const MAX_BODY = 100 * 1024 * 1024;
+// What a request without the clinic key may send. Cloudflare's edge takes a
+// 100 MB body from anyone at no cost to the clinic; here the host laptop held
+// every one in memory before worker.js looked at the key, so anyone on the
+// Wi-Fi could exhaust a 4 GB laptop with a few dozen of them and take the app,
+// and every laptop's sync, down with it. Nothing the app sends without the key
+// has a body at all.
+const PRE_AUTH_BODY = 64 * 1024;
+// Connections at once. Fifteen chairs' laptops each use one at a time.
+const MAX_CONNECTIONS = 64;
 // A laptop counts as connected while it has synced within this long (they
 // sync every 4 seconds while open).
 const SEEN_MS = 60 * 1000;
+// At most this many remembered at once: the ones seen longest ago go first.
+const MAX_LAPTOPS = 200;
 
 const state = {
   dir: null, sqlite: null, server: null, port: 0, error: '',
@@ -196,16 +207,28 @@ function identity() {
 
 /* ---------------- Serving ---------------- */
 
-function readBody(req) {
+// The request body, up to `limit`. Past it, a laptop's push (it has the key)
+// is read to its end and thrown away, then answered 413: cut off mid-way, the
+// laptop heard only a reset, which reads as "no host answered" — it went
+// looking for the host by its beacon while the host was up, and retried the
+// same push for ever. Anything else past its limit is cut off at once.
+function readBody(req, limit, { drain = false } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let over = false;
+    const tooLarge = () => Object.assign(new Error('Request too large.'), { status: 413 });
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { reject(Object.assign(new Error('Request too large.'), { status: 413 })); req.destroy(); return; }
+      if (over) return;
+      if (size > limit) {
+        over = true; chunks.length = 0;
+        if (!drain) { reject(tooLarge()); req.destroy(); }
+        return;
+      }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => (over ? reject(tooLarge()) : resolve(Buffer.concat(chunks))));
     req.on('error', reject);
   });
 }
@@ -216,7 +239,51 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+// Answered before the body is read. A small rest of one is read and thrown
+// away, so the answer arrives whole rather than as a reset; a large one is
+// cut off.
+function refuse(req, res, status, obj) {
+  let seen = 0;
+  req.on('data', (c) => { seen += c.length; if (seen > PRE_AUTH_BODY) req.destroy(); });
+  req.on('error', () => { /* cut off: nothing more to say */ });
+  sendJson(res, status, obj);
+}
+
+// The clinic key, checked by the host itself before it reads a body — the
+// same check worker.js makes (its extractBearer and constant-time compare),
+// which still makes it again.
+function keyOk(header, key) {
+  const m = /^Bearer\s+(.+)$/i.exec(String(Array.isArray(header) ? header[0] : (header || '')).trim());
+  if (!m || !key) return false;
+  const a = Buffer.from(m[1], 'utf8'), b = Buffer.from(String(key), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 const headerText = (v, max) => String(Array.isArray(v) ? v[0] : (v || '')).replace(/[^\x20-\x7e]/g, '').trim().slice(0, max);
+// A laptop's computer name, which it sends percent-encoded: a header can only
+// carry Latin-1, and a name in Cyrillic or Chinese made every request from
+// that laptop fail before it was sent (cloud.lanJson).
+function computerName(v) {
+  const raw = headerText(v, 400);
+  let s = raw;
+  try { s = decodeURIComponent(raw); } catch (_) { /* not encoded: as sent */ }
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 64);
+}
+
+// Which laptops are syncing: only requests the clinic key let through, so
+// nobody on the Wi-Fi can add made-up laptops to the host's screen — and only
+// the recent ones, at most MAX_LAPTOPS, so the list cannot grow without end.
+function noteLaptop(req) {
+  const device = headerText(req.headers['x-mmw-device'], 64);
+  if (!device) return;
+  const now = Date.now();
+  for (const [k, l] of state.laptops) if (now - l.lastSeen >= SEEN_MS) state.laptops.delete(k);
+  const address = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  // Taken out and put back, so the map stays in the order laptops were last seen.
+  state.laptops.delete(device);
+  state.laptops.set(device, { device, computer: computerName(req.headers['x-mmw-computer']) || 'A laptop', address, lastSeen: now });
+  while (state.laptops.size > MAX_LAPTOPS) state.laptops.delete(state.laptops.keys().next().value);
+}
 
 async function onRequest(req, res, worker, env) {
   try {
@@ -229,29 +296,29 @@ async function onRequest(req, res, worker, env) {
     // clinic's server for anyone on the Wi-Fi. Refused here, by the host,
     // before worker.js sees it.
     if (u.pathname === '/checkin' || u.pathname.startsWith('/checkin/')) {
-      return sendJson(res, 404, { ok: false, error: 'Online pre-registration is not available on the clinic network. Patients pre-register from the internet server\'s link; here, check them in at the front desk.' });
+      return refuse(req, res, 404, { ok: false, error: 'Online pre-registration is not available on the clinic network. Patients pre-register from the internet server\'s link; here, check them in at the front desk.' });
     }
     // The join proof (lan.learnPin): answers only with an HMAC under the key.
     if (u.pathname === '/lan/hello') {
       const nonce = u.searchParams.get('nonce') || '';
-      if (req.method !== 'GET' || !/^[0-9a-f]{16,128}$/.test(nonce)) return sendJson(res, 400, { ok: false, error: 'bad request' });
+      if (req.method !== 'GET' || !/^[0-9a-f]{16,128}$/.test(nonce)) return refuse(req, res, 400, { ok: false, error: 'bad request' });
       const id = identity();
       return sendJson(res, 200, { ok: true, app: lan.APP_ID, host: id.hostId, name: id.name, proof: lan.helloProof(id.key, nonce, id.pin, id.hostId) });
     }
     const method = String(req.method || 'GET').toUpperCase();
-    const body = (method === 'GET' || method === 'HEAD') ? null : await readBody(req);
+    // Everything under /v1/ needs the clinic key (worker.js answers OPTIONS
+    // before it looks). Without it, refused here, before a byte of the body
+    // is kept.
+    const api = u.pathname === '/v1/' || u.pathname.startsWith('/v1/');
+    const authed = api && keyOk(req.headers.authorization, env.CLINIC_KEY);
+    if (api && method !== 'OPTIONS' && !authed) return refuse(req, res, 401, { ok: false, error: 'unauthorized' });
+    const body = (method === 'GET' || method === 'HEAD') ? null
+      : await readBody(req, authed ? MAX_BODY : PRE_AUTH_BODY, { drain: authed });
     const headers = {};
     if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
     if (req.headers['content-type']) headers['content-type'] = String(req.headers['content-type']);
     const response = await worker.fetch(new Request(u.href, { method, headers, body }), env, { waitUntil() {}, passThroughOnException() {} });
-    // Which laptops are syncing — any request the key let through.
-    if (u.pathname.startsWith('/v1/') && response.status !== 401) {
-      const device = headerText(req.headers['x-mmw-device'], 64);
-      if (device) {
-        const address = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-        state.laptops.set(device, { device, computer: headerText(req.headers['x-mmw-computer'], 64) || 'A laptop', address, lastSeen: Date.now() });
-      }
-    }
+    if (authed && method !== 'OPTIONS' && response.status !== 401) noteLaptop(req);
     const out = Buffer.from(await response.arrayBuffer());
     const h = {};
     response.headers.forEach((v, k) => { h[k] = v; });
@@ -276,14 +343,15 @@ function listenOn(server, port, host) {
 
 /* ---------------- Announcing ---------------- */
 
-// Every few seconds, to every network this laptop is on: who it is, where,
-// and the start of its fingerprint — never the key. And an answer to anyone
-// asking "who is there?", sent straight back to them.
+// Every few seconds, to the private networks this laptop is on (see
+// lan.hostBroadcastTargets): who it is, where, and the start of its
+// fingerprint — never the key. And an answer to anyone asking "who is
+// there?", sent straight back to them.
 function startBeacon({ beaconPort, announce, version }) {
   stopBeacon();
   state.beaconError = '';
   const message = () => { const id = identity(); return lan.beaconMessage({ name: id.name, port: state.port, hostId: id.hostId, pin: id.pin, version }); };
-  const targets = () => announce || lan.broadcastTargets().map((address) => ({ address, port: beaconPort }));
+  const targets = () => announce || lan.hostBroadcastTargets().map((address) => ({ address, port: beaconPort }));
   let sock;
   try {
     sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -336,8 +404,15 @@ async function start({ name, port, bindHost = defaults.bindHost, beaconPort = de
   const id = identity();
   const worker = await loadWorker();
   const env = { DB: d1(state.sqlite), CLINIC_KEY: id.key };
-  const server = https.createServer({ key: getMeta('private_key'), cert: getMeta('cert'), minVersion: 'TLSv1.2' },
-    (req, res) => { onRequest(req, res, worker, env); });
+  // Limits set here rather than left to Node's defaults, which change
+  // between versions: a connection that never finishes its handshake or its
+  // headers is let go, and a request has five minutes — a full 100 MB push
+  // over a slow Wi-Fi fits.
+  const server = https.createServer({
+    key: getMeta('private_key'), cert: getMeta('cert'), minVersion: 'TLSv1.2',
+    handshakeTimeout: 20000, headersTimeout: 30000, requestTimeout: 300000,
+  }, (req, res) => { onRequest(req, res, worker, env); });
+  server.maxConnections = MAX_CONNECTIONS;
   const want = port != null ? port : (id.port || defaults.firstPort);
   let bound;
   try {
@@ -493,6 +568,6 @@ function status() {
 module.exports = {
   HUB_FILE, defaults, init, open, identity, start, stop, resume, erase, shutdown,
   status, shareUrl, ownTarget, ownHostId, runningHostId,
-  makeClinicKey, makeCertificate, d1, loadWorker,
+  makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS,
   firewallScript, firewallCommand, allowThroughFirewall, FIREWALL_RULE,
 };

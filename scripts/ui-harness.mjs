@@ -5990,9 +5990,9 @@ const done=(o)=>process.stdout.write('\\n@@V@@'+JSON.stringify(o),()=>process.ex
     const docsF = readSrcF('../docs/CLOUD_SETUP.md').replace(/\s+/g, ' ');
     const partBF = docsF.slice(docsF.indexOf('## Part B'), docsF.indexOf('## Part C'));
     log(/own deletion of `admin` still keeps the shipped `admin` \/ `admin` off it/.test(partBF)
-      && /deleted before this laptop was ever connected, that deletion is sent once the server turns out to hold only the shipped/.test(partBF)
+      && /so does a deletion of `admin` it heard about\. Either one is sent once the server turns out to hold only the shipped `admin` \/ `admin` \(as when it was deleted before this laptop was ever connected\)/.test(partBF)
       && /after \*\*Disconnect\*\* to the same server, a laptop passes on its deletions as if it had stayed connected/.test(partBF),
-      'cloud guide: Part B says a laptop\'s own deletion of admin keeps admin / admin off it after a move, goes once the server holds only the shipped copy when made before connecting, and goes as usual after Disconnect to the same server');
+      'cloud guide: Part B says a laptop\'s deletion of admin — its own or one it heard about — keeps admin / admin off it after a move, goes once the server holds only the shipped copy, and goes as usual after Disconnect to the same server');
 
     const probeF = `
 const os=require('os'),fs=require('fs'),path=require('path'),{pathToFileURL}=require('url');
@@ -9908,7 +9908,10 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         o.notHosting=err(await call('cloud:test',{url:'https://127.0.0.1:1',key:'x',lan:{pin:'ee'.repeat(32),hostId:'no-such-host-01'}}));
         return o;`);
       const flippedL = readL.lan ? (readL.lan.pin[0] === 'a' ? 'b' : 'a') + readL.lan.pin.slice(1) : '';
-      L.dTampered = await D.run(`const r=await call('cloud:join',${JSON.stringify({ url: readL.url, key: readL.key, lan: { ...(readL.lan || {}), pin: flippedL } })});
+      // At the address the host answers at now (it moved above): a beacon
+      // whose fingerprint does not start the code's is not the host the code
+      // names, so the pin itself must refuse it there.
+      L.dTampered = await D.run(`const r=await call('cloud:join',${JSON.stringify({ url: 'https://127.0.0.1:' + L.aAgain, key: readL.key, lan: { ...(readL.lan || {}), pin: flippedL } })});
         return {error:err(r),configured:db.getSyncMeta().configured};`);
 
       /* laptop D: on an internet server first, then the clinic network, then back */
@@ -9969,6 +9972,214 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         const samePin=again.ok&&m2.lanPin===m.lanPin;
         const e=await call('hub:stop',{erase:true});const gone=!fs.readdirSync(dir).includes(hub.HUB_FILE);
         return {stopped:r.ok&&!r.data.running,disconnected:!m.configured,kept,again:again.ok,samePinAfterRestart:m2.lanPin===L_PIN,gone,erased:e.ok,meta:db.getSyncMeta().configured};`.replace('L_PIN', JSON.stringify(L.aHost.pin)));
+
+
+      /* ---- v0.0.17 review: the clinic's moves between its own servers ----
+         Each on fresh laptops, so one that breaks is reported and the others
+         still run. The internet server is the real worker.js in this
+         process, over http:// on 127.0.0.1 (allowed for this computer only). */
+      // Their hosts announce to the same listener: the beacon check is of laptop A's.
+      L.beaconsBeforeReview = capturedL.length;
+      const sectionL = async (name, fn) => { try { await fn(); } catch (e) { L['crash_' + name] = String((e && e.stack) || e).slice(0, 500); } };
+      const inetSrvL = async (key) => {
+        const SqliteI = require('better-sqlite3');
+        const sq = new SqliteI(':memory:');
+        const w = await hubL.loadWorker();
+        const env = { DB: hubL.d1(sq), CLINIC_KEY: key };
+        const srv = require('http').createServer(async (req, res) => {
+          const chunks = []; for await (const c of req) chunks.push(c);
+          const headers = {};
+          if (req.headers.authorization) headers.authorization = req.headers.authorization;
+          if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+          const r = await w.fetch(new Request('http://x' + req.url, { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? null : Buffer.concat(chunks) }), env, {});
+          const outB = Buffer.from(await r.arrayBuffer());
+          res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(outB);
+        });
+        await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+        serversL.push(srv);
+        // The patients it holds live, by name (a deletion carries no name).
+        const patients = () => sq.prepare("SELECT data FROM sync_rows WHERE entity = 'patient' AND deleted = 0").all()
+          .map((x) => { try { return JSON.parse(x.data).last_name; } catch (_) { return '?'; } }).sort();
+        return { url: 'http://127.0.0.1:' + srv.address().port, sq, patients };
+      };
+      // What a laptop has: its patients, and whether admin / admin signs in.
+      const seenL = (who) => who.run(`await settle();return {pats:db.listPatients({eventId:'all'}).map((p)=>p.last_name).sort().join(),aa:!!db.login('admin','admin')};`);
+      const settleAllL = async (list, n = 3) => { for (let i = 0; i < n; i++) for (const x of list) await x.run('await settle();'); };
+      const codeOfL = async (who) => { const c = await who.run(`const c=await call('cloud:connectionCode');return c.ok?c.data.code:'';`); return CCL.readConnectionCode(c); };
+      // Admin → Cloud's way: tested, then saved with the pin the test returned.
+      const joinAsAdminL = (who, c) => who.run(`await call('auth:login',{username:'dr',password:'dr-secret-1'});
+        const t=await call('cloud:test',${JSON.stringify({ url: c.url, key: c.key, lan: c.lan })});if(!t.ok) return t.error;
+        const s=await call('cloud:config',{url:t.data.url,key:${JSON.stringify(c.key)},online:true,lan:t.data.lan});if(!s.ok) return s.error;
+        return (await settle()).ok;`);
+      // The sign-in screen's Join a clinic.
+      const joinSignedOutL = (who, c) => who.run(`const r=await call('cloud:join',${JSON.stringify({ url: c.url, key: c.key, lan: c.lan })});return r.ok?true:r.error;`);
+
+      /* admin / admin, deleted on the internet server, then the clinic network and a hand-over */
+      await sectionL('admin', async () => {
+        const X = await inetSrvL('internet-key-1');
+        const A2 = laptopL('A2'), B2 = laptopL('B2'), C2 = laptopL('C2'), E2 = laptopL('E2'), F2 = laptopL('F2'), G2 = laptopL('G2');
+        L.rAdminA = await A2.run(`await call('auth:login',{username:'admin',password:'admin'});const a=ipc.getCurrentUser();
+          db.createUser(a,{username:'dr',full_name:'Dr Trinh',role:'admin',password:'dr-secret-1'});
+          const c=await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-1',online:true});await settle();
+          await call('auth:login',{username:'dr',password:'dr-secret-1'});
+          const ad=db.listUsers().find((u)=>u.username==='admin');db.deleteUser(ipc.getCurrentUser(),ad.id);await settle();
+          db.createPatient(ipc.getCurrentUser(),{first_name:'Pat',last_name:'P1'});db.createPatient(ipc.getCurrentUser(),{first_name:'Pat',last_name:'P2'});
+          return c.ok&&(await settle()).ok;`);
+        L.rAdminB = await joinSignedOutL(B2, { url: X.url, key: 'internet-key-1' });
+        await B2.run('await settle();');
+        L.rAdminOnX = { A: await seenL(A2), B: await seenL(B2) };
+        // Field day: A hosts (asked, confirmed); B joins it from Admin → Cloud; a new laptop and C, from the sign-in screen.
+        L.rAdminHost = await A2.run(`const r=await call('hub:start',{name:'Field',move:true});return r.ok&&(await settle()).ok;`);
+        const cA = await codeOfL(A2);
+        L.rAdminBJoin = await joinAsAdminL(B2, cA);
+        L.rAdminEJoin = await joinSignedOutL(E2, cA);
+        L.rAdminCJoin = await joinSignedOutL(C2, cA);
+        await settleAllL([A2, B2, E2, C2]);
+        L.rAdminLan = { A: await seenL(A2), B: await seenL(B2), E: await seenL(E2), C: await seenL(C2) };
+        // C goes to sleep with P1. The host deletes P1; the others hear it.
+        L.rAdminDel = await A2.run(`const u=db.login('dr','dr-secret-1');const p=db.listPatients({eventId:'all'}).find((x)=>x.last_name==='P1');db.deletePatient(u,p.id);return (await settle()).ok;`);
+        await settleAllL([B2, E2], 2);
+        // Hand-over, as the guide says: B hosts; the others join B; C wakes and joins; a new laptop joins; the old host last.
+        L.rAdminBHost = await B2.run(`await call('auth:login',{username:'dr',password:'dr-secret-1'});const r=await call('hub:start',{name:'Field B',move:true});return r.ok&&(await settle()).ok;`);
+        const cB = await codeOfL(B2);
+        L.rAdminEtoB = await joinAsAdminL(E2, cB);
+        L.rAdminCtoB = await joinAsAdminL(C2, cB);
+        L.rAdminFJoin = await joinSignedOutL(F2, cB);
+        await settleAllL([B2, E2, C2, F2]);
+        L.rHandBeforeOld = { B: await seenL(B2), E: await seenL(E2), C: await seenL(C2), F: await seenL(F2) };
+        L.rAdminAtoB = await joinAsAdminL(A2, cB);
+        L.rOldHost = await A2.run(`const s=hub.status();return {running:s.running,hosting:s.hosting,kind:cloud.status().kind,isHost:cloud.status().isHost};`);
+        await settleAllL([A2, B2, E2, C2, F2]);
+        L.rHandAfter = { A: await seenL(A2), B: await seenL(B2), E: await seenL(E2), C: await seenL(C2), F: await seenL(F2) };
+        // B's clinic network erased and hosted again: a new one, which every laptop joins, and a new laptop after them.
+        L.rErase = await B2.run(`const s=await call('hub:stop',{erase:true});const r=await call('hub:start',{name:'Field B2'});return s.ok&&r.ok&&(await settle()).ok;`);
+        const cB2 = await codeOfL(B2);
+        for (const who of [A2, E2, C2, F2]) await joinAsAdminL(who, cB2);
+        L.rEraseG = await joinSignedOutL(G2, cB2);
+        await settleAllL([A2, B2, E2, C2, F2, G2]);
+        L.rEraseAfter = { A: await seenL(A2), B: await seenL(B2), E: await seenL(E2), C: await seenL(C2), F: await seenL(F2), G: await seenL(G2) };
+      });
+
+      /* the shared admin's deletion, known to one laptop only — and heard elsewhere, meeting a clinic's own administrator */
+      await sectionL('admin2', async () => {
+        const X = await inetSrvL('internet-key-3');
+        const A6 = laptopL('A6'), E6 = laptopL('E6'), F6 = laptopL('F6'), P6 = laptopL('P6'), H6 = laptopL('H6');
+        // H: another clinic network's host, whose administrator has its own password (set first, so it is older than the deletion below).
+        L.rTrialH = await H6.run(`await call('auth:login',{username:'admin',password:'admin'});const u=ipc.getCurrentUser();
+          await call('users:update',{id:u.id,password:'clinic-admin-pw'});const r=await call('hub:start',{name:'Clinic H'});return r.ok&&(await settle()).ok;`);
+        await new Promise((r) => setTimeout(r, 20));
+        // A, alone on the internet server, deletes admin / admin; P joins it and hears the deletion.
+        L.rSoleA = await A6.run(`await call('auth:login',{username:'admin',password:'admin'});const a=ipc.getCurrentUser();
+          db.createUser(a,{username:'dr',full_name:'Dr Trinh',role:'admin',password:'dr-secret-1'});
+          await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-3',online:true});await settle();
+          await call('auth:login',{username:'dr',password:'dr-secret-1'});
+          const ad=db.listUsers().find((u)=>u.username==='admin');db.deleteUser(ipc.getCurrentUser(),ad.id);return (await settle()).ok;`);
+        L.rTrialPJoin = await joinSignedOutL(P6, { url: X.url, key: 'internet-key-3' });
+        await P6.run('await settle();');
+        // A hosts the clinic network; two new laptops join it, one after the other.
+        L.rSoleHost = await A6.run(`const r=await call('hub:start',{name:'Field',move:true});return r.ok&&(await settle()).ok;`);
+        const cA = await codeOfL(A6);
+        await joinSignedOutL(E6, cA);
+        await settleAllL([A6, E6]);
+        await joinSignedOutL(F6, cA);
+        await settleAllL([A6, E6, F6]);
+        L.rSole = { A: await seenL(A6), E: await seenL(E6), F: await seenL(F6) };
+        // P, which only heard of the deletion, joins clinic network H.
+        const cH = await codeOfL(H6);
+        L.rTrialPToH = await joinAsAdminL(P6, cH);
+        await settleAllL([H6, P6]);
+        L.rTrial = { H: await H6.run(`await settle();return !!db.login('admin','clinic-admin-pw');`), P: await P6.run(`await settle();return !!db.login('admin','clinic-admin-pw');`) };
+      });
+
+      /* the day on the clinic network, brought up to the internet server; then the host moves there */
+      await sectionL('inet', async () => {
+        const X = await inetSrvL('internet-key-2');
+        const A3 = laptopL('A3'), B3 = laptopL('B3'), C3 = laptopL('C3');
+        L.rInetA = await A3.run(`await call('auth:login',{username:'admin',password:'admin'});const a=ipc.getCurrentUser();
+          db.createUser(a,{username:'dr',full_name:'Dr Trinh',role:'admin',password:'dr-secret-1'});
+          db.createPatient(a,{first_name:'Pat',last_name:'P0'});db.createPatient(a,{first_name:'Pat',last_name:'Q0'});
+          const c=await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-2',online:true});return c.ok&&(await settle()).ok;`);
+        for (const who of [B3, C3]) await joinSignedOutL(who, { url: X.url, key: 'internet-key-2' });
+        L.rInetHost = await A3.run(`await call('auth:login',{username:'dr',password:'dr-secret-1'});const r=await call('hub:start',{name:'Field',move:true});return r.ok&&(await settle()).ok;`);
+        const cA = await codeOfL(A3);
+        for (const who of [B3, C3]) await joinAsAdminL(who, cA);
+        L.rInetDel = await B3.run(`const u=db.login('dr','dr-secret-1');db.createPatient(u,{first_name:'Pat',last_name:'N1'});
+          const p=db.listPatients({eventId:'all'}).find((x)=>x.last_name==='P0');db.deletePatient(u,p.id);return (await settle()).ok;`);
+        await settleAllL([A3, C3, B3]);
+        L.rInetDay = { A: (await seenL(A3)).pats, C: (await seenL(C3)).pats };
+        // Bringing the day up, as the guide says: one laptop, not the host, to the internet server.
+        L.rInetUp = await C3.run(`await call('auth:login',{username:'dr',password:'dr-secret-1'});
+          const t=await call('cloud:test',{url:${JSON.stringify(X.url)},key:'internet-key-2'});const c=await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-2',online:true});
+          return t.ok&&c.ok&&(await settle()).ok;`);
+        await settleAllL([C3], 2);
+        L.rInetAfter = { C: (await seenL(C3)).pats, X: X.patients().join() };
+        // The host itself moved to the internet server: it stops hosting, and the others are told the host is not hosting.
+        L.rHostMove = await A3.run(`await call('auth:login',{username:'dr',password:'dr-secret-1'});
+          const c=await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-2',online:true});await settle();
+          const s=hub.status();return {ok:c.ok,kind:cloud.status().kind,running:s.running,hosting:s.hosting};`);
+        L.rHostMoveB = await B3.run(`const r=await settle();return {ok:r.ok,error:r.error||''};`);
+        L.rHostMoveRestart = await A3.run(`hub.shutdown();hub.init(dir);const st=await hub.resume({version:'0.0.17'});return !!(st&&st.running);`);
+      });
+
+      /* the sign-in screen's Join with a fresh code, where beacons do not get through */
+      await sectionL('rejoin', async () => {
+        const A4 = laptopL('A4'), B4 = laptopL('B4');
+        await A4.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Rejoin'});return r.ok&&(await settle()).ok;`);
+        const c1 = await codeOfL(A4);
+        await joinSignedOutL(B4, c1);
+        L.rRejoinMoved = await A4.run(`const old=hub.status().port;await hub.stop({keepHosting:true});const st=await hub.start({port:0});
+          const t=hub.ownTarget();cloud.repointLan(t.url,t.lan.pin,t.lan.name);await settle();return {old,now:st.port};`);
+        // The router stops beacons: B cannot find the new port by itself.
+        await B4.run(`lan.defaults.beaconPort=1;lan.defaults.queryPort=1;lan.defaults.targets=['127.0.0.1'];return true;`);
+        const c2 = await codeOfL(A4);
+        L.rRejoin = await B4.run(`const r=await call('cloud:join',${JSON.stringify({ url: c2.url, key: c2.key, lan: c2.lan })});
+          const later=await settle();return {join:r.ok,saved:db.getSyncMeta().url,later:later.ok,error:later.error||''};`);
+        L.rRejoinWant = c2.url;
+      });
+
+      /* a laptop whose computer name is not in Latin letters */
+      await sectionL('name', async () => {
+        const A5 = laptopL('A5'), B5 = laptopL('B5');
+        await A5.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Names'});return r.ok&&(await settle()).ok;`);
+        const c = await codeOfL(A5);
+        L.rName = await B5.run(`os.hostname=()=>'Ноутбук-регистрация';const r=await call('cloud:join',${JSON.stringify({ url: c.url, key: c.key, lan: c.lan })});
+          const later=await settle();return {join:r.ok,first:!!(r.ok&&r.data.sync&&r.data.sync.ok),later:later.ok,error:later.error||''};`);
+        L.rNameHost = await A5.run(`await settle();return hub.status().laptops.map((l)=>l.computer);`);
+        // The host, signed out, joining another clinic network from the sign-in screen: asked first, told it stops hosting.
+        await B5.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Other',move:true});return r.ok&&(await settle()).ok;`);
+        const cOther = await codeOfL(B5);
+        L.rHostJoin = await A5.run(`await call('auth:logout');const r=await call('cloud:join',${JSON.stringify({ url: cOther.url, key: cOther.key, lan: cOther.lan })});
+          return r.ok?{moveTo:r.data.moveTo||'',stopsHosting:r.data.stopsHosting===true,running:hub.status().running}:{error:r.error};`);
+      });
+
+      /* a look-alike announcing the host's id, heard first */
+      await sectionL('spoof', async () => {
+        const S1 = laptopL('S1');
+        L.rSpoof = await S1.run(`const dgram=require('dgram');
+          const freeU=()=>new Promise((r)=>{const s=dgram.createSocket('udp4');s.bind(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p));});});
+          const listenP=await freeU(),quiet=await freeU();
+          const realPin='ab'.repeat(32),id='host-review-0001';
+          const tx=dgram.createSocket('udp4');await new Promise((r)=>tx.bind(0,'127.0.0.1',r));
+          const send=(m)=>new Promise((r)=>tx.send(m,listenP,'127.0.0.1',()=>r()));
+          const scanning=lan.scan({ms:700,port:listenP,queryPort:quiet,targets:['127.0.0.1']});
+          await sleep(150);
+          await send(lan.beaconMessage({name:'Lowell clinic network',port:46999,hostId:id,pin:'00'.repeat(32)}));
+          await send(lan.beaconMessage({name:'Lowell clinic network',port:46015,hostId:id,pin:realPin}));
+          const hosts=await scanning;tx.close();
+          const entries=hosts.filter((h)=>h.hostId===id).map((h)=>({fp:h.fp,urls:h.urls}));
+          // Joined to that host; the look-alike also copies the start of its fingerprint, at a third address.
+          const tried=[];
+          lan.peerPin=async(u)=>{tried.push(u);return u.endsWith(':46015')?realPin:'11'.repeat(32);};
+          db.setSyncMeta({url:'https://127.0.0.1:46013',key:'k',lanPin:realPin,lanHost:id,lanName:'Lowell clinic network',mode:'online'});
+          const moved=await cloud.refind({scan:async()=>[{hostId:id,fp:realPin.slice(0,16),name:'Lowell clinic network',address:'127.0.0.1',port:46998,urls:['https://127.0.0.1:46998']},...hosts]});
+          // "Test the clinic network" with the host off, while the look-alike answers "who is there?" with its id.
+          const ans=dgram.createSocket('udp4');
+          ans.on('message',(m,ri)=>{if(lan.isQuery(m))ans.send(lan.beaconMessage({name:'Lowell clinic network',port:46999,hostId:id,pin:'00'.repeat(32)}),ri.port,ri.address,()=>{});});
+          await new Promise((r)=>ans.bind(0,'127.0.0.1',r));
+          const d=await lan.diagnose({url:'https://127.0.0.1:1',key:'k',pin:realPin,hostId:id,listenMs:700,timeoutMs:800,scanOpts:{port:await freeU(),queryPort:ans.address().port,targets:['127.0.0.1']}});
+          ans.close();
+          return {entries,moved,tried,url:db.getSyncMeta().url,diag:{code:d.code,movedTo:d.movedTo||''}};`);
+      });
     } catch (e) {
       crashL = String((e && e.stack) || e);
     } finally {
@@ -9991,17 +10202,19 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
     log(!!P.aCode && /^MMW1-/.test(P.aCode.code || '') && !!readL.lan && readL.lan.pin === P.aHost.pin && readL.key === P.aHost.key
       && readL.url === 'https://127.0.0.1:' + P.aHost.port && readL.lan.hostId === P.aHost.hostId && readL.lan.name === 'Lowell clinic network',
       'clinic network: the host\'s connection code carries the address the others reach it at (never its own 127.0.0.1 shortcut), the key and the certificate pin — and the screens read it back');
-    const beaconsL = capturedL.map((c) => ({ raw: c.text, b: lanL.readBeacon(Buffer.from(c.text, 'utf8'), c.rinfo) }));
+    const beaconsL = capturedL.slice(0, L.beaconsBeforeReview == null ? capturedL.length : L.beaconsBeforeReview)
+      .map((c) => ({ raw: c.text, b: lanL.readBeacon(Buffer.from(c.text, 'utf8'), c.rinfo) }));
     log(beaconsL.length >= 2 && beaconsL.every((x) => !!x.b && x.b.hostId === (P.aHost || {}).hostId && x.b.fp === String((P.aHost || {}).pin).slice(0, 16)
       && x.b.name === 'Lowell clinic network' && !x.raw.includes((P.aHost || {}).key) && !x.raw.includes((P.aHost || {}).pin)),
       `clinic network: the host announces itself every few seconds — name, port, host id, the start of its fingerprint — and no beacon carries the key or the whole fingerprint (${beaconsL.length} heard)`);
     log(!!foundL && foundL.url === 'https://127.0.0.1:' + P.aHost.port && foundL.name === 'Lowell clinic network' && !JSON.stringify(P.bScan).includes(P.aHost.key),
       'clinic network: a new laptop, signed out, lists the host it hears — its name and address, nothing secret');
-    log(!!P.bWrong && /refused the clinic key/.test(P.bWrong.error) && P.bWrong.configured === false && JSON.stringify(P.aSawWrong) === JSON.stringify(['self']),
-      'clinic network: joining from the list with a wrong key is refused, nothing is saved, and the host lists no new laptop');
-    log(!!P.lookAlike && /refused the clinic key/.test(P.lookAlike.error) && Array.isArray(P.lookAlikeHits) && P.lookAlikeHits.length === 1
+    log(!!P.bWrong && /could not show it holds this clinic key, so the key was not sent to it/.test(P.bWrong.error) && P.bWrong.configured === false && JSON.stringify(P.aSawWrong) === JSON.stringify(['self']),
+      'clinic network: joining from the list with a wrong key is refused before any key is sent (the host cannot prove it holds that one), nothing is saved, and the host lists no new laptop' + (P.bWrong ? ' — ' + P.bWrong.error : ''));
+    log(!!P.lookAlike && /could not show it holds this clinic key/.test(P.lookAlike.error) && /listed twice, choose the other one/.test(P.lookAlike.error)
+      && !/refused the clinic key/.test(P.lookAlike.error) && Array.isArray(P.lookAlikeHits) && P.lookAlikeHits.length === 1
       && /^\/lan\/hello\?nonce=[0-9a-f]+$/.test(P.lookAlikeHits[0].path) && P.lookAlikeHits.every((h) => !h.auth) && P.lookAlike.url === 'https://127.0.0.1:' + P.aStop,
-      'clinic network: a look-alike picked from the list is asked to prove it holds the clinic key before the key is sent — it cannot, and never receives it');
+      'clinic network: a look-alike picked from the list is asked to prove it holds the clinic key before the key is sent — it cannot, never receives it, and the director is pointed to the other entry rather than told the key is wrong' + (P.lookAlike ? ' — ' + P.lookAlike.error : ''));
     log(!!P.aSignedOut && P.aSignedOut.scanOpen === true && /already has its own administrator password/.test(P.dClosed || ''),
       'clinic network: the sign-in screen lists hosts only while Join is open — not once the computer has its own administrator password');
     log(!!P.bJoin && P.bJoin.kind === 'lan' && P.bJoin.pin === P.aHost.pin && P.bJoin.host === P.aHost.hostId && P.bJoin.sync === true && P.bJoin.accounts > 0
@@ -10026,7 +10239,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       'clinic network: a beacon naming the host at a look-alike\'s address moves nothing — the certificate there is checked first; the real host back, sync resumes');
     log(!!P.tests && P.tests.ok === true && /refused the clinic key/.test(P.tests.wrongKey) && /not hosting there/.test(P.tests.notHosting)
       && !!P.dTampered && /not this clinic's host/.test(P.dTampered.error) && P.dTampered.configured === false,
-      '"Test the clinic network": working, the wrong key and a host not hosting each say so; a code with a wrong fingerprint is refused and saves nothing');
+      '"Test the clinic network": working, the wrong key and a host not hosting each say so; a code with a wrong fingerprint is refused and saves nothing' + ' — ' + JSON.stringify({ tests: P.tests, tampered: P.dTampered }).slice(0, 700));
     log(!!P.dInet && P.dInet.kind === 'internet' && P.dInet.inetHasD === true && !!P.dToLan && P.dToLan.config === true && P.dToLan.cursorAtMove === ''
       && P.dToLan.kind === 'lan' && P.dToLan.fromB === true && P.dToLan.offline === true && P.aGotD === true,
       'clinic network: a laptop on an internet server moves to the clinic network by the existing server move — cursor restarted, everything sent — so its records reach the host and the host\'s reach it');
@@ -10040,6 +10253,155 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
     log(!!P.hostStatus && P.hostStatus.running === true && P.hostStatus.laptops >= 2 && !!P.aStopErase && P.aStopErase.stopped === true
       && P.aStopErase.disconnected === true && P.aStopErase.kept === true && P.aStopErase.samePinAfterRestart === true && P.aStopErase.gone === true && P.aStopErase.meta === false,
       'clinic network: Stop hosting stops the host and disconnects this laptop, keeping the hub file — hosting again is the same clinic network; erasing removes it');
+
+    /* ---- v0.0.17 review: the clinic's moves between its own servers ---- */
+    const brokeR = Object.keys(L).filter((k) => /^crash_/.test(k)).map((k) => k.slice(6) + ': ' + L[k]);
+    log(!brokeR.length, 'clinic network, moves: the probes of internet server → clinic network → hand-over, the day brought up, Join with a fresh code and a non-Latin computer name run' + (brokeR.length ? ' — broke in ' + brokeR.join(' | ').slice(0, 900) : ''));
+    const noAdminR = (o) => !!o && Object.values(o).every((x) => !!x && x.aa === false);
+    log(L.rAdminA === true && L.rAdminB === true && noAdminR(L.rAdminOnX) && L.rAdminHost === true && L.rAdminBJoin === true && L.rAdminEJoin === true
+      && noAdminR(L.rAdminLan),
+      `clinic network: admin / admin deleted on the internet server stays deleted when the clinic moves to the clinic network — on the host, on a laptop that only heard of the deletion, and on a new laptop that joins (${JSON.stringify(L.rAdminLan)})`);
+    log(L.rSoleA === true && L.rSoleHost === true && noAdminR(L.rSole),
+      `clinic network: admin / admin deleted by the only laptop that knew, which then hosts the clinic network, stays gone on every laptop that joins it — not only on that one (${JSON.stringify(L.rSole)})`);
+    log(L.rTrialH === true && L.rTrialPJoin === true && L.rTrialPToH === true && !!L.rTrial && L.rTrial.H === true && L.rTrial.P === true,
+      `clinic network: a deletion of the shared admin a laptop heard on another server never deletes a clinic's own administrator — its own password — when that laptop joins its clinic network, though moves to the clinic network pass on deletions (${JSON.stringify(L.rTrial)})`);
+    const noP1R = (o) => !!o && Object.values(o).every((x) => !!x && x.pats === 'P2');
+    log(noP1R(L.rHandBeforeOld) && noAdminR(L.rHandBeforeOld),
+      `clinic network, hand-over: a patient deleted on the old host while a laptop slept stays deleted once the new host takes over — the sleeping laptop joining with it, and a new laptop joining — before the old host has joined; and admin / admin stays gone (${JSON.stringify(L.rHandBeforeOld)})`);
+    log(noP1R(L.rHandAfter) && noAdminR(L.rHandAfter) && !!L.rOldHost && L.rOldHost.running === false && L.rOldHost.hosting === false
+      && L.rOldHost.kind === 'lan' && L.rOldHost.isHost === false,
+      `clinic network, hand-over: the old host joins the new host last, as the guide says — which stops its own hosting — and every laptop ends the same (${JSON.stringify({ old: L.rOldHost, after: L.rHandAfter })})`);
+    log(L.rErase === true && L.rEraseG === true && noP1R(L.rEraseAfter) && noAdminR(L.rEraseAfter),
+      `clinic network: erased and hosted again, the new clinic network every laptop joins keeps the deleted patient and admin / admin away, a new laptop included (${JSON.stringify(L.rEraseAfter)})`);
+    log(!!L.rInetDay && L.rInetDay.A === 'N1,Q0' && L.rInetDay.C === 'N1,Q0' && L.rInetUp === true && !!L.rInetAfter
+      && L.rInetAfter.C === 'N1,Q0' && L.rInetAfter.X === 'N1,Q0',
+      `clinic network → internet server: the day brought up by one laptop, as the guide says, takes the deletion made on another laptop with it — the internet server no longer holds that patient, and it does not come back (${JSON.stringify({ day: L.rInetDay, after: L.rInetAfter })})`);
+    log(!!L.rHostMove && L.rHostMove.ok === true && L.rHostMove.kind === 'internet' && L.rHostMove.running === false && L.rHostMove.hosting === false
+      && !!L.rHostMoveB && L.rHostMoveB.ok === false && /not hosting there/.test(L.rHostMoveB.error) && L.rHostMoveRestart === false,
+      `clinic network: the host moved to the internet server stops hosting as it moves — the other laptops are told it is not hosting rather than shown synced with it, and it does not host again at the next start (${JSON.stringify({ host: L.rHostMove, other: L.rHostMoveB, restart: L.rHostMoveRestart })})`);
+    log(!!L.rRejoin && L.rRejoin.join === true && L.rRejoin.saved === L.rRejoinWant && L.rRejoin.later === true && !!L.rRejoinMoved && L.rRejoinMoved.now !== L.rRejoinMoved.old,
+      `Join a clinic (sign-in), already joined: a fresh code with the host's new address — where beacons do not get through — is kept, and the laptop syncs there (${JSON.stringify(L.rRejoin)})`);
+    log(!!L.rHostJoin && /Other/.test(L.rHostJoin.moveTo) && L.rHostJoin.stopsHosting === true && L.rHostJoin.running === true,
+      `Join a clinic (sign-in), on the host: joining another clinic network asks first and says it stops hosting — and nothing stops until it is confirmed (${JSON.stringify(L.rHostJoin)})`);
+    log(!!L.rName && L.rName.join === true && L.rName.first === true && L.rName.later === true && Array.isArray(L.rNameHost) && L.rNameHost.includes('Ноутбук-регистрация'),
+      `clinic network: a laptop whose computer name is in Cyrillic joins and syncs, and the host lists it by that name (${JSON.stringify({ name: L.rName, host: L.rNameHost })})`);
+
+    /* ---- v0.0.17 review: the host on the Wi-Fi, and what is said ---- */
+    {
+      const R = {};
+      const tlsR = require('tls');
+      const dirR = fs.mkdtempSync(path.join(os.tmpdir(), 'mmwhubr-'));
+      const plainR = require('http').createServer((q, s) => { s.end('hello'); });
+      const sockR = [];
+      try {
+        hubL.init(dirR);
+        const st = await hubL.start({ name: 'Review', port: 0, bindHost: '127.0.0.1', beaconPort: await freeUdpL(), announce: [] });
+        const id = hubL.identity();
+        const base = 'https://127.0.0.1:' + st.port;
+        // Opens a connection, sends the headers of a request whose body is
+        // `claimed` bytes and then only `sent` of them, and reports what the
+        // host does within `ms`: answers (its first line), closes, or waits.
+        const partial = ({ method = 'POST', p = '/v1/push', claimed, sent, auth = '', ms = 2500 }) => new Promise((resolve) => {
+          const s = tlsR.connect({ host: '127.0.0.1', port: st.port, rejectUnauthorized: false }, () => {
+            s.write(`${method} ${p} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: ${claimed}\r\n${auth ? 'authorization: Bearer ' + auth + '\r\n' : ''}\r\n`);
+            s.write(Buffer.alloc(sent, 0x61));
+          });
+          sockR.push(s);
+          let text = '';
+          const done = (what) => { clearTimeout(t); resolve(what === 'answered' ? text.split('\r\n')[0] : what); try { s.destroy(); } catch (_) { /* gone */ } };
+          s.on('data', (d) => { text += d; if (text.includes('\r\n\r\n')) done('answered'); });
+          s.on('close', () => done(text ? 'answered' : 'closed'));
+          s.on('error', () => { /* reported as closed */ });
+          const t = setTimeout(() => done('waited'), ms);
+        });
+        R.noKey = await partial({ claimed: 50 * 1024 * 1024, sent: 1024 });
+        R.noKeyHealth = await partial({ p: '/health', claimed: 10 * 1024 * 1024, sent: 200 * 1024 });
+        R.withKey = await partial({ claimed: 50 * 1024 * 1024, sent: 1024, auth: id.key, ms: 1500 });
+        const pinned = (pth, opts = {}) => lanL.request(base + pth, { pin: id.pin, ...opts });
+        R.wrongKeyBig = await pinned('/v1/push', { method: 'POST', headers: { authorization: 'Bearer WRONG', 'content-type': 'application/json' }, body: Buffer.alloc(32 * 1024, 0x61) })
+          .then((r) => r.status, (e) => e.code || e.message);
+        for (let i = 0; i < 3; i++) await new Promise((resolve) => {
+          const q = httpsL.request({ host: '127.0.0.1', port: st.port, path: '/v1/x', method: 'OPTIONS', rejectUnauthorized: false, headers: { 'x-mmw-device': 'spoof-' + i, 'x-mmw-computer': 'EVIL-' + i } }, (s) => { s.resume(); s.on('end', resolve); });
+          q.on('error', resolve); q.end();
+        });
+        R.spoofed = hubL.status().laptops.map((x) => x.computer);
+        for (let i = 0; i < hubL.MAX_LAPTOPS + 5; i++) {
+          await pinned('/v1/pull?since=&limit=1', { headers: { authorization: 'Bearer ' + id.key, 'x-mmw-device': 'dev-' + i, 'x-mmw-computer': encodeURIComponent('PC ' + i) } });
+        }
+        R.capped = hubL.status().laptops.length;
+        R.named = hubL.status().laptops.some((x) => x.computer === 'PC ' + (hubL.MAX_LAPTOPS + 4));
+        const tooBig = await pinned('/v1/push', { method: 'POST', timeoutMs: 60000, headers: { authorization: 'Bearer ' + id.key, 'content-type': 'application/json' }, body: Buffer.alloc(101 * 1024 * 1024, 0x61) })
+          .then((r) => ({ status: r.status }), (e) => ({ error: e.code || e.message, code: lanL.classify(e) }));
+        R.tooBig = tooBig;
+        R.tooBigSaid = lanL.explain(Object.assign(new Error('Request too large.'), { status: 413 }), '192.168.1.23:47800');
+        R.after = (await pinned('/health')).status;
+        // Something that is not TLS at the saved address.
+        await new Promise((r) => plainR.listen(0, '127.0.0.1', r));
+        const plainUrl = 'https://127.0.0.1:' + plainR.address().port;
+        R.plain = await lanL.request(plainUrl + '/health', { pin: id.pin, timeoutMs: 3000 }).then(() => 'answered', (e) => lanL.classify(e));
+        const dPlain = await lanL.diagnose({ url: plainUrl, key: id.key, pin: id.pin, hostId: id.hostId, listenMs: 300, timeoutMs: 2000, scanOpts: { port: await freeUdpL(), queryPort: await freeUdpL(), targets: ['127.0.0.1'] } });
+        R.plainDiag = { code: dPlain.code, message: dPlain.message };
+      } catch (e) {
+        R.crash = String((e && e.stack) || e).slice(0, 500);
+      } finally {
+        for (const s of sockR) { try { s.destroy(); } catch (_) { /* gone */ } }
+        try { plainR.close(); } catch (_) { /* closed */ }
+        try { hubL.shutdown(); } catch (_) { /* closed */ }
+        fs.rmSync(dirR, { recursive: true, force: true });
+      }
+      log(!R.crash && R.noKey === 'HTTP/1.1 401 Unauthorized' && R.noKeyHealth === 'closed' && R.withKey === 'waited' && R.wrongKeyBig === 401,
+        `clinic network host: a request without the clinic key is answered 401 before its body is read — the host does not wait for a 50 MB body it would have kept in memory; a body sent anywhere else without the key is cut off past 64 KB; one with the key is read as before; a wrong key still hears "refused" whole (${JSON.stringify({ crash: R.crash, noKey: R.noKey, health: R.noKeyHealth, withKey: R.withKey, wrong: R.wrongKeyBig })})`);
+      const srcHubR = readSrcL('../src/main/hub.js');
+      log(/server\.maxConnections = MAX_CONNECTIONS/.test(srcHubR) && /headersTimeout: \d+/.test(srcHubR) && /requestTimeout: \d+/.test(srcHubR) && /handshakeTimeout: \d+/.test(srcHubR)
+        && hubL.MAX_CONNECTIONS > 0 && hubL.MAX_CONNECTIONS <= 128,
+        'clinic network host: it takes a limited number of connections at once, and lets go of one that never finishes its handshake, its headers or its request');
+      log(Array.isArray(R.spoofed) && R.spoofed.length === 0 && R.capped === hubL.MAX_LAPTOPS && R.named === true,
+        `clinic network host: only a laptop with the clinic key is listed as connected — made-up ones sent without it are not — and the list keeps at most ${hubL.MAX_LAPTOPS}, the most recent (${JSON.stringify({ spoofed: R.spoofed, capped: R.capped })})`);
+      log(!!R.tooBig && R.tooBig.status === 413 && /too large to send at once/.test(R.tooBigSaid) && R.after === 200,
+        `clinic network host: a push over 100 MB is answered "too large" — not cut off, which read as "no host answered" and sent the laptop looking for the host — and the host carries on (${JSON.stringify(R.tooBig)})`);
+      log(R.plain === 'not_mmw' && !!R.plainDiag && R.plainDiag.code === 'not_mmw' && /Something answered at/.test(R.plainDiag.message),
+        `"Test the clinic network": something that is not the host's encrypted server at the address — a plain web server — is "something answered, but it is not a clinic network host", not "no host answered" (${JSON.stringify({ plain: R.plain, diag: R.plainDiag })})`);
+    }
+
+    /* ---- beacons: a look-alike announcing the host's id ---- */
+    {
+      const S = L.rSpoof || {};
+      log(Array.isArray(S.entries) && S.entries.length === 2 && S.entries.some((e) => e.fp === 'ab'.repeat(8) && JSON.stringify(e.urls) === JSON.stringify(['https://127.0.0.1:46015']))
+        && S.moved === 'https://127.0.0.1:46015' && S.url === 'https://127.0.0.1:46015' && Array.isArray(S.tried) && S.tried.includes('https://127.0.0.1:46998') && !S.tried.includes('https://127.0.0.1:46999'),
+        `clinic network: a look-alike announcing the host's id with another fingerprint, heard first, is listed on its own — the host's address stays with the host — and a joined laptop still follows the host, checking each address that claims the right fingerprint (${JSON.stringify(S).slice(0, 600)})`);
+      log(!!S.diag && S.diag.code === 'not_hosting' && S.diag.movedTo === '',
+        `"Test the clinic network": with the host off, a look-alike answering with the host's id and another fingerprint is not taken for the host — not "it moved there", not "its firewall" (${JSON.stringify(S.diag)})`);
+    }
+
+    /* ---- where the host announces itself ---- */
+    {
+      const hb = (list) => chkL(() => lanL.hostBroadcastTargets) ? lanL.hostBroadcastTargets(list) : null;
+      const wifi = { address: '192.168.1.23', netmask: '255.255.255.0', iface: 'Wi-Fi', preferred: true };
+      const hotel = { address: '192.0.2.2', netmask: '255.255.255.0', iface: 'eth0', preferred: false };
+      const vbox = { address: '192.168.56.1', netmask: '255.255.255.0', iface: 'VirtualBox Host-Only', preferred: false };
+      const onlyWifi = hb([wifi]), withHotel = hb([hotel, wifi]), onlyHotel = hb([hotel]), withVbox = hb([wifi, vbox]);
+      log(JSON.stringify(onlyWifi) === JSON.stringify(['192.168.1.255', '255.255.255.255']) && JSON.stringify(withHotel) === JSON.stringify(['192.168.1.255'])
+        && JSON.stringify(onlyHotel) === JSON.stringify([]) && JSON.stringify(withVbox) === JSON.stringify(['192.168.1.255', '255.255.255.255'])
+        && /lan\.hostBroadcastTargets\(\)/.test(readSrcL('../src/main/hub.js')),
+        `clinic network host: it announces itself on the private networks it is on, and nowhere else — not on another kind of network, nor by the everywhere-address while it is on one (${JSON.stringify({ onlyWifi, withHotel, onlyHotel, withVbox })})`);
+      log(chkL(() => hubL.computerName(encodeURIComponent('Ноутбук-регистрация')) === 'Ноутбук-регистрация' && hubL.computerName('REG-LAPTOP') === 'REG-LAPTOP'
+        && hubL.computerName('%E0%A4%A') === '%E0%A4%A' && hubL.computerName(encodeURIComponent('A\u0007B')) === 'AB')
+        && /'x-mmw-computer': encodeURIComponent\(/.test(readSrcL('../src/main/cloud.js')),
+        'clinic network: a laptop\'s computer name travels percent-encoded and the host reads it back — any language, nothing that is not text');
+    }
+
+    /* ---- the guide, for the moves ---- */
+    {
+      const flatR = readSrcL('../docs/CLOUD_SETUP.md').replace(/\s+/g, ' ');
+      const secR = flatR.slice(flatR.indexOf('## Clinic network (no internet)'), flatR.indexOf('## Troubleshooting'));
+      const handR = secR.slice(secR.indexOf('### Moving the host to another laptop'), secR.indexOf('### Internet and the clinic network'));
+      const inetR = secR.slice(secR.indexOf('### Internet and the clinic network'), secR.indexOf('### What the clinic network does not do'));
+      log(/every deletion on the laptop goes with it/.test(secR) && /The old host joins the new host too/.test(handR) && /stops its hosting/.test(handR)
+        && !/3\. On the old host, \*\*Stop hosting\*\*\./.test(handR) && /stops hosting as part of the move/.test(handR)
+        && /connect \*\*one\*\* of them — not the host, which would stop hosting/.test(inetR) && /every laptop's records and deletions/.test(inetR)
+        && /move every laptop, the host last/.test(inetR) && /listed twice/i.test(secR),
+        'cloud guide: moving to or from the clinic network passes on every deletion; in a hand-over the old host joins the new one last, which stops its hosting; the day goes up by one laptop that is not the host; a name listed twice is explained');
+    }
 
     /* ---- "Test the clinic network": host not found, or its firewall ---- */
     try {
@@ -10116,7 +10478,8 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         'Stop hosting', 'Allow through the firewall', 'Erase the clinic network data', 'Look again', 'Choose', 'Show connection code',
         'Windows Defender Firewall has blocked some features of this app', 'Host address', 'Clinic network name',
         'is not this clinic\'s host', 'its firewall is blocking the connection', 'No clinic network host answered', 'Mission Minded is not hosting there',
-        'Online pre-registration is not available on the clinic network'];
+        'Online pre-registration is not available on the clinic network', 'could not show it holds this clinic key, so the key was not sent to it',
+        'but it is not a Mission Minded clinic network host'];
       const appL = ['../src/renderer/js/views/admin.js', '../src/renderer/js/views/setup.js', '../src/main/lan.js', '../src/main/hub.js', '../src/main/cloud.js'].map(readSrcL).join('\n');
       const missDocs = QUOTED_L.filter((q) => !flatL.includes(q));
       const missApp = QUOTED_L.filter((q) => !appL.includes(q));
@@ -10284,6 +10647,45 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         'Cloud tab, hosting on a Mac: allow incoming connections when macOS asks — no Windows helper');
       pg.remove();
 
+      // The host, moved elsewhere from here: the question says it stops hosting.
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://127.0.0.1:47800', kind: 'lan',
+        lanPin: PIN_L, lanPinShown: lanL.showPin(PIN_L, 4), lanHost: HOST_L, lanName: 'Lowell clinic network', isHost: true, lastOk: new Date().toISOString() };
+      hsL = { ...hubRunning };
+      pg = await cloudPage();
+      pressL(pg, 'Internet server');
+      await settleL(20);
+      callsL.length = 0;
+      setL(fieldL(pg, /^Server address/), 'mmw-sync.lowell.workers.dev');
+      setL(fieldL(pg, /^Clinic key/), 'online key 9');
+      pressL(pg, 'Connect');
+      await settleL();
+      const hostMvOv = $all('.modal-overlay').pop();
+      const hostMvTxt = hostMvOv ? hostMvOv.textContent : '';
+      if (hostMvOv) pressL(hostMvOv, 'Cancel');
+      await settleL();
+      log(/This laptop also stops hosting the clinic network “Lowell clinic network”/.test(hostMvTxt) && /keep working on their own until they join another host/.test(hostMvTxt)
+        && !callsL.some((c) => c[0] === 'config'),
+        'Cloud tab, hosting: moving the host to an internet server asks first and says it stops hosting the clinic network — cancelled, nothing moves');
+      pg.remove();
+      // Hosting, while this laptop syncs with an internet server.
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://mmw-sync.lowell.workers.dev', kind: 'internet' };
+      hsL = { ...hubRunning };
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const notOwnL = cardL(pg, /This laptop hosts the clinic network/);
+      const notOwnTxt = notOwnL ? notOwnL.textContent : '';
+      callsL.length = 0;
+      pressL(notOwnL, 'Sync this laptop with it');
+      await settleL();
+      const ownOvL = $all('.modal-overlay').pop();
+      if (ownOvL) pressL(ownOvL, $all('button', ownOvL).pop().textContent.trim());
+      await settleL();
+      log(/does not sync with it — it is connected to mmw-sync\.lowell\.workers\.dev/.test(notOwnTxt) && /Its own records do not reach the other laptops/.test(notOwnTxt)
+        && JSON.stringify(callsL) === JSON.stringify([['hubStart', 'Lowell clinic network', true]]),
+        'Cloud tab: a laptop hosting the clinic network without syncing with it says so, and "Sync this laptop with it" moves it onto its own clinic network, asked first');
+      pg.remove();
+
       // Stopped, with the hub file kept.
       stL = { ...baseStL }; hsL = { ...hubRunning, running: false };
       pg = await cloudPage();
@@ -10388,6 +10790,22 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       pressL(jv, 'Connect and sync');
       await settleL(20);
       jv.remove();
+      // The host, joining elsewhere from here, is told it stops hosting.
+      const joinOkL = window.api.cloudJoin;
+      window.api.cloudJoin = async ({ move } = {}) => (move ? { ok: true, data: { ok: true, sync: { ok: true }, needsSetup: false, accounts: 2 } }
+        : { ok: true, data: { moveTo: 'the clinic network “Sandy”', stopsHosting: true } });
+      jv = await joinView();
+      setL(fieldL(jv, /^Connection code/), CODE_L);
+      pressL(jv, 'Connect and sync');
+      await settleL(20);
+      const jOvL = $all('.modal-overlay').pop();
+      const jTxtL = jOvL ? jOvL.textContent : '';
+      if (jOvL) pressL(jOvL, 'Cancel');
+      await settleL();
+      jv.remove();
+      window.api.cloudJoin = joinOkL;
+      log(/Joining the clinic network “Sandy”/.test(jTxtL) && /This laptop also stops hosting its clinic network/.test(jTxtL),
+        'Join a clinic (sign-in): on the host, the question before moving says it stops hosting its clinic network');
       log(/Clinic networks on this Wi-Fi/.test(listTxt) && /Lowell clinic network/.test(listTxt) && filled === '192.168.1.23:47800'
         && JSON.stringify(joinsL) === JSON.stringify([
           ['192.168.1.23:47800', KEY_L, false, { hostId: HOST_L, fp: PIN_L.slice(0, 16), name: 'Lowell clinic network' }],

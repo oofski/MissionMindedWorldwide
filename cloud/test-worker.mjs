@@ -1222,8 +1222,10 @@ async function hubChecks() {
     const proof = await lan.learnPin(base, id.key);
     let badProof = null;
     try { await lan.learnPin(base, 'WRONG-KEYXX-XXXXX-XXXXX-XXXXX'); } catch (e) { badProof = e; }
-    check('clinic network hub: joining without a code, the host proves it holds the key — and a wrong key gets no pin',
-      proof.pin === id.pin && proof.hostId === id.hostId && !!badProof && badProof.status === 401);
+    // A failed proof is its own reason, not the host refusing the key: a
+    // look-alike listed under the clinic's name fails it the same way.
+    check('clinic network hub: joining without a code, the host proves it holds the key — and a wrong key gets no pin, told as a proof that failed',
+      proof.pin === id.pin && proof.hostId === id.hostId && !!badProof && badProof.noProof === true && lan.classify(badProof) === 'no_proof');
     await hubMod.stop();
     await hubMod.erase();
   } finally {

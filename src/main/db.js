@@ -1266,7 +1266,8 @@ function reviveRefusedUserDeletions() {
     db.transaction(() => {
       db.prepare('DELETE FROM tombstones WHERE uid = ?').run(r.uid);
       // It never left this laptop — not yet sent, or held back here on a move
-      // to another server ('held' / 'local'), which no server has seen.
+      // to another server ('held' / 'local'), which the server it is on now
+      // has not seen.
       if (!r.tomb_sent || r.tomb_sent === 'held' || r.tomb_sent === 'local') return;
       const latest = [r.tomb_at, r.updated_at].filter(Boolean).map(String).sort().pop();
       db.prepare('UPDATE users SET updated_at = ?, content_rev = ?, synced_rev = NULL WHERE id = ?')
@@ -4882,17 +4883,22 @@ function applyRemoteRows(remoteRows) {
     // tombstone is retired and the row applies normally.
     //
     // This laptop's deletion of the shared admin, kept from before a change of
-    // server ('local', 'held' — see markAllUnsent), was about another server's
-    // copy, or its own: it refuses only admin / admin as a fresh laptop sends
-    // it, and gives way to any other copy, which is the clinic's own
-    // administrator on this server. One that never reached any server ('held')
-    // goes once this server is seen to hold that untouched copy: deleting it
-    // there takes nothing but the shipped password, and is what keeps it gone
-    // on the laptop that sent it and every laptop joining later.
+    // server ('held' — see markAllUnsent; 'local' from v0.0.16), was about
+    // another server's copy, or its own: it refuses only admin / admin as a
+    // fresh laptop sends it, and gives way to any other copy, which is the
+    // clinic's own administrator on this server. And it goes once this server
+    // is seen to hold that untouched copy: deleting it there takes nothing but
+    // the shipped password, and is what keeps it gone on the laptop that sent
+    // it and every laptop joining later. v0.0.16 let it go only when it had
+    // never reached a server. One that had ('local') stayed here alone, so on
+    // the server the laptop moved to, every laptop that joined later sent in
+    // its own admin / admin, and every laptop but this one let it in. Moving
+    // is routine on the clinic network: hosting it, joining it, handing it to
+    // another laptop.
     const tomb = db.prepare('SELECT updated_at, synced_rev FROM tombstones WHERE uid = ?').get(env.uid);
     if (tomb && (tomb.synced_rev === 'local' || tomb.synced_rev === 'held')) {
       if (isShippedAdminCopy(env.uid, env.updated_at, env.data)) {
-        if (tomb.synced_rev === 'held') db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE uid = ?').run(env.uid);
+        db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE uid = ?').run(env.uid);
         skipped++; return;
       }
       db.prepare('DELETE FROM tombstones WHERE uid = ?').run(env.uid);
@@ -5180,25 +5186,38 @@ function resetSyncCursor() {
 // Forgotten, it took admin / admin back as soon as any fresh laptop joined the
 // new server and sent its seed — and a laptop's FIRST connection counts as a
 // move, so a director who deleted admin / admin before connecting got it back
-// on every laptop, his own included. It is kept, unsent ('local'; 'held' when
-// it never reached any server, which goes once the new server is seen to hold
-// only the shipped admin / admin — see applyRemoteRows), against the shipped
-// copy alone.
+// on every laptop, his own included. It is kept, unsent ('held'), against the
+// shipped copy alone, and goes once the new server is seen to hold only the
+// shipped admin / admin — see applyRemoteRows. And so is a deletion of it this
+// laptop only HEARD about (v0.0.17). Forgotten, the next fresh laptop's
+// admin / admin was let in by every laptop that had not made the deletion
+// itself — on a clinic network, every laptop but the one that hosted it first.
+// Whoever made it, all it can take on the new server is the shipped password
+// the sign-in screen prints.
 //
 // sameServer: reconnecting, after a Disconnect, to the server this laptop was
 // on. Nothing there is another server's, so the deletions go as they would
 // have had it stayed connected.
-function markAllUnsent({ sameServer = false } = {}) {
+//
+// relay (v0.0.17): a move between the clinic's own servers — to or from its
+// clinic network: hosting it, joining it, handing it to another laptop,
+// bringing the day up to the internet server. Each of those is the same
+// clinic's records moving on, so every deletion here goes too, heard or made
+// here (the shared event and admin still as above). Forgotten, a deletion
+// made on any other laptop was gone from every laptop that moved, and the
+// first laptop to arrive still holding the record — one asleep while it was
+// deleted, or the internet server itself — brought the patient back to all of
+// them. Between two internet servers they are still forgotten, as above.
+function markAllUnsent({ sameServer = false, relay = false } = {}) {
   db.transaction(() => {
     for (const table of Object.values(ENTITY_TABLE)) {
       db.prepare(`UPDATE ${table} SET synced_rev = NULL WHERE synced_rev IS NOT NULL`).run();
     }
     if (!sameServer) {
       db.prepare('DELETE FROM tombstones WHERE uid = ?').run(DEFAULT_EVENT_UID);
-      db.prepare(`UPDATE tombstones SET synced_rev = CASE WHEN synced_rev IS NULL OR synced_rev = 'held' THEN 'held' ELSE 'local' END
-                  WHERE uid = ? AND IFNULL(synced_rev, '') != 'received'`).run(DEFAULT_ADMIN_UID);
+      db.prepare("UPDATE tombstones SET synced_rev = 'held' WHERE uid = ?").run(DEFAULT_ADMIN_UID);
     }
-    db.prepare("DELETE FROM tombstones WHERE synced_rev = 'received'").run();
+    if (!relay) db.prepare("DELETE FROM tombstones WHERE synced_rev = 'received'").run();
     db.prepare("UPDATE tombstones SET synced_rev = NULL WHERE synced_rev IS NOT NULL AND synced_rev NOT IN ('local', 'held')").run();
   })();
   return { ok: true };

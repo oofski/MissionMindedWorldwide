@@ -271,7 +271,12 @@ function register(getMainWindow) {
   handle('users:clearEventStaff', (eventId) => db.clearEventStaff(currentUser, eventId));
 
   // v1.1.0 cloud sync
-  handle('cloud:config', (payload) => cloud.applyConfig(payload || {}));
+  handle('cloud:config', async (payload) => {
+    const before = db.getSyncMeta();
+    const r = cloud.applyConfig(payload || {});
+    await leaveOwnHub(before);
+    return r;
+  });
   // A blank key means "keep the saved one", as the Cloud tab says — but only
   // for the server it was saved for.
   // lan: the address is a clinic network host ({ pin, hostId, fp, name } as
@@ -283,9 +288,11 @@ function register(getMainWindow) {
 
   // Unhook this station from any sync server: endpoint, key and cursor all go.
   // Records are untouched — disconnecting is not erasing.
-  handle('cloud:disconnect', () => {
+  handle('cloud:disconnect', async () => {
+    const before = db.getSyncMeta();
     const r = db.disconnectCloud();
     cloud.applyConfig({});          // stops the timer via restartTimer()
+    await leaveOwnHub(before);
     db.audit(currentUser, 'cloud.disconnect', 'settings', null, 'Cloud sync disconnected');
     return r;
   });
@@ -348,11 +355,22 @@ function register(getMainWindow) {
     // included. So the first press only answers with the question (moveTo),
     // and the laptop moves on the confirmed one (move).
     if (!currentUser && !same && !move && elsewhere) {
-      return { moveTo: target ? networkLabel(target.name, joinUrl) : new URL(cloud.normalizeUrl(url)).host };
+      // stopsHosting: this laptop hosts the clinic network it is on, and
+      // moving stops that (leaveOwnHub) — said in the question.
+      const ownId = hub.runningHostId();
+      return { moveTo: target ? networkLabel(target.name, joinUrl) : new URL(cloud.normalizeUrl(url)).host,
+        stopsHosting: !!ownId && saved.lanHost === ownId };
     }
     if (!same) {
       cloud.applyConfig({ url: joinUrl, key, online: true, ...(target ? { lan: target } : {}) });
+      await leaveOwnHub(saved);
       db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + (target ? networkLabel(target.name, joinUrl) : cloud.normalizeUrl(url)));
+    } else if (target && cloud.lanUrl(health.url) !== cloud.normalizeUrl(saved.url)) {
+      // The same host at the address a fresh code or a typed address gives —
+      // what this screen tells someone to do when the router stops beacons,
+      // so the laptop cannot find the host's new address by itself. Kept, as
+      // Admin → Cloud keeps it. Not a move: the same server.
+      cloud.repointLan(health.url, target.pin, target.name);
     }
     const sync = await cloud.syncSettled();
     return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
@@ -375,6 +393,23 @@ function register(getMainWindow) {
   // Join's rule for a signed-out caller: open while anyone at this keyboard
   // could become the administrator anyway (see cloud:join).
   function joinOpen() { return db.needsSetup() || db.defaultAdminActive(); }
+
+  // This laptop hosts the clinic network and has just been moved off it — to
+  // the internet server, to another clinic network, or disconnected. It
+  // stops hosting, as part of the move it was asked about. Left hosting, the
+  // other laptops went on showing "synced" with it while its own new records
+  // never reached them nor theirs it — the clinic split in two without a
+  // word — and it hosted again at every start. They now see the host is not
+  // hosting, as when it is switched off, and join the next one.
+  async function leaveOwnHub(before) {
+    const ownId = hub.runningHostId();
+    if (!ownId || !before || !before.configured || before.lanHost !== ownId) return false;
+    const now = db.getSyncMeta();
+    if (now.configured && now.lanPin === before.lanPin) return false;
+    await hub.stop();
+    db.audit(currentUser, 'hub.stop', 'settings', null, 'Clinic network stopped: this laptop moved to another server');
+    return true;
+  }
 
   // How a server is named in a question: a clinic network by its name, an
   // internet server by its address.

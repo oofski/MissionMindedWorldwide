@@ -167,6 +167,10 @@ export function renderSetup(ctx, params = {}) {
               el('p', { style: 'margin:0 0 var(--space-3);' }, [
                 `This laptop is already connected to another clinic server. Joining ${to} sends every record on this laptop to ${to} — patients, staff accounts and events, the ones from the other server included — and they stay there.`,
               ]),
+              // The host of a clinic network stops hosting it as it moves.
+              r.stopsHosting ? el('p', { class: 'lan-move-stops', style: 'margin:0 0 var(--space-3);' }, [
+                'This laptop also stops hosting its clinic network. The other laptops keep working on their own until they join another host, or the internet server.',
+              ]) : null,
               el('p', { style: 'margin:0;' }, [
                 'If this laptop is going to a different clinic, cancel, sign in as an administrator, back it up, and erase it with Backup & Export → Reset this computer before connecting it.',
               ]),

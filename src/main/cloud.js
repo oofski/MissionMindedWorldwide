@@ -86,9 +86,12 @@ async function httpJson(method, url, key, body, pin) {
 
 // The same request to a clinic network host. Every request also says which
 // laptop it is from (its device id and computer name — no secret), so the
-// host's screen can list the laptops connected now.
+// host's screen can list the laptops connected now. The name goes
+// percent-encoded (hub.computerName reads it back): a header carries Latin-1
+// only, and a computer named in Cyrillic or Chinese failed every request
+// before it was sent — joined, and never able to sync.
 async function lanJson(method, url, key, body, pin) {
-  const headers = { 'content-type': 'application/json', 'x-mmw-device': db.ensureDeviceId(), 'x-mmw-computer': String(os.hostname() || '').slice(0, 64) };
+  const headers = { 'content-type': 'application/json', 'x-mmw-device': db.ensureDeviceId(), 'x-mmw-computer': encodeURIComponent(String(os.hostname() || '').slice(0, 64)) };
   if (key) headers.authorization = 'Bearer ' + key;
   const r = await lan.request(url, { method, headers, body: body ? JSON.stringify(body) : undefined, pin, timeoutMs: HTTP_TIMEOUT_MS });
   let json = null;
@@ -209,7 +212,16 @@ async function testClinicNetwork(url, key, t) {
   let hostId = String(t.hostId || '');
   let name = String(t.name || '');
   const refuse = (e, at) => { let h = at; try { h = new URL(at).host; } catch { /* as given */ } return Object.assign(new Error(lan.explain(e, h)), { code: lan.classify(e) || 'not_mmw' }); };
-  const notAnswering = (code) => code === 'timeout' || code === 'not_found' || code === 'not_hosting';
+  // Something else on the port the host had counts as the host not
+  // answering there, so where it is now is looked for as well.
+  const notAnswering = (code) => code === 'timeout' || code === 'not_found' || code === 'not_hosting' || code === 'not_mmw';
+  // Every address the host was heard at, in turn, until one holds up — a
+  // look-alike can answer first (see lan.diagnose).
+  const firstThat = async (urls, fn) => {
+    let firstErr = null;
+    for (const u of urls) { try { return { url: u, value: await fn(u) }; } catch (e) { if (!firstErr) firstErr = e; } }
+    throw refuse(firstErr || { pinMismatch: true }, urls[0]);
+  };
   let at = base;
   if (!pin) {
     const learn = (u) => lan.learnPin(u, key, { expectPrefix: t.fp || '', expectHost: hostId });
@@ -218,10 +230,10 @@ async function testClinicNetwork(url, key, t) {
       if (!notAnswering(lan.classify(e))) throw refuse(e, at);
       // Not answering here: why — or where it is now. Nothing is sent but
       // a request for /health; the key goes nowhere until the host proves it.
-      const d0 = await lan.diagnose({ url: at, hostId });
+      const d0 = await lan.diagnose({ url: at, hostId, fp: t.fp || '' });
       if (!d0.movedTo) throw Object.assign(new Error(d0.message || lan.explain(e, host)), { code: d0.code });
-      at = d0.movedTo;
-      try { learned = await learn(at); } catch (e2) { throw refuse(e2, at); }
+      const found = await firstThat(d0.movedToAll || [d0.movedTo], learn);
+      at = found.url; learned = found.value;
     }
     pin = learned.pin; hostId = learned.hostId || hostId; name = learned.name || name;
   }
@@ -230,10 +242,11 @@ async function testClinicNetwork(url, key, t) {
   // changed, or a joined laptop's saved address gone stale: followed, once
   // the certificate there is the pinned one.
   if (!d.ok && d.movedTo) {
-    let presented = '';
-    try { presented = await lan.peerPin(d.movedTo); } catch (e) { throw refuse(e, d.movedTo); }
-    if (presented !== pin) throw refuse({ pinMismatch: true }, d.movedTo);
-    at = d.movedTo;
+    const found = await firstThat(d.movedToAll || [d.movedTo], async (u) => {
+      if (await lan.peerPin(u) !== pin) throw Object.assign(new Error('The host\'s certificate does not match.'), { pinMismatch: true });
+      return u;
+    });
+    at = found.url;
     d = await lan.diagnose({ url: at, key, pin, hostId });
   }
   if (!d.ok) throw Object.assign(new Error(d.message), { code: d.code });
@@ -461,9 +474,12 @@ async function refind({ scan = lan.scan } = {}) {
   if (!m.configured || !m.lanPin || !m.lanHost) return '';
   if (require('./hub').runningHostId() === m.lanHost) return '';
   const hosts = await scan({ ms: 2000 });
-  const here = hosts.find((h) => h.hostId === m.lanHost && m.lanPin.startsWith(h.fp));
-  if (!here) return '';
-  for (const url of here.urls) {
+  // Every address heard for this host with the start of its fingerprint: a
+  // look-alike announcing its id with another fingerprint is an entry of its
+  // own (lan.scan), and one copying the start of it is weeded out here by
+  // the handshake.
+  const urls = [...new Set(hosts.filter((h) => h.hostId === m.lanHost && m.lanPin.startsWith(h.fp)).flatMap((h) => h.urls))];
+  for (const url of urls) {
     if (url === trimUrl(m.url)) continue;
     let presented = '';
     try { presented = await lan.peerPin(url); } catch { continue; }
@@ -571,8 +587,15 @@ function applyConfig({ url, key, enabled, mode, online, lan: lanIn }) {
   // is another server's: its own deletions of the shared admin and event go as
   // they would have had it stayed connected (see db.markAllUnsent).
   // A clinic network host is the same server by its certificate, as above.
-  const sameServer = newServer && !prior && next === identityOf(db.getSetting('cloud_last_url'), db.getSetting('cloud_last_pin'));
-  if (newServer) { db.resetSyncCursor(); db.markAllUnsent({ sameServer }); db.noteAccountsHere(); }
+  const last = identityOf(db.getSetting('cloud_last_url'), db.getSetting('cloud_last_pin'));
+  const sameServer = newServer && !prior && next === last;
+  // To or from the clinic network — from the one this laptop was last on,
+  // when it was disconnected (Stop hosting disconnects the host) — is the
+  // clinic's own records moving between its own servers: every deletion here
+  // goes too, not only this laptop's own (see db.markAllUnsent).
+  const isLan = (id) => String(id || '').startsWith('lan:');
+  const relay = newServer && !sameServer && (isLan(next) || isLan(prior || last));
+  if (newServer) { db.resetSyncCursor(); db.markAllUnsent({ sameServer, relay }); db.noteAccountsHere(); }
   db.setSyncMeta(patch);
   // The address alone, kept through a Disconnect (never the key) — and on
   // the clinic network the host's pin with it, since the address is not

@@ -796,13 +796,19 @@ export function renderAdmin(ctx, params = {}) {
     ]);
 
     // Moving this laptop to another server — another internet server, or
-    // between the internet and the clinic network — asked the same way.
+    // between the internet and the clinic network — asked the same way. The
+    // host of a clinic network stops hosting it as it moves (ipc.js
+    // leaveOwnHub), so the question says so: left running, the others kept
+    // syncing with a host whose own records no longer reached them.
     const askMove = (to, verb) => modal({
       title: 'Move this laptop to a different server?',
       body: el('div', {}, [
         el('p', { style: 'margin:0 0 var(--space-3);' }, [
           `This laptop is connected to ${whereNow()}. ${verb} ${to} sends every record on this laptop to ${to} — patients, staff accounts and events, the ones from ${whereNow()} included — and they stay there.`,
         ]),
+        st.isHost ? el('p', { class: 'lan-move-stops', style: 'margin:0 0 var(--space-3);' }, [
+          `This laptop also stops hosting ${whereNow()}. The other laptops keep working on their own until they join another host, or the internet server.`,
+        ]) : null,
         el('p', { style: 'margin:0;' }, [
           'If this laptop is going to a different clinic, cancel, back it up, and erase it with Backup & Export → Reset this computer before connecting it.',
         ]),
@@ -1081,7 +1087,7 @@ export function renderAdmin(ctx, params = {}) {
       const hostingHere = !!hs && hs.running;
 
       if (kind === 'lan') body.append(connectionCard());
-      if (hostingHere || onOwn) body.append(hostingCard(hs));
+      if (hostingHere || onOwn) body.append(hostingCard(hs, onOwn));
       else {
         if (!st.configured) body.append(introCard());
         if (kind === 'lan') body.append(joinedCard());
@@ -1139,7 +1145,9 @@ export function renderAdmin(ctx, params = {}) {
 
     // This laptop hosts: where the others reach it, who is connected, and
     // how to stop.
-    function hostingCard(h) {
+    // onOwn false: this laptop hosts the clinic network without syncing with
+    // it — for the others only, its own records not reaching them.
+    function hostingCard(h, onOwn = true) {
       h = h || { addresses: [], laptops: [] };
       const pill = h.running
         ? (h.error ? el('span', { class: 'pill pill--amber' }, [icon('alert', { size: 12 }), 'Problem'])
@@ -1165,6 +1173,16 @@ export function renderAdmin(ctx, params = {}) {
           catch (e) { toast(e.message, 'error'); }
         },
       }, [icon('x', { size: 16 }), 'Stop hosting']);
+      const ownBtn = h.running && !onOwn ? el('button', {
+        class: 'btn btn--primary',
+        onClick: async () => {
+          if (st.configured && !(await askMove(netLabel(h.name), 'Syncing it with'))) return;
+          ownBtn.disabled = true;
+          try { await api.hubStart(h.name, true); cloudChoice = 'lan'; toast('This laptop syncs with the clinic network it hosts.', 'success'); paint(); }
+          catch (e) { toast(e.message, 'error'); }
+          finally { ownBtn.disabled = false; }
+        },
+      }, [icon('refresh', { size: 16 }), 'Sync this laptop with it']) : null;
       const againBtn = h.running ? null : el('button', {
         class: 'btn btn--primary',
         onClick: async () => {
@@ -1180,6 +1198,9 @@ export function renderAdmin(ctx, params = {}) {
           pill,
         ]),
         h.error ? el('div', { class: 'banner banner--alert' }, [icon('alert', { size: 14 }), el('span', {}, [h.error])]) : null,
+        h.running && !onOwn ? el('div', { class: 'banner banner--warn lan-not-own' }, [icon('alert', { size: 14 }), el('span', {}, [
+          `This laptop hosts the clinic network but does not sync with it — it is ${st.configured ? `connected to ${whereNow()}` : 'not connected to any server'}. Its own records do not reach the other laptops, nor theirs this one. Sync it with the clinic network, or stop hosting.`,
+        ])]) : null,
         el('div', { class: 'kv-grid', style: 'margin:0 0 var(--space-3);' }, [
           kv('Clinic network', h.name || 'Clinic network'),
           kv('Other laptops reach it at', reach.length ? reach[0].url.replace(/^https:\/\//, '') : 'Not on a network', { class: 'kv-val lan-address' }),
@@ -1208,7 +1229,7 @@ export function renderAdmin(ctx, params = {}) {
           'Keep this laptop on, plugged in and awake while the clinic is open. If it sleeps or is switched off, the other laptops keep working on their own and catch up when it is back — it hosts again by itself when the app opens.',
         ]),
         firewallHelp(h),
-        el('div', { class: 'action-row' }, [againBtn, stopBtn]),
+        el('div', { class: 'action-row' }, [ownBtn, againBtn, stopBtn]),
       ]);
     }
 

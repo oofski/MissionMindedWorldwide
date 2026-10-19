@@ -186,12 +186,16 @@ out on — brings everything on it into the clinic when it connects:
    the clinic's. This laptop's own deletion of `admin` still keeps the shipped
    `admin` / `admin` off it — a new laptop's untouched `admin` / `admin` is
    refused here, while the clinic's `admin` with its changed password still
-   arrives — and if it was deleted before this laptop was ever connected,
-   that deletion is sent once the server turns out to hold only the shipped
-   `admin` / `admin`, so it is gone from every laptop. Connected again after
-   **Disconnect** to the same server, a laptop passes on its deletions as if
-   it had stayed connected. On a laptop that is already connected, **Save
-   server** with a different address asks first, naming the new server.
+   arrives — and so does a deletion of `admin` it heard about. Either one is
+   sent once the server turns out to hold only the shipped `admin` / `admin`
+   (as when it was deleted before this laptop was ever connected), so it is
+   gone from every laptop: all it can take there is the password the sign-in
+   screen prints. Connected again after **Disconnect** to the same server, a
+   laptop passes on its deletions as if it had stayed connected. (Moving to
+   or from the clinic network passes on every deletion — see [Clinic
+   network](#clinic-network-no-internet).) On a laptop that is already
+   connected, **Save server** with a different address asks first, naming the
+   new server.
 
 ### On a laptop you can sign in to as an administrator
 1. Sign in as an administrator and open **Cloud** (the Admin part of the
@@ -285,6 +289,14 @@ the same connection code, and the same rules for deletions, pausing and
 moving a laptop. Nothing leaves the clinic's own Wi-Fi, and there is no
 Cloudflare account and nothing to pay.
 
+One rule is wider here. Moving a laptop **to or from the clinic network** —
+hosting it, joining it, handing it to another laptop, or bringing the day up
+to the internet server — is the clinic's own records moving between its own
+servers, so **every deletion on the laptop goes with it**, the ones other
+laptops made included, not only its own (Part B). A patient deleted on any
+laptop stays deleted after the move, even when a laptop that was asleep, or
+the internet server, still has the record.
+
 ### What you need
 - **Any Wi-Fi router.** A home router is fine. It does not need internet —
   it only needs power. Give its Wi-Fi a password (**WPA2** or **WPA3**, which
@@ -351,7 +363,13 @@ On each other laptop, on the same Wi-Fi:
   connection code.
 - **Not listed?** Some routers stop laptops finding each other. Type the
   address the host shows in **Host address** (like `192.168.1.23:47800`),
-  with the clinic key.
+  with the clinic key. (The host announces itself only on private networks,
+  the kind a router makes — never on a hotel's or a café's, should it be
+  opened there.)
+- **Listed twice under the same name?** Beacons prove nothing by
+  themselves, so another device can copy the clinic's name. Choose either:
+  the wrong one cannot show it holds the clinic key, and says so — then
+  choose the other, or paste the connection code.
 
 Before a laptop sends the clinic key, the host must prove it holds the same
 key; from then on the laptop accepts only that host's certificate. So a
@@ -370,6 +388,8 @@ wrong, in the same words the **Connection** card uses while it retries:
 | "A computer answered at …, but Mission Minded is not hosting there." | The app is closed on the host, or **Stop hosting** was pressed. Open it / host again |
 | "The laptop at … is not this clinic's host: its security certificate does not match…" | Another device has that address — or the host's clinic network was erased and hosted again: join with its new connection code |
 | "The host answered, but refused the clinic key." | Type the key exactly as the host's Cloud tab shows it, or paste a fresh connection code |
+| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | Joining from the list or a typed address: check the key — or, if the clinic network is listed twice, choose the other one, or paste the connection code |
+| "Something answered at …, but it is not a Mission Minded clinic network host." | Another program has the host's address or port now. Check the address on the host's Cloud tab |
 
 ### When the host laptop is off or asleep
 The other laptops keep working on their own — check-in, vitals, treatment,
@@ -385,12 +405,19 @@ again by its beacon — nobody retypes anything.
 ### Moving the host to another laptop
 1. On the new host, **Host the clinic network**. It asks first, because the
    laptop moves from the old clinic network to its own: everything on it goes
-   to the new host.
+   to the new host, deletions included.
 2. On each other laptop, **Join a different clinic network** — choose the new
    host, or paste its connection code. Each asks first, then sends everything
    on it, so nothing is lost. These are the same moves as between internet
    servers (Part B).
-3. On the old host, **Stop hosting**.
+3. **The old host joins the new host too**, the same way, last. It is the
+   one laptop with everything the old clinic network held; joining brings
+   that across, and **stops its hosting** (it says so when it asks). Only
+   if the old host is not coming, press **Stop hosting** on it instead.
+
+A host moved to any other server — the internet server, another clinic
+network, or **Disconnect** — stops hosting as part of the move, so no laptop
+goes on syncing with a host that no longer syncs with them.
 
 **Stop hosting** keeps the clinic network's data on that laptop: hosting
 again there carries on, with the same connection code. **Erase the clinic
@@ -402,9 +429,13 @@ new code. **Reset this computer** erases it too.
 A laptop syncs one way at a time. Choosing the other one in **Admin → Cloud**
 — **Internet server** or **Clinic network (no internet)** — asks first and
 moves the laptop like changing servers: everything on it goes to the new
-one, and everything there comes down. A clinic can run on the clinic network
-during the day and connect one laptop to its internet server afterwards, to
-bring the day's records up.
+one, deletions included, and everything there comes down. A clinic can run
+on the clinic network during the day and bring the day's records up to its
+internet server afterwards: once every laptop's **Connection** card says it
+synced, connect **one** of them — not the host, which would stop hosting — to
+the internet server. It carries every laptop's records and deletions. The
+next clinic day, it joins the clinic network again. To go back to the
+internet server for good, move every laptop, the host last.
 
 ### What the clinic network does not do
 - **Online pre-registration** is for patients on their own phones, on the
