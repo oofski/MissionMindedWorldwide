@@ -1,6 +1,7 @@
 import { el, clear, toast, modal } from '../dom.js';
 import { t, languageList } from '../i18n.js';
 import { api } from '../api.js';
+import { readConnectionCode } from '../connectionCode.js';
 import { store } from '../store.js';
 import { icon } from '../icons.js';
 import { eventCities } from '../components/intakeSections.js';
@@ -616,23 +617,29 @@ export function renderAdmin(ctx, params = {}) {
     ]));
   }
 
-  /* ---- Cloud sync (v1.2.3) ----
-     Cloud is now always-on by default: the app ships with the clinic's server +
-     key baked in. This tab is ONE switch — the clinic is Online (default) or, if
-     there's no wifi, Run offline. Advanced users can still override the server,
-     but it's tucked away in a closed drawer most clinics never open. */
   /* ---- Cloud sync ----
      Off and unconfigured unless this clinic deploys its own sync server and an
      administrator enters its address and key. Earlier builds shipped a server
      and key baked in and connected at boot with no user action, which is how
      this app ended up exchanging patient records with another organisation's
-     clinic. There is no built-in server now, and none is implied here. */
+     clinic. There is no built-in server now, and none is implied here.
+
+     v0.0.16: asked "how do I connect to online?", this screen answered with the
+     path of a file in the source tree. It now says what to do, in the order it
+     happens — the server is set up once, then every laptop is given its address
+     and key, or one connection code — and a connected laptop hands that code
+     out, so the second laptop is a paste rather than two things to retype. */
   async function cloudTab(body) {
     clear(body);
 
     // Deliberately no onCloudChanged subscription: an auto-repaint would wipe
     // the address/key an administrator is part-way through typing.
     if (cloudUnsub) { try { cloudUnsub(); } catch (_) { /* ignore */ } cloudUnsub = null; }
+
+    // The step-by-step server guide, on the same public repository the app
+    // takes its updates from (package.json build.publish). HEAD is whatever
+    // branch that repository publishes from, so the link survives a rename.
+    const SETUP_GUIDE_URL = 'https://github.com/oofski/MissionMindedWorldwide/blob/HEAD/docs/CLOUD_SETUP.md';
 
     let st;
     try {
@@ -647,6 +654,7 @@ export function renderAdmin(ctx, params = {}) {
 
     /* ---------- Not connected: the default state ---------- */
     if (!st.configured) {
+      const step = (lead, rest) => el('li', { style: 'margin:0 0 var(--space-2);' }, [el('strong', {}, [lead]), ' ', rest]);
       body.append(
         el('p', { class: 'view-sub', style: 'margin:0 0 var(--space-4);' }, [
           'This clinic is not connected to a sync server. Every record stays on this computer.',
@@ -654,10 +662,20 @@ export function renderAdmin(ctx, params = {}) {
         el('div', { class: 'card' }, [
           el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'Local only']),
           el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
-            'Patients checked in here are visible on this computer only. Connect a sync server to share one live queue across several laptops at the same clinic.',
+            'Patients checked in here are visible on this computer only. To share one live queue across the clinic\'s laptops:',
           ]),
-          el('p', { class: 'subtle small', style: 'margin:0;' }, [
-            'Mission Minded does not run a shared server. Your clinic deploys its own — see docs/CLOUD_SETUP.md — and only then are the address and key below filled in.',
+          el('ol', { class: 'cloud-steps small', style: 'margin:0 0 var(--space-3); padding-left:1.4em; line-height:1.55;' }, [
+            step('Someone sets up the clinic\'s sync server, once.',
+              'About 10 minutes in a web browser, on a free Cloudflare account. Mission Minded does not run a shared server — each clinic has its own.'),
+            step('They give you its address and the clinic key',
+              '— or a single connection code, copied from a laptop that is already connected.'),
+            step('Enter them below, on every laptop the clinic uses.',
+              'A laptop that is new to the clinic can also do it from the sign-in screen, with "Join a clinic already set up".'),
+          ]),
+          el('div', { class: 'inline-row' }, [
+            el('button', { class: 'btn btn--ghost btn--sm', onClick: () => api.openExternal(SETUP_GUIDE_URL) },
+              [icon('globe', { size: 14 }), 'Open the setup guide']),
+            el('span', { class: 'subtle small' }, ['Step by step, for whoever sets up the server.']),
           ]),
         ]),
       );
@@ -673,23 +691,54 @@ export function renderAdmin(ctx, params = {}) {
       placeholder: st.hasKey ? 'Leave blank to keep the saved key' : 'Clinic key',
     });
 
+    // One way to connect, however the address and key arrive — typed, or read
+    // from a pasted code — so a code is held to exactly the test typing is.
+    async function connect(url, key, btn) {
+      if (!url) { toast('Enter the address of your clinic\'s sync server.', 'error'); return; }
+      if (!st.hasKey && !key) { toast('Enter the clinic key for this server.', 'error'); return; }
+      btn.disabled = true;
+      try {
+        await api.cloudTest(url, key);
+        await api.cloudConfig({ url, key: key ? key : undefined, online: true });
+        toast('Connected.', 'success');
+        paint();
+      } catch (e) { toast(e.message, 'error'); }
+      finally { btn.disabled = false; }
+    }
+
     const connectBtn = el('button', {
       class: 'btn btn--primary',
-      onClick: async () => {
-        const url = urlInput.value.trim();
-        if (!url) { toast('Enter the address of your clinic\'s sync server.', 'error'); return; }
-        if (!st.hasKey && !keyInput.value) { toast('Enter the clinic key for this server.', 'error'); return; }
-        try {
-          await api.cloudTest(url, keyInput.value);
-          await api.cloudConfig({ url, key: keyInput.value ? keyInput.value : undefined, online: true });
-          toast('Connected.', 'success');
-          paint();
-        } catch (e) { toast(e.message, 'error'); }
-      },
+      onClick: () => connect(urlInput.value.trim(), keyInput.value, connectBtn),
     }, [icon('globe', { size: 16 }), st.configured ? 'Save server' : 'Connect']);
+
+    // A pasted code fills the two boxes — so the administrator sees which
+    // server it names — and connects through them. Offered while this laptop
+    // is not connected; a connected one is where codes come from.
+    const codeInput = el('input', {
+      class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: 'MMW1-…',
+      style: 'font-family:var(--font-mono);',
+    });
+    const codeBtn = el('button', { class: 'btn btn--primary', onClick: () => useCode() },
+      [icon('globe', { size: 16 }), 'Connect with code']);
+    async function useCode() {
+      let read;
+      try { read = readConnectionCode(codeInput.value); } catch (e) { toast(e.message, 'error'); return; }
+      urlInput.value = read.url;
+      keyInput.value = read.key;
+      await connect(read.url, read.key, codeBtn);
+    }
+    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') useCode(); });
 
     body.append(el('div', { class: 'card' }, [
       el('div', { class: 'card-title' }, [icon('globe', { size: 15 }), st.configured ? 'Sync server' : 'Connect a sync server']),
+      st.configured ? null : el('div', { class: 'form-grid' }, [
+        el('label', { class: 'field span-2' }, [
+          el('span', { class: 'field-label' }, ['Connection code']), codeInput,
+          el('span', { class: 'field-hint' }, ['From a laptop that is already connected: Admin → Cloud → Show connection code.']),
+        ]),
+      ]),
+      st.configured ? null : el('div', { class: 'action-row' }, [codeBtn]),
+      st.configured ? null : el('div', { class: 'login-divider' }, [el('span', {}, ['or type the address and key'])]),
       el('div', { class: 'form-grid' }, [
         el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Server address']), urlInput]),
         el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key']), keyInput]),
@@ -754,6 +803,51 @@ export function renderAdmin(ctx, params = {}) {
         st.lastError ? el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [st.lastError]) : null,
         el('div', { class: 'action-row' }, [toggle, syncNowBtn, disconnectBtn]),
         el('div', { class: 'subtle small', style: 'margin-top:var(--space-3);' }, [`Device ID: ${st.deviceId || '—'}`]),
+      ]));
+
+      // The code is fetched only when asked for, and shown in a dialog that
+      // takes it off the screen again on Done — it is the clinic key, and this
+      // tab can stay open on a laptop at the front desk.
+      async function showCode() {
+        let r;
+        try { r = await api.cloudConnectionCode(); } catch (e) { toast(e.message, 'error'); return; }
+        const input = el('input', {
+          class: 'input cloud-code', readonly: true, value: r.code,
+          style: 'font-family:var(--font-mono);font-size:var(--fs-sm)',
+        });
+        const copyBtn = el('button', { class: 'btn btn--primary', type: 'button' }, [icon('save', { size: 14 }), 'Copy code']);
+        copyBtn.addEventListener('click', async () => {
+          try { input.select(); if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(r.code); else document.execCommand('copy'); toast('Code copied', 'success'); }
+          catch (_) { input.select(); document.execCommand('copy'); toast('Code copied', 'success'); }
+        });
+        await modal({
+          title: 'Connection code',
+          body: el('div', {}, [
+            el('p', { class: 'subtle small', style: 'margin:0 0 10px' }, [
+              `Connects a laptop to ${host}: the server address and the clinic key, in one piece. Paste it in Admin → Cloud, or in "Join a clinic already set up" on the sign-in screen.`,
+            ]),
+            el('div', { class: 'inline-row', style: 'gap:8px' }, [input, copyBtn]),
+            el('div', { class: 'banner banner--warn', style: 'margin:12px 0 0' }, [
+              icon('alert', { size: 14 }),
+              el('span', {}, ['This is a password. Share it only with your own clinic\'s staff, in person or by private message.']),
+            ]),
+          ]),
+          confirmText: 'Done',
+        });
+      }
+
+      body.append(el('div', { class: 'card' }, [
+        el('div', { class: 'card-title' }, [icon('users', { size: 15 }), 'Connect another laptop']),
+        el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+          'Every laptop at the clinic connects to this same server, with the same clinic key. The connection code carries both, so the next laptop is one paste instead of two things to retype.',
+        ]),
+        el('div', { class: 'banner banner--warn' }, [
+          icon('alert', { size: 14 }),
+          el('span', {}, ['The code is the clinic\'s password. Anyone who has it can read and change every patient record this clinic syncs. Share it only with your own clinic\'s staff — never in a public post, a group chat or an email to anyone outside the clinic.']),
+        ]),
+        el('div', { class: 'action-row' }, [
+          el('button', { class: 'btn btn--ghost', onClick: showCode }, [icon('lock', { size: 16 }), 'Show connection code']),
+        ]),
       ]));
     }
   }

@@ -14,6 +14,7 @@ import { el, toast, withBusy } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
+import { readConnectionCode } from '../connectionCode.js';
 
 export function renderSetup(ctx, params = {}) {
   // Reached two ways now. A machine with no account at all still lands here on
@@ -92,33 +93,50 @@ export function renderSetup(ctx, params = {}) {
 
   /* ---------------- Join an existing clinic ---------------- */
 
+  // v0.0.16: this went through cloud:test and cloud:config, which are the
+  // administrator's — and nobody is signed in here — so in the installed app
+  // Join answered "Please sign in first" and never connected anything. It now
+  // has its own channel (cloud:join), which runs the same test as typing the
+  // address in Admin → Cloud and is open signed-out only while this computer
+  // has no administrator password of its own (see ipc.js). It also takes the
+  // connection code a connected laptop hands out, so the address and key are
+  // one paste instead of two things to retype.
   function joinForm() {
+    const code = el('input', { class: 'input', placeholder: 'MMW1-…', autocomplete: 'off', spellcheck: 'false', style: 'font-family:var(--font-mono);' });
     const url = el('input', { class: 'input', placeholder: 'https://mmw-sync.<subdomain>.workers.dev' });
     const key = el('input', { class: 'input', type: 'password', placeholder: 'Clinic key' });
     const status = el('div', { class: 'update-status', style: 'display:none' });
     const error = el('div', { class: 'login-error', style: 'display:none' });
     const joinBtn = el('button', { class: 'btn btn--primary btn--block' }, [icon('globe', { size: 16 }), 'Connect and sync']);
 
-    function fail(msg) { error.textContent = msg; error.style.display = 'block'; }
+    function fail(msg) { status.style.display = 'none'; error.textContent = msg; error.style.display = 'block'; }
     function say(msg) { status.style.display = ''; status.replaceChildren(icon('info', { size: 16 }), el('span', {}, [msg])); }
 
     async function join() {
       error.style.display = 'none';
-      if (!url.value.trim()) return fail('Enter the clinic address your administrator gave you.');
+      // A pasted code fills the two boxes below — so the person sees which
+      // server it names — and is then connected exactly as if they had typed.
+      if (code.value.trim()) {
+        let read;
+        try { read = readConnectionCode(code.value); } catch (e) { return fail(e.message); }
+        url.value = read.url;
+        key.value = read.key;
+      }
+      if (!url.value.trim()) return fail('Enter the clinic address your administrator gave you, or paste a connection code.');
+      if (!key.value) return fail('Enter the clinic key as well as the address.');
       try {
         await withBusy(joinBtn, async () => {
-        say('Checking the clinic address…');
-        await api.cloudTest(url.value.trim(), key.value);
-
-        say('Connected. Downloading the clinic…');
-        await api.cloudConfig({ url: url.value.trim(), key: key.value, online: true });
-        await api.cloudSyncNow();
+        say('Checking the clinic address, then downloading the clinic…');
+        const r = await api.cloudJoin(url.value.trim(), key.value);
 
         // Accounts replicate with everything else, so once the pull lands this
         // machine has the clinic's real staff list and setup is finished.
-        const { needsSetup } = await api.needsSetup();
-        if (needsSetup) {
+        if (r.needsSetup) {
           fail('Connected, but no staff accounts came down yet. Ask your administrator to sign in on the first computer so its accounts sync, then try again.');
+          return;
+        }
+        if (r.sync && r.sync.ok === false) {
+          fail(`Connected, but the clinic has not finished downloading (${r.sync.error || 'no answer yet'}). It keeps trying on its own — wait a minute, then sign in.`);
           return;
         }
         toast('Clinic downloaded. Sign in with your own account.', 'success');
@@ -130,12 +148,15 @@ export function renderSetup(ctx, params = {}) {
     }
 
     joinBtn.addEventListener('click', join);
-    [url, key].forEach((inp) => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
-    setTimeout(() => url.focus(), 0);
+    [code, url, key].forEach((inp) => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
+    setTimeout(() => code.focus(), 0);
 
     return el('div', { class: 'auth-form' }, [
       el('h2', { class: 'auth-title' }, ['Join a clinic']),
       el('p', { class: 'auth-sub' }, ['Point this computer at a clinic someone has already set up. Its staff accounts and records download to this machine, and you sign in with your own account.']),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Connection code']), code]),
+      el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['Your administrator copies it from Admin → Cloud → Show connection code, on a laptop that is already connected.']),
+      el('div', { class: 'login-divider' }, [el('span', {}, ['or type the address and key'])]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic address']), url]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic key']), key]),
       status,

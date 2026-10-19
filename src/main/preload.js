@@ -26,6 +26,7 @@ const CHANNELS = [
   'update:onlineAvailable', 'update:checkOnline', 'update:downloadOnline', 'update:installOnline',
   'app:openExternal',
   'cloud:config', 'cloud:test', 'cloud:status', 'cloud:syncNow', 'cloud:resync', 'cloud:disconnect',
+  'cloud:connectionCode', 'cloud:join',
   'data:reset',
 ];
 

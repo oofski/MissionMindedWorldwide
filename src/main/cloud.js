@@ -38,7 +38,16 @@ async function httpJson(method, url, key, body) {
   try {
     const headers = { 'content-type': 'application/json' };
     if (key) headers.authorization = 'Bearer ' + key;
-    const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal });
+    let res;
+    try {
+      res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal });
+    } catch (e) {
+      // Nothing answered at all (no internet, a mistyped host, a timeout) —
+      // marked so explain() can say so, and never confused with an error
+      // raised later by applying what a server sent.
+      if (e && typeof e === 'object') e.network = true;
+      throw e;
+    }
     let json = null;
     try { json = await res.json(); } catch { /* non-json */ }
     if (!res.ok) {
@@ -49,15 +58,81 @@ async function httpJson(method, url, key, body) {
   } finally { clearTimeout(to); }
 }
 
+// What a failed request means, in words a clinic director can act on. The raw
+// messages ("fetch failed", "unauthorized", "This operation was aborted") were
+// shown as they came, and none of them says whether to check the wifi, the
+// address or the key. Used for the connection test and for the reason the
+// Cloud tab shows while sync is retrying.
+function explain(err, base) {
+  let host = base;
+  try { host = new URL(base).host; } catch { /* keep what was typed */ }
+  if (err && err.status === 401) {
+    return 'The server answered, but refused the clinic key. Type it exactly as it was set on the server (CLINIC_KEY) — capital letters and spaces count.';
+  }
+  // A Worker with no D1 database bound as DB fails on its first query with
+  // JavaScript's own wording, which names nothing a person could fix.
+  if (err && err.status === 500 && /reading 'prepare'/.test(err.message || '')) {
+    return 'The server has no database connected. In Cloudflare, add a D1 database binding to the Worker with the variable name DB, then Deploy.';
+  }
+  if (err && err.network && err.name === 'AbortError') {
+    return `${host} did not answer in time. Check this laptop is online, then try again.`;
+  }
+  if (err && err.network) {
+    return `Could not reach ${host}. Check this laptop is online and the address is typed correctly.`;
+  }
+  return (err && err.message) || String(err);
+}
+
 // Verify a URL + key: /health must be reachable, and the key must authorize a pull.
 async function testConnection(url, key) {
   const base = trimUrl(url);
   if (!base) throw new Error('Enter the Cloud URL first.');
-  const health = await httpJson('GET', base + '/health', null);
+  try { new URL(base); } catch {
+    throw new Error('That does not look like a web address. It should look like https://mmw-sync.<your-subdomain>.workers.dev');
+  }
+  let health;
+  try {
+    health = await httpJson('GET', base + '/health', null);
+  } catch (e) {
+    // Something answered, but not a sync server: a typo in the subdomain that
+    // lands on another site, or a Worker still holding Cloudflare's sample code.
+    if (!e.network) throw new Error('That address did not return a Mission Minded sync server.');
+    throw new Error(explain(e, base));
+  }
   if (!health || health.ok !== true) throw new Error('That URL did not return a Mission Minded sync server.');
   // Key check — a bad key returns 401.
-  await httpJson('GET', base + '/v1/pull?since=&limit=1', key);
+  try {
+    await httpJson('GET', base + '/v1/pull?since=&limit=1', key);
+  } catch (e) { throw new Error(explain(e, base)); }
   return { ok: true, service: health.service, version: health.version, time: health.time };
+}
+
+// The key saved for this server, when the address given is the one already
+// saved — so "leave blank to keep the saved key" can be tested before it is
+// saved. A different server never inherits it (see applyConfig).
+function savedKeyFor(url) {
+  const m = db.getSyncMeta();
+  return m.url && trimUrl(url) === trimUrl(m.url) ? m.key : '';
+}
+
+// The connection code: the server address and clinic key as ONE string, so
+// the next laptop is connected by pasting it rather than retyping both (a
+// workers.dev address and a long passphrase are exactly what gets mistyped).
+//
+// It is not encryption and does not pretend to be. The code IS the clinic key
+// in another spelling, which is why it is made here, handed out only over an
+// administrator-only channel when one asks to see it, and called a password on
+// every screen that shows it. src/renderer/js/connectionCode.js reads it; the
+// harness holds the two to the same format. The number is the format's
+// version, so a later change can be told apart instead of misread.
+const CODE_PREFIX = 'MMW1-';
+function encodeConnectionCode(url, key) {
+  return CODE_PREFIX + Buffer.from(JSON.stringify({ u: trimUrl(url), k: String(key) }), 'utf8').toString('base64url');
+}
+function connectionCode() {
+  const m = db.getSyncMeta();
+  if (!m.configured) throw new Error('This computer is not connected to a sync server, so there is no code to share.');
+  return { code: encodeConnectionCode(m.url, m.key), url: trimUrl(m.url) };
 }
 
 async function pushOnce(base, key, deviceId) {
@@ -132,6 +207,12 @@ async function syncOnce() {
   }
   if (running) return { ok: false, busy: true };
   running = true;
+  inflight = cycle(meta).finally(() => { running = false; inflight = null; });
+  return inflight;
+}
+
+let inflight = null;      // the cycle in flight, for syncSettled()
+async function cycle(meta) {
   const base = trimUrl(meta.url);
   const deviceId = db.ensureDeviceId();
   try {
@@ -142,11 +223,20 @@ async function syncOnce() {
     if (applied > 0) notifyRenderer();
     return { ok: true, pushed, pulled, applied, deleted };
   } catch (e) {
-    db.setSyncMeta({ lastError: e.message || String(e) });
-    return { ok: false, error: e.message || String(e) };
-  } finally {
-    running = false;
+    const msg = explain(e, base);
+    db.setSyncMeta({ lastError: msg });
+    return { ok: false, error: msg };
   }
+}
+
+// A full cycle the caller can wait for. syncOnce() answers "busy" while the
+// timer's own cycle is running — and saving a new server always starts one —
+// so a caller that has to know the clinic has ARRIVED (joining from the
+// sign-in screen, where the next step is signing in with an account that only
+// exists once it has synced down) waits that one out and then runs its own.
+async function syncSettled() {
+  if (inflight) { try { await inflight; } catch { /* its outcome is in status() */ } }
+  return syncOnce();
 }
 
 // Tell the renderer fresh data arrived so open views can refresh.
@@ -213,4 +303,7 @@ async function resyncAll() {
   return { ok: true, ...r };
 }
 
-module.exports = { start, stop, syncOnce, resyncAll, testConnection, status, applyConfig, normalizeUrl: trimUrl };
+module.exports = {
+  start, stop, syncOnce, syncSettled, resyncAll, testConnection, savedKeyFor, status, applyConfig, normalizeUrl: trimUrl,
+  connectionCode, encodeConnectionCode, CODE_PREFIX,
+};
