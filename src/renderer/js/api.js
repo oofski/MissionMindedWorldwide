@@ -122,7 +122,9 @@ export const api = {
   // Cloud sync (v1.1.0)
   cloudStatus: () => call('cloudStatus'),
   cloudConfig: (cfg) => call('cloudConfig', cfg),
-  cloudTest: (url, key) => call('cloudTest', { url, key }),
+  // lan (v0.0.17): the address is a clinic network host — { pin, hostId, fp,
+  // name }, as far as known. The answer then carries the pin to save with it.
+  cloudTest: (url, key, lan) => call('cloudTest', { url, key, ...(lan ? { lan } : {}) }),
   cloudSyncNow: () => call('cloudSyncNow'),
   cloudResync: () => call('cloudResync'),
   cloudDisconnect: () => call('cloudDisconnect'),
@@ -130,7 +132,14 @@ export const api = {
   // only), and the sign-in screen's Join a clinic (test, save, first sync).
   cloudConnectionCode: () => call('cloudConnectionCode'),
   // move: the person confirmed moving a laptop already connected elsewhere.
-  cloudJoin: (url, key, move) => call('cloudJoin', { url, key, ...(move ? { move: true } : {}) }),
+  cloudJoin: (url, key, move, lan) => call('cloudJoin', { url, key, ...(move ? { move: true } : {}), ...(lan ? { lan } : {}) }),
+  // v0.0.17: the clinic network — hosting it here (administrators only), and
+  // the hosts heard on this Wi-Fi.
+  hubStatus: () => call('hubStatus'),
+  hubStart: (name, move) => call('hubStart', { name, ...(move ? { move: true } : {}) }),
+  hubStop: (erase) => call('hubStop', { erase: !!erase }),
+  hubFirewall: () => call('hubFirewall'),
+  lanScan: (ms) => call('lanScan', { ms }),
   resetAllData: () => call('dataReset'),
   onCloudChanged: (cb) => window.api.onCloudChanged(cb),
 

@@ -9,6 +9,12 @@ the laptops need a small sync server to meet at.
 Each clinic sets up its own, once, on a free Cloudflare account. Until an
 administrator connects a laptop to it, nothing leaves that laptop.
 
+> **No internet at the clinic?** The laptops can meet over a Wi-Fi router
+> instead: one laptop hosts the same sync server, the others join it, and it
+> works the same way. See [Clinic network (no internet)](#clinic-network-no-internet).
+> **Admin → Cloud** offers both, at the top: **Internet server** or
+> **Clinic network (no internet)**.
+
 It happens in three steps:
 
 1. **Someone sets up the clinic's sync server, once** — about 10 minutes in a
@@ -180,12 +186,16 @@ out on — brings everything on it into the clinic when it connects:
    the clinic's. This laptop's own deletion of `admin` still keeps the shipped
    `admin` / `admin` off it — a new laptop's untouched `admin` / `admin` is
    refused here, while the clinic's `admin` with its changed password still
-   arrives — and if it was deleted before this laptop was ever connected,
-   that deletion is sent once the server turns out to hold only the shipped
-   `admin` / `admin`, so it is gone from every laptop. Connected again after
-   **Disconnect** to the same server, a laptop passes on its deletions as if
-   it had stayed connected. On a laptop that is already connected, **Save
-   server** with a different address asks first, naming the new server.
+   arrives — and so does a deletion of `admin` it heard about. Either one is
+   sent once the server turns out to hold only the shipped `admin` / `admin`
+   (as when it was deleted before this laptop was ever connected), so it is
+   gone from every laptop: all it can take there is the password the sign-in
+   screen prints. Connected again after **Disconnect** to the same server, a
+   laptop passes on its deletions as if it had stayed connected. (Moving to
+   or from the clinic network passes on every deletion — see [Clinic
+   network](#clinic-network-no-internet).) On a laptop that is already
+   connected, **Save server** with a different address asks first, naming the
+   new server.
 
 ### On a laptop you can sign in to as an administrator
 1. Sign in as an administrator and open **Cloud** (the Admin part of the
@@ -267,6 +277,182 @@ desk confirms each person's arrival when they walk in.
 
 ---
 
+## Clinic network (no internet)
+
+For a clinic with no internet — a church hall, a school, a field site — the
+laptops can share one live queue over a **Wi-Fi router alone**. One laptop
+**hosts** the clinic's sync server: the same server as Part A
+(`cloud/worker.js`), running inside the app instead of at Cloudflare. The
+other laptops **join** it. Everything else is the same as with the internet
+server: the same live queue, the same **Connection** card with **Sync now**,
+the same connection code, and the same rules for deletions, pausing and
+moving a laptop. Nothing leaves the clinic's own Wi-Fi, and there is no
+Cloudflare account and nothing to pay.
+
+One rule is wider here. Moving a laptop **to or from the clinic network** —
+hosting it, joining it, handing it to another laptop, or bringing the day up
+to the internet server — is the clinic's own records moving between its own
+servers, so **every deletion on the laptop goes with it**, the ones other
+laptops made included, not only its own (Part B). A patient deleted on any
+laptop stays deleted after the move, even when a laptop that was asleep, or
+the internet server, still has the record.
+
+### What you need
+- **Any Wi-Fi router.** A home router is fine. It does not need internet —
+  it only needs power. Give its Wi-Fi a password (**WPA2** or **WPA3**, which
+  the router's settings call *Security*); never run the clinic on an open
+  Wi-Fi.
+- **Every laptop on the same Wi-Fi** — the router's own network. Not a phone
+  hotspot, and not a "guest" network: guest networks usually stop laptops
+  reaching each other.
+- **The same version of the app on every laptop** (see the note at the top).
+- **One laptop to host** that stays on, plugged in and awake for the whole
+  clinic day — the registration laptop is a good choice. On Windows, stop it
+  sleeping while plugged in: Settings → System → Power → *When plugged in,
+  put my device to sleep after* → Never.
+
+### Windows on the host laptop
+1. **Make the clinic's Wi-Fi a Private network:** Settings → Network &
+   internet → Wi-Fi → the clinic's network → **Network profile type →
+   Private network**. On a Public network Windows keeps other laptops out.
+2. **Let Mission Minded through the firewall.** The first time the laptop
+   hosts, Windows shows "**Windows Defender Firewall has blocked some features
+   of this app**". Tick **Private networks**, then press **Allow access**. The
+   installer cannot do this for you: it installs for one Windows user, not
+   for the whole computer.
+3. **Missed that message, or pressed Cancel?** On the host's **Admin → Cloud**
+   press **Allow through the firewall**: Windows asks for permission, then
+   lets Mission Minded in on Private networks only. Or by hand: Windows
+   Security → Firewall & network protection → Allow an app through firewall →
+   Change settings → tick **Private** beside Mission Minded → OK.
+
+**On a Mac host**, if macOS asks whether "Mission Minded" may **accept
+incoming network connections**, press **Allow** (if it was denied: System
+Settings → Network → Firewall → Options).
+
+The joining laptops need none of this — they only connect out to the host.
+If one of them shows the same Windows message when it looks for hosts, tick
+Private networks and allow it there too, or type the host's address instead.
+
+### Host the clinic network
+1. On the host laptop, sign in as an administrator and open **Admin → Cloud**.
+2. At the top, choose **Clinic network (no internet)**.
+3. Under **Host the clinic network on this laptop**, fill in the **Clinic
+   network name** — the clinic's name and place is good; it is what the
+   other laptops see in their list — and press **Host the clinic network**.
+4. The card **This laptop hosts the clinic network** shows the address the
+   other laptops reach it at (like `192.168.1.23:47800`), the laptops
+   connected now, and its **Security fingerprint**.
+
+The host makes its own clinic key (five groups of letters and numbers) and
+its own security certificate, and keeps both. **Show connection code** shows
+the code — and the key, for typing — only when asked. Like the internet
+server's, **the connection code is the clinic's password**.
+
+### Join it from every other laptop
+On each other laptop, on the same Wi-Fi:
+
+- **In Admin → Cloud**, choose **Clinic network (no internet)**. Under
+  **Join a clinic network** the clinic networks found on this Wi-Fi are
+  listed (**Look again** searches again). Press **Choose** beside the
+  clinic's, type the **Clinic key** the host shows, and press **Join** — or
+  paste the host's connection code and press **Join with code**.
+- **On a new laptop's sign-in screen**, press **Join a clinic already set
+  up**: the clinic networks heard on this Wi-Fi are listed there too.
+  **Choose**, type the clinic key, **Connect and sync** — or paste the
+  connection code.
+- **Not listed?** Some routers stop laptops finding each other. Type the
+  address the host shows in **Host address** (like `192.168.1.23:47800`),
+  with the clinic key.
+- **Listed twice under the same name?** Beacons prove nothing by
+  themselves, so another device can copy the clinic's name. Choose either:
+  the wrong one cannot show it holds the clinic key, and says so — then
+  choose the other, or paste the connection code.
+
+Before a laptop sends the clinic key, the host must prove it holds the same
+key; from then on the laptop accepts only that host's certificate. So a
+look-alike laptop on the Wi-Fi learns nothing, and a laptop that is not the
+clinic's host is refused: "The laptop at … is not this clinic's host: its
+security certificate does not match, so nothing was sent to it."
+
+### Test the clinic network
+On a joined laptop, **Admin → Cloud → Test the clinic network** says what is
+wrong, in the same words the **Connection** card uses while it retries:
+
+| It says | What to do |
+|---|---|
+| "No clinic network host answered at …" | The host is off or asleep, has stopped hosting, or is on another Wi-Fi. Check its Cloud tab says **Hosting**, and that both laptops show the same Wi-Fi name |
+| "The host laptop is on this Wi-Fi, but its firewall is blocking the connection to …" | On the host: make the Wi-Fi a Private network and let Mission Minded through the firewall (above) |
+| "A computer answered at …, but Mission Minded is not hosting there." | The app is closed on the host, or **Stop hosting** was pressed. Open it / host again |
+| "The laptop at … is not this clinic's host: its security certificate does not match…" | Another device has that address — or the host's clinic network was erased and hosted again: join with its new connection code |
+| "The host answered, but refused the clinic key." | Type the key exactly as the host's Cloud tab shows it, or paste a fresh connection code |
+| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | Joining from the list or a typed address: check the key — or, if the clinic network is listed twice, choose the other one, or paste the connection code |
+| "Something answered at …, but it is not a Mission Minded clinic network host." | Another program has the host's address or port now. Check the address on the host's Cloud tab |
+
+### When the host laptop is off or asleep
+The other laptops keep working on their own — check-in, vitals, treatment,
+everything — and their **Connection** card says the host is not answering.
+When it is back they catch up by themselves, both ways, as they do online
+when the internet drops. Leave sync on (the paused-sync rule in
+[Then](#then) applies here too).
+
+The host hosts again by itself when Mission Minded opens on it — on the
+clinic's Wi-Fi. If the router gives it a new address, or its port was taken,
+the other laptops find it again by its beacon — nobody retypes anything.
+
+Opened anywhere else — at a hotel, a café, on a phone's hotspot — it does
+not announce the clinic network there. Its card says "**Not on the clinic
+Wi-Fi: hosting paused**", and it hosts again by itself as soon as it is back
+on the clinic's Wi-Fi (also when the app opened before the Wi-Fi had
+connected). A new router at the clinic counts as another network: on the
+host, press **Host here anyway** once, and it remembers that one too.
+
+### Moving the host to another laptop
+1. On the new host, **Host the clinic network**. It asks first, because the
+   laptop moves from the old clinic network to its own: everything on it goes
+   to the new host, deletions included.
+2. On each other laptop, **Join a different clinic network** — choose the new
+   host, or paste its connection code. Each asks first, then sends everything
+   on it, so nothing is lost. These are the same moves as between internet
+   servers (Part B).
+3. **The old host joins the new host too**, the same way, last. It is the
+   one laptop with everything the old clinic network held; joining brings
+   that across, and **stops its hosting** (it says so when it asks). Only
+   if the old host is not coming, press **Stop hosting** on it instead.
+
+A host moved to any other server — the internet server, another clinic
+network, or **Disconnect** — stops hosting as part of the move, so no laptop
+goes on syncing with a host that no longer syncs with them.
+
+**Stop hosting** keeps the clinic network's data on that laptop: hosting
+again there carries on, with the same connection code. **Erase the clinic
+network data** removes it, with its certificate and key; a clinic network
+hosted there afterwards is a new one, which every laptop joins again with its
+new code. **Reset this computer** erases it too.
+
+### Internet and the clinic network
+A laptop syncs one way at a time. Choosing the other one in **Admin → Cloud**
+— **Internet server** or **Clinic network (no internet)** — asks first and
+moves the laptop like changing servers: everything on it goes to the new
+one, deletions included, and everything there comes down. A clinic can run
+on the clinic network during the day and bring the day's records up to its
+internet server afterwards: once every laptop's **Connection** card says it
+synced, connect **one** of them — not the host, which would stop hosting — to
+the internet server. It carries every laptop's records and deletions. The
+next clinic day, it joins the clinic network again. To go back to the
+internet server for good, move every laptop, the host last.
+
+### What the clinic network does not do
+- **Online pre-registration** is for patients on their own phones, on the
+  internet. The clinic network does not serve it ("Online pre-registration is
+  not available on the clinic network"): check those patients in at the front
+  desk.
+- **It is not a backup.** The host keeps the clinic network's copy of the
+  records in its own file, which **Back up database (.db)** does not include.
+  Keep making backups under **Backup & Export** on the laptops.
+
+---
+
 ## Troubleshooting
 
 | What you see | Why | What to do |
@@ -289,6 +475,8 @@ desk confirms each person's arrival when they walk in.
 | "That connection code names a plain http:// server…" | The laptop the code came from was connected to an `http://` address | On that laptop, connect to the `https://` address under **Admin → Cloud**, then copy the code again |
 | **Cloud** shows **Reconnecting…** with a reason that mentions a limit, and the pre-registration link says it is not valid | The free plan's daily allowance is used up (see [Cost](#cost)) | Keep working — the laptops catch up after the daily reset at 00:00 UTC. To stop it happening, move the Worker to Cloudflare's paid plan |
 | A laptop shows different patients from the others | It is on a different active event | Under **Events**, press **Set active** on the right event |
+| Clinic network: no host in the list | The laptops are on different Wi-Fi networks, a guest network, or the router stops them finding each other | Check every laptop shows the same Wi-Fi name; type the **Host address** the host shows instead. More in [Test the clinic network](#test-the-clinic-network) |
+| Clinic network: "…its firewall is blocking the connection…" | Windows on the host keeps the others out | On the host: a Private network, and **Allow through the firewall** ([Windows on the host laptop](#windows-on-the-host-laptop)) |
 | The pre-registration link says it is not valid | The event has not reached the server yet | Make sure a laptop with the event is connected and **Online**, wait a minute, try again |
 
 ---
@@ -322,6 +510,12 @@ laptop. Keep making backups under **Backup & Export**.
   is running, and the link can only add a sign-up to its own clinic event.
 - Showing the connection code is recorded in the audit log of the laptop it
   was shown on.
+- **On the clinic network** the host's certificate is its own, so every
+  laptop checks it by its fingerprint, carried in the connection code (or
+  learned once the host has proved it holds the clinic key), and refuses any
+  other before sending anything. The host makes the clinic key itself. Its
+  announcements on the Wi-Fi carry its name and address, never the key. Use
+  a Wi-Fi password on the router.
 - Backups do not contain the clinic key. A database backup, or the ZIP made
   for a hard drive, is the clinic's records as **Disconnect** leaves them; a
   laptop put back from one is connected again under **Admin → Cloud**.

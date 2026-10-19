@@ -197,7 +197,10 @@ function renderShell(active, contentNode) {
       if (!st) return;
       clear(cloudBadge);
       if (st.online) {
-        cloudBadge.append(el('span', { class: 'offline-dot', style: 'background:var(--success, #2f8f66)' }), st.lastError ? 'Cloud · reconnecting' : (st.lastOk ? 'Cloud · synced' : 'Cloud · online'));
+        // The clinic network (v0.0.17) syncs the same way; it is named for
+        // what it is, since there is no internet "cloud" in it.
+        const via = st.kind === 'lan' ? 'Clinic network' : 'Cloud';
+        cloudBadge.append(el('span', { class: 'offline-dot', style: 'background:var(--success, #2f8f66)' }), st.lastError ? `${via} · reconnecting` : (st.lastOk ? `${via} · synced` : `${via} · online`));
       } else {
         cloudBadge.append(el('span', { class: 'offline-dot', style: 'background:var(--text-subtle)' }), 'Offline mode');
       }

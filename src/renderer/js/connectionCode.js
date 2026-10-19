@@ -65,5 +65,16 @@ export function readConnectionCode(text) {
     throw new Error('That connection code names a plain http:// server, which would send the clinic key unprotected. Connect the first laptop to the https:// address, then copy the code again.');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(DAMAGED);
+  // v0.0.17: a clinic network's code (no internet) also carries the host's
+  // certificate fingerprint (p), its id (h) and its name (n). The fingerprint
+  // is what this laptop pins the host to, so a code whose fingerprint is
+  // malformed is damaged, never read as an internet server's.
+  if (payload.p !== undefined) {
+    const pin = typeof payload.p === 'string' && /^[0-9a-f]{64}$/.test(payload.p) ? payload.p : '';
+    if (!pin || url.protocol !== 'https:') throw new Error(DAMAGED);
+    const hostId = typeof payload.h === 'string' && /^[A-Za-z0-9-]{0,64}$/.test(payload.h) ? payload.h : '';
+    const name = typeof payload.n === 'string' ? payload.n.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 80) : '';
+    return { url: url.origin, key: payload.k, lan: { pin, hostId, name } };
+  }
   return { url: url.origin, key: payload.k };
 }

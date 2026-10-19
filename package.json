@@ -21,7 +21,8 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "node-forge": "^1.4.0"
   },
   "devDependencies": {
     "electron": "^31.7.7",
@@ -43,6 +44,7 @@
     "files": [
       "src/**/*",
       "assets/**/*",
+      "cloud/worker.js",
       "!**/*.map"
     ],
     "directories": {
