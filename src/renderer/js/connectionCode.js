@@ -57,6 +57,13 @@ export function readConnectionCode(text) {
   }
   let url;
   try { url = new URL(payload.u); } catch (_) { throw new Error(DAMAGED); }
+  // https only, as main's testConnection insists, apart from this computer
+  // itself (a developer's `wrangler dev`): a code naming a plain http:// server
+  // would hand the key over unprotected, so it is refused before anything is sent.
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  if (url.protocol === 'http:' && !loopback) {
+    throw new Error('That connection code names a plain http:// server, which would send the clinic key unprotected. Connect the first laptop to the https:// address, then copy the code again.');
+  }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(DAMAGED);
   return { url: url.origin, key: payload.k };
 }

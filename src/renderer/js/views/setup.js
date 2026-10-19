@@ -131,12 +131,20 @@ export function renderSetup(ctx, params = {}) {
 
         // Accounts replicate with everything else, so once the pull lands this
         // machine has the clinic's real staff list and setup is finished.
-        if (r.needsSetup) {
-          fail('Connected, but no staff accounts came down yet. Ask your administrator to sign in on the first computer so its accounts sync, then try again.');
-          return;
-        }
         if (r.sync && r.sync.ok === false) {
           fail(`Connected, but the clinic has not finished downloading (${r.sync.error || 'no answer yet'}). It keeps trying on its own — wait a minute, then sign in.`);
+          return;
+        }
+        // Whether the clinic actually ARRIVED is r.accounts — the accounts here
+        // besides the shipped admin / admin. This used to ask needsSetup, which
+        // is false on every normal install (admin / admin is always there), so
+        // an empty server — the first laptop not connected yet — was reported
+        // as "Clinic downloaded" and the person's own account then failed.
+        if (r.needsSetup || r.accounts === 0) {
+          // The admin / admin way out exists only where admin / admin does —
+          // not on a computer just erased with Reset this computer.
+          fail('Connected, but no staff accounts came down yet. Check the first laptop is signed in and its Cloud tab says Online. This laptop stays connected and picks them up by itself — press Connect and sync again in a minute.'
+            + (r.needsSetup ? '' : ' If the clinic has no account but admin / admin so far, go back and sign in with that.'));
           return;
         }
         toast('Clinic downloaded. Sign in with your own account.', 'success');
@@ -151,7 +159,31 @@ export function renderSetup(ctx, params = {}) {
     [code, url, key].forEach((inp) => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
     setTimeout(() => code.focus(), 0);
 
-    return el('div', { class: 'auth-form' }, [
+    const backBtn = () => (joinOnly
+      ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => ctx.navigate('login') },
+          [icon('chevron', { size: 16 }), 'Back to sign in'])
+      : el('button', { class: 'btn btn--ghost btn--block', onClick: () => { mode = 'start'; paint(); } },
+          [icon('plus', { size: 16 }), 'This is the first computer — set it up']));
+
+    // The sign-in screen always offers Join, but cloud:join refuses it signed
+    // out once this computer has an administrator password of its own — the
+    // likely state of any laptop that has been used, since the app nags until
+    // admin / admin is changed. Ask first, with the same rule the handler
+    // applies, rather than letting someone paste a code and type a key only to
+    // be told at the end. If the question fails, the form stays; the handler
+    // still refuses.
+    const form = el('div', { class: 'auth-form' });
+    api.needsSetup().then((r) => {
+      if (!r || r.needsSetup || r.defaultAdmin) return;
+      form.replaceChildren(
+        el('h2', { class: 'auth-title' }, ['Join a clinic']),
+        el('div', { class: 'login-error', style: 'display:block' }, ['This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.']),
+        el('p', { class: 'auth-sub' }, ['Before you do: everything already on this computer, test patients included, goes to every laptop of the clinic. And the laptops share one account named admin, so the admin password set on this computer will replace the admin password on every laptop. Give admin the same password on each laptop first.']),
+        backBtn(),
+      );
+    }).catch(() => { /* keep the form */ });
+
+    form.append(
       el('h2', { class: 'auth-title' }, ['Join a clinic']),
       el('p', { class: 'auth-sub' }, ['Point this computer at a clinic someone has already set up. Its staff accounts and records download to this machine, and you sign in with your own account.']),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Connection code']), code]),
@@ -163,12 +195,9 @@ export function renderSetup(ctx, params = {}) {
       error,
       joinBtn,
       el('div', { class: 'login-divider' }, [el('span', {}, ['or'])]),
-      joinOnly
-        ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => ctx.navigate('login') },
-            [icon('chevron', { size: 16 }), 'Back to sign in'])
-        : el('button', { class: 'btn btn--ghost btn--block', onClick: () => { mode = 'start'; paint(); } },
-            [icon('plus', { size: 16 }), 'This is the first computer — set it up']),
-    ]);
+      backBtn(),
+    );
+    return form;
   }
 
   /* ---------------- Shell ---------------- */

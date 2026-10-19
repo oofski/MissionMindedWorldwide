@@ -83,6 +83,17 @@ function explain(err, base) {
   return (err && err.message) || String(err);
 }
 
+// A plain http:// address sends the clinic key, and every record, readable to
+// anyone on the same wifi. trimUrl() only adds https:// when no scheme was
+// typed, so an explicit http:// used to be kept and saved. Refused wherever an
+// address is entered; this computer itself is the one exception, so a
+// developer can still try the server locally with `wrangler dev`.
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+function isPlainHttp(base) {
+  try { const u = new URL(base); return u.protocol === 'http:' && !LOOPBACK.has(u.hostname); } catch { return false; }
+}
+const PLAIN_HTTP = 'Use the https:// address Cloudflare gives you. A plain http:// address would send the clinic key unprotected.';
+
 // Verify a URL + key: /health must be reachable, and the key must authorize a pull.
 async function testConnection(url, key) {
   const base = trimUrl(url);
@@ -90,6 +101,7 @@ async function testConnection(url, key) {
   try { new URL(base); } catch {
     throw new Error('That does not look like a web address. It should look like https://mmw-sync.<your-subdomain>.workers.dev');
   }
+  if (isPlainHttp(base)) throw new Error(PLAIN_HTTP);
   let health;
   try {
     health = await httpJson('GET', base + '/health', null);
@@ -260,6 +272,7 @@ function status() {
 
 function applyConfig({ url, key, enabled, mode, online }) {
   const patch = {};
+  if (url !== undefined && isPlainHttp(trimUrl(url))) throw new Error(PLAIN_HTTP);
   if (url !== undefined) patch.url = trimUrl(url);
   // A key must travel with a server change. Letting a new URL inherit the
   // stored key is how a clinic could end up pointing at its own server while

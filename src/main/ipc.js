@@ -271,8 +271,21 @@ function register(getMainWindow) {
     cloud.applyConfig({ url, key, online: true });
     db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));
     const sync = await cloud.syncSettled();
-    return { ...health, sync, needsSetup: db.needsSetup() };
+    return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
   });
+
+  // How many accounts someone could sign in with here, besides the shipped
+  // admin / admin — Join's answer to "did the clinic arrive?". needsSetup()
+  // cannot answer it: every install comes with admin / admin, so it is false
+  // on a new laptop whether or not anything came down, and Join reported
+  // "Clinic downloaded" off an empty server. A count of what the last sync
+  // applied cannot either: the timer's own cycle, started by saving the
+  // server, usually takes everything before syncSettled() runs its one.
+  function ownAccounts() {
+    const shipped = db.defaultAdminActive();
+    return db.listUsers().filter((u) => u.active
+      && !(shipped && u.role === 'admin' && u.username === db.DEFAULT_ADMIN_USERNAME)).length;
+  }
 
   // Erase every clinic record on this computer and return it to first-run setup.
   // Destructive and irreversible, so the renderer confirms by typed phrase; the

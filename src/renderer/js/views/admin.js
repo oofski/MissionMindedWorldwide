@@ -672,6 +672,15 @@ export function renderAdmin(ctx, params = {}) {
             step('Enter them below, on every laptop the clinic uses.',
               'A laptop that is new to the clinic can also do it from the sign-in screen, with "Join a clinic already set up".'),
           ]),
+          // Said here because this is the laptop it applies to: one that was
+          // used on its own first, like the ones a clinic tests with.
+          el('div', { class: 'banner banner--warn', style: 'margin:0 0 var(--space-3);' }, [
+            icon('alert', { size: 14 }),
+            el('span', {}, [
+              el('strong', {}, ['Already used this laptop?']),
+              ' Once it connects, everything on it — test patients included — goes to every laptop of the clinic. And the laptops share one account named admin: if its password was changed on this laptop, that password replaces the admin password on every laptop. Give admin the same password on each laptop before connecting, or, to start clean, back up and then erase this laptop (Backup & Export → Reset this computer).',
+            ]),
+          ]),
           el('div', { class: 'inline-row' }, [
             el('button', { class: 'btn btn--ghost btn--sm', onClick: () => api.openExternal(SETUP_GUIDE_URL) },
               [icon('globe', { size: 14 }), 'Open the setup guide']),
