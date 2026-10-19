@@ -39,7 +39,7 @@ export function renderAdmin(ctx, params = {}) {
         el('div', {}, [
           el('div', {
             style: 'font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:var(--tracking-eyebrow); color:var(--teal-deep); font-weight:var(--fw-semibold); margin-bottom:var(--space-1);',
-          }, ['Helping hands for healthy living']),
+          }, ['Mission Minded Worldwide']),
           el('h1', {}, [title]),
           el('p', { class: 'view-sub' }, [sub]),
         ]),

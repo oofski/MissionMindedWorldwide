@@ -321,7 +321,7 @@ export function renderDashboard(ctx) {
         el('div', {}, [
           el('div', {
             style: 'font-size:var(--fs-2xs); letter-spacing:var(--tracking-eyebrow); text-transform:uppercase; font-weight:var(--fw-semibold); color:var(--accent-text); margin-bottom:var(--space-1);',
-          }, ['Helping hands for healthy living']),
+          }, ['Mission Minded Worldwide']),
           el('h1', {}, [t('dash.title')]),
           el('p', { class: 'view-sub' }, [
             event ? `${t('dash.event')}: ` : '',

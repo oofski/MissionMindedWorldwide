@@ -30,7 +30,7 @@ export function renderManagement(ctx) {
         el('div', {}, [
           el('div', {
             style: 'font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:var(--tracking-eyebrow); color:var(--teal-deep); font-weight:var(--fw-semibold); margin-bottom:var(--space-1);',
-          }, ['Helping hands for healthy living']),
+          }, ['Mission Minded Worldwide']),
           el('h1', {}, ['Management']),
           el('p', { class: 'view-sub' }, ['Oversee every patient in the clinic and override the flow when you need to.']),
         ]),
