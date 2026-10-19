@@ -874,6 +874,8 @@ function seed() {
   // was already set up needs this to get the shipped administrator. One-time.
   ensureBootstrapAdmin();
   convergeSeedAdmin();
+  // After it: the shared admin identity may be what a stray deletion names.
+  reviveRefusedUserDeletions();
   // Align this laptop's active event with the clinic-wide selection (synced).
   resolveActiveEvent();
 
@@ -950,40 +952,50 @@ function publicUser(row) {
 
 /**
  * Sign in. Since v0.0.16 a username can belong to several accounts — one per
- * event, each with its own password — so every active account with it is a
- * candidate, tried in this order, and the first whose password matches wins:
- *   1. an administrator (administrators are global; no staff account may have
- *      an administrator's username, so normally there is nothing else);
- *   2. the account for the event this laptop is on (the active event);
- *   3. any other event's, newest first.
- * The active event's account wins whenever its password matches, so a person
- * set up for two clinics with the same password (Add staff → "Keep the same
- * password") always signs in as this clinic's account, and their work is
- * recorded under it.
- * Falling through to (3) is deliberate. Before v0.0.16 a username had one
- * account, so every account that signs in today is still found: staff set up
- * for last week's event keep signing in after the clinic moves on, as they
- * always have. And no account puts the laptop on another event — every
- * station works the active event whoever signs in — so the account chosen
- * decides only whose name the work goes under, and it is the one whose
- * password was typed. That case is not silent: when the active event has an
- * account by this name and another event's was used, the audit line says so.
+ * event, each with its own password — so which account a username and
+ * password sign in to is decided like this:
+ *   1. an administrator by that name, if its password matches (administrators
+ *      are global, and no staff account may have an administrator's username,
+ *      so normally there is nothing else);
+ *   2. if the event this laptop is on (the active event) has an account by
+ *      that name, THAT account and no other: it signs in when it is turned on
+ *      and its password matches, and otherwise nobody does;
+ *   3. only when the active event has no account by that name, any other
+ *      event's that is turned on and whose password matches, newest first.
+ * (2) is what lets an administrator act on this clinic's account. Turning it
+ * off, or giving it a new password, has to stop the old way in — and with a
+ * fall-through, the person's account for an earlier event (same username,
+ * maybe the same password, kept with "Keep the same password") signed them in
+ * anyway, with that account's role, and the Staff tab does not even list it.
+ * (3) keeps every sign-in that works today working: before v0.0.16 no event
+ * had a second account by any name, so whoever signs in today with an account
+ * for last week's event is on an event with none of their own, and they keep
+ * signing in after the clinic moves on, as they always have.
  */
 function login(username, password) {
   const u = String(username || '').trim().toLowerCase();
-  const rows = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').all(u);
+  const rows = db.prepare('SELECT * FROM users WHERE username = ?').all(u);
   if (!rows.length) return null;
   const activeId = Number(getSetting('active_event_id')) || null;
-  const rank = (r) => (r.role === 'admin' ? 0 : activeId && r.event_id === activeId ? 1 : 2);
-  rows.sort((a, b) => rank(a) - rank(b) || b.id - a.id);
-  const row = rows.find((r) => verifyPassword(password, r.salt, r.hash));
+  const admins = rows.filter((r) => r.role === 'admin');
+  const staff = rows.filter((r) => r.role !== 'admin');
+  const here = staff.filter((r) => activeId && r.event_id === activeId);
+  const elsewhere = staff.filter((r) => !here.includes(r)).sort((a, b) => b.id - a.id);
+  // Turned-off accounts are left out only now, AFTER deciding whether this
+  // event has one: a turned-off account here still closes (3).
+  const row = [...admins, ...(here.length ? here : elsewhere)]
+    .find((r) => r.active && verifyPassword(password, r.salt, r.hash));
   if (!row) return null;
-  let detail = null;
-  if (rank(row) === 2 && rows.some((r) => rank(r) === 1)) {
-    detail = `Signed in with the account for ${eventName(row.event_id)}; the one for ${eventName(activeId)} has a different password`;
-  }
-  audit(publicUser(row), 'login', 'user', row.id, detail);
+  audit(publicUser(row), 'login', 'user', row.id, null);
   return publicUser(row);
+}
+
+// The signed-in account as it is now, or null once it no longer exists here.
+// Main checks it before every call (ipc.js liveSession): an account can be
+// deleted or turned off on another laptop, and that synced in, while somebody
+// is still signed in to it on this one.
+function sessionAccount(id) {
+  return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(Number(id)));
 }
 
 function listUsers() {
@@ -1017,20 +1029,17 @@ function holderOf(row) {
  * copy_password_from: the id of an existing staff account whose password the
  * new one should keep (Add staff → "Copy someone from another event"). The salt
  * and hash are copied here, in main; neither ever goes to the screen, which
- * sends only that id. Administrators only, like the rest of this.
+ * sends only that id. Administrators only, like the rest of this. It is the
+ * SAME person's password for another event, so the source must have this
+ * username, be on a different event, and be turned on — otherwise the
+ * password of whoever was picked would sign in as whoever was typed, or a
+ * turned-off account's password would come back on a working one. A request
+ * that also carries a typed password is refused rather than one of the two
+ * quietly winning.
  */
 function createUser(actor, { username, full_name, role, password, event_id, copy_password_from }) {
   const u = String(username || '').trim().toLowerCase();
-  let source = null;
-  if (copy_password_from != null && copy_password_from !== '') {
-    requireAdmin(actor, 'copy a password to a new account');
-    source = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(copy_password_from));
-    if (!source) throw new Error('The account to copy the password from no longer exists.');
-    if (source.role === 'admin' || role === 'admin') {
-      throw new Error('Only a staff account\'s password can be kept for another staff account.');
-    }
-  }
-  if (!u || !full_name || !role || (!password && !source)) throw new Error('Missing required fields.');
+  if (!u || !full_name || !role) throw new Error('Missing required fields.');
   if (!ROLES.includes(role)) throw new Error('Invalid role.');
   // Administrators are always global (event_id NULL). Clinical staff are scoped
   // to an event so they can be cleared out when the clinic moves on (v1.0.7).
@@ -1039,6 +1048,25 @@ function createUser(actor, { username, full_name, role, password, event_id, copy
   if (role !== 'admin') {
     eid = event_id != null ? Number(event_id) : Number(getSetting('active_event_id')) || null;
   }
+  let source = null;
+  if (copy_password_from != null && copy_password_from !== '') {
+    requireAdmin(actor, 'copy a password to a new account');
+    if (password) throw new Error('Either type a password or keep the one from another event, not both.');
+    source = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(copy_password_from));
+    if (!source) throw new Error('The account to copy the password from no longer exists.');
+    if (source.role === 'admin' || role === 'admin') {
+      throw new Error('Only a staff account\'s password can be kept for another staff account.');
+    }
+    if (source.username !== u) {
+      throw new Error(`The password kept is ${source.full_name}'s, so the username has to stay ${source.username}. Type a password for ${u} instead.`);
+    }
+    // (A source on THIS event has this event's username, which the per-event
+    // refusal below names.)
+    if (!source.active) {
+      throw new Error(`${source.full_name}'s account for ${eventName(source.event_id)} is turned off, so its password is not kept. Type a new password instead.`);
+    }
+  }
+  if (!password && !source) throw new Error('Missing required fields.');
   const holders = db.prepare('SELECT * FROM users WHERE username = ? ORDER BY id').all(u);
   if (role === 'admin') {
     const taken = holders[0];
@@ -1152,12 +1180,6 @@ function detachUserRefs(ids) {
 
 function deleteUser(actor, id) {
   ensureUids();
-  // A staff account is a synced entity carrying its own password hash, so a
-  // local-only delete leaves them able to sign in on every other laptop.
-  {
-    const u = db.prepare('SELECT uid, event_id FROM users WHERE id = ?').get(id);
-    if (u && u.uid) recordTombstone(u.uid, 'user', u.event_id ? uidOf('events', u.event_id) : null);
-  }
   const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   if (!row) throw new Error('User not found.');
   if (actor && actor.id === id) throw new Error('You cannot delete your own account.');
@@ -1167,10 +1189,53 @@ function deleteUser(actor, id) {
     const admins = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n;
     if (admins <= 1) throw new Error('Cannot delete the last administrator.');
   }
-  const tx = db.transaction(() => { detachUserRefs([id]); db.prepare('DELETE FROM users WHERE id = ?').run(id); });
-  tx();
+  // A staff account is a synced entity carrying its own password hash, so a
+  // local-only delete leaves them able to sign in on every other laptop: the
+  // deletion is recorded to travel. Only now, after every refusal, and in the
+  // same transaction as the delete itself. It used to be recorded first, so a
+  // REFUSED delete — an administrator clicking Delete on her own row — still
+  // sent her account's deletion, and since v0.0.16 other laptops (and this
+  // one, pulling its own row back) apply such a deletion: she would have been
+  // deleted everywhere, the clinic's only administrator included.
+  db.transaction(() => {
+    if (row.uid) recordTombstone(row.uid, 'user', row.event_id ? uidOf('events', row.event_id) : null);
+    detachUserRefs([id]);
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  })();
   audit(actor, 'delete', 'user', id, row.username);
   return { deleted: true };
+}
+
+// Before v0.0.16 deleteUser recorded an account's deletion BEFORE its
+// refusals, so a refused delete — an administrator clicking Delete on her own
+// row ("You cannot delete your own account."), or on the last administrator —
+// left a deletion for an account that was never deleted, and sent it. Every
+// laptop held it back over the audit log's foreign key, until v0.0.16 cleared
+// those references on apply and so would carry it out: at the next sync she
+// was deleted here, pulling her own deletion back, and on every other laptop.
+// A user deletion recorded here for an account that is still here is one of
+// those. Nothing else leaves both: a real delete removes the row in the same
+// transaction, and a deletion from elsewhere is recorded only once it has. So
+// it is retired. If it had already gone to the server, the account is sent
+// again as a deliberate revival (the server keeps deletions sticky), stamped
+// just above both the deletion and its own last change, so it beats the
+// deletion on every laptop and still loses to any later edit made elsewhere.
+// Runs at every start; normally there is nothing to do.
+function reviveRefusedUserDeletions() {
+  const strays = db.prepare(
+    `SELECT u.*, t.updated_at AS tomb_at, t.synced_rev AS tomb_sent
+       FROM tombstones t JOIN users u ON u.uid = t.uid WHERE t.entity = 'user'`
+  ).all();
+  for (const r of strays) {
+    db.transaction(() => {
+      db.prepare('DELETE FROM tombstones WHERE uid = ?').run(r.uid);
+      if (!r.tomb_sent) return;   // it never left this laptop
+      const latest = [r.tomb_at, r.updated_at].filter(Boolean).map(String).sort().pop();
+      db.prepare('UPDATE users SET updated_at = ?, content_rev = ?, synced_rev = NULL WHERE id = ?')
+        .run(justAbove(latest), sig(buildData('user', r)), r.id);
+      db.prepare('INSERT INTO undeletes (uid, created_at) VALUES (?, ?) ON CONFLICT(uid) DO NOTHING').run(r.uid, now());
+    })();
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4579,6 +4644,21 @@ function applyRemoteRows(remoteRows) {
   const DELETE_ORDER = APPLY_ORDER.slice().reverse();
   const rank = (r) => (r.deleted ? DELETE_ORDER.indexOf(r.entity) : APPLY_ORDER.indexOf(r.entity) + 100);
   const list = (remoteRows || []).slice().sort((a, b) => rank(a) - rank(b));
+  // The newest live copy of each record in this batch. A deletion held back
+  // from an earlier pull (deferredRows, retried with every page) can arrive
+  // beside a NEWER copy of the same record — which, the server keeping
+  // deletions sticky, only a deliberate revival is (a restore; an account whose
+  // deletion was recorded by mistake, see reviveRefusedUserDeletions). Applied
+  // in order, deletions first, the record was deleted and then re-created:
+  // a patient without the chart its deletion cascaded away, an account with
+  // nothing it did here pointing at it any more, and signed out. The older
+  // deletion loses instead, as it would to the same copy already applied.
+  const liveStamp = new Map();
+  for (const r of list) {
+    if (r.deleted || !r.uid || !r.updated_at) continue;
+    const prev = liveStamp.get(r.uid);
+    if (prev == null || String(r.updated_at) > String(prev)) liveStamp.set(r.uid, r.updated_at);
+  }
   let applied = 0, skipped = 0, deferred = 0, deleted = 0;
   const deferredRows = [];
   const applyOne = (env) => {
@@ -4587,19 +4667,35 @@ function applyRemoteRows(remoteRows) {
     // A tombstone from another station (or the cloud purge): remove the record
     // here too. Children cascade via the schema's ON DELETE CASCADE.
     if (env.deleted) {
+      if (env.updated_at && liveStamp.has(env.uid) && String(liveStamp.get(env.uid)) > String(env.updated_at)) { skipped++; return; }
       const hit = db.prepare(`SELECT id, updated_at FROM ${table} WHERE uid = ?`).get(env.uid);
       // Same last-write-wins rule the live branch uses. Without it, a station
       // with a big unpushed backlog has recent local edits wiped by an older
       // deletion it is only now catching up on.
       if (hit && hit.updated_at && env.updated_at && String(hit.updated_at) >= String(env.updated_at)) { skipped++; return; }
       if (hit) {
-        // A staff account is pointed at by everything it did on THIS laptop —
-        // its sign-ins in the audit log at the least — which no tombstone from
-        // elsewhere will ever clear. So its deletion failed the foreign key
-        // here and was held back as "children still to come" for good: "Start
-        // fresh" and Delete never reached a laptop the person had used, and
-        // they kept signing in on it. Detached first, as deleteUser does.
-        if (entity === 'user') detachUserRefs([hit.id]);
+        if (entity === 'user') {
+          // Never the last administrator that can sign in here. deleteUser
+          // refuses that on the laptop it is clicked on, but laptops can differ
+          // (an administrator made on one and not yet synced), and a deletion
+          // recorded by mistake — before v0.0.16 a REFUSED delete was still
+          // recorded, see deleteUser — would otherwise leave this laptop with
+          // nobody who can manage it. Held back instead, like a deletion whose
+          // children are still to come: once another administrator is here,
+          // the retry goes through.
+          const acct = db.prepare('SELECT role, active FROM users WHERE id = ?').get(hit.id);
+          if (acct.role === 'admin' && acct.active
+              && db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n <= 1) {
+            deferred++; deferredRows.push(env); return;
+          }
+          // A staff account is pointed at by everything it did on THIS laptop —
+          // its sign-ins in the audit log at the least — which no tombstone from
+          // elsewhere will ever clear. So its deletion failed the foreign key
+          // here and was held back as "children still to come" for good: "Start
+          // fresh" and Delete never reached a laptop the person had used, and
+          // they kept signing in on it. Detached first, as deleteUser does.
+          detachUserRefs([hit.id]);
+        }
         try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(hit.id); deleted++; }
         catch (e) {
           // Still has children here (their tombstones are in a later page).
@@ -4892,7 +4988,7 @@ function close() {
 
 module.exports = {
   init, close,
-  login, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
+  login, sessionAccount, listUsers, createUser, updateUser, deleteUser, clearEventStaff,
   saveExitSurvey, getExitSurvey, SURVEY_SCHEMA, SURVEY_MULTI, STAGE_QUESTIONS,
   listInventory, getInventoryItem, saveInventoryItem, recordInventoryMove, deleteInventoryItem,
   inventoryChairUsage, MOVE_REASONS,

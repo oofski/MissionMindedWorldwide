@@ -254,13 +254,16 @@ export function renderAdmin(ctx, params = {}) {
     const copyable = isNew && !forceAdmin && active ? await copyCandidates(active) : [];
     const copyFrom = el('select', { class: 'input select' }, [
       el('option', { value: '' }, ['No one — type a new person in below']),
-      ...copyable.map((x) => el('option', { value: String(x.id) }, [`${x.full_name} — ${t(`roles.${x.role}`)} — ${x.event_name}`])),
+      ...copyable.map((x) => el('option', { value: String(x.id) }, [`${x.full_name} — ${t(`roles.${x.role}`)} — ${x.event_name}${x.active ? '' : ' (turned off)'}`])),
     ]);
     const keepPw = el('input', { type: 'checkbox' });
     const keepText = el('span', {}, ['Keep the same password']);
     const keepRow = el('label', { class: 'form-check', style: 'display:none;' }, [keepPw, keepText]);
     const picked = () => copyable.find((x) => String(x.id) === copyFrom.value) || null;
-    const keeping = () => !!picked() && keepPw.checked;
+    // A turned-off account's password is not kept (main refuses it too): the
+    // account was turned off for a reason, and the new one would be working.
+    const canKeep = () => !!picked() && picked().active;
+    const keeping = () => canKeep() && keepPw.checked;
     const showPassword = () => {
       const p = picked();
       pass.disabled = keeping();
@@ -269,8 +272,8 @@ export function renderAdmin(ctx, params = {}) {
     };
     copyFrom.addEventListener('change', () => {
       const p = picked();
-      keepRow.style.display = p ? '' : 'none';
-      if (!p) keepPw.checked = false;
+      keepRow.style.display = canKeep() ? '' : 'none';
+      if (!canKeep()) keepPw.checked = false;
       if (p) {
         name.value = p.full_name;
         uname.value = p.username;
@@ -282,6 +285,17 @@ export function renderAdmin(ctx, params = {}) {
       showPassword();
     });
     keepPw.addEventListener('change', showPassword);
+    // The kept password is that person's, for that username. Typing a different
+    // username over theirs is somebody else — who must not get it (they could
+    // then be signed in to by the person picked) — so the pick is let go.
+    uname.addEventListener('input', () => {
+      const p = picked();
+      if (!p || uname.value.trim().toLowerCase() === p.username) return;
+      copyFrom.value = '';
+      keepPw.checked = false;
+      keepRow.style.display = 'none';
+      showPassword();
+    });
 
     const fields = [
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Full name']), name]),

@@ -26,6 +26,10 @@ const reportExport = require('./reportExport');
 const os = require('os');
 
 let currentUser = null;
+// Why the session was ended from outside it (see liveSession), so every call a
+// screen still open on it makes says that, rather than "Please sign in first."
+// Cleared by the next sign-in or sign-out.
+let endedBecause = null;
 
 // Role matrix — keys are IPC channels, values are roles allowed to call them.
 const PERMS = {
@@ -150,10 +154,28 @@ const PERMS = {
   // update:* and app:version are open to any signed-in user (available in any view).
 };
 
+// The signed-in account can be deleted or turned off on another laptop, and
+// that synced in, while somebody is still signed in to it here — Start fresh at
+// the end of a clinic, with people still finishing charts. The session kept
+// the old id, so their next save pointed at an account that no longer exists
+// and failed with a bare "FOREIGN KEY constraint failed", and the edit was
+// lost without a word of why (signing out failed the same way, on its audit
+// line). So the account is looked up before each call, and if it is gone or
+// turned off the session ends, and every gated call says why (ensure()).
+function liveSession() {
+  if (!currentUser) return;
+  const acct = db.sessionAccount(currentUser.id);
+  if (acct && acct.active) return;
+  currentUser = null;
+  endedBecause = acct
+    ? 'Your account was turned off — sign in again, or ask an administrator.'
+    : 'Your account was removed on another computer — sign in again.';
+}
+
 function ensure(channel) {
   const allowed = PERMS[channel];
   if (!allowed) return; // open to any authenticated user
-  if (!currentUser) throw new Error('Please sign in first.');
+  if (!currentUser) throw new Error(endedBecause || 'Please sign in first.');
   if (!allowed.includes(currentUser.role)) {
     throw new Error('Your role does not have permission for this action.');
   }
@@ -166,6 +188,7 @@ function handle(channel, fn, { requireAuth = true } = {}) {
       if (requireAuth && channel !== 'auth:login' && !currentUser && PERMS[channel] !== undefined) {
         // protected channels need a user
       }
+      liveSession();
       ensure(channel);
       const result = await fn(...args);
       return { ok: true, data: result };
@@ -196,6 +219,7 @@ function register(getMainWindow) {
   handle('auth:setupAdmin', (payload) => {
     const user = db.createFirstAdmin(payload || {});
     currentUser = user;   // sign the new administrator straight in
+    endedBecause = null;
     return user;
   });
 
@@ -204,17 +228,20 @@ function register(getMainWindow) {
       const user = db.login(username, password);
       if (!user) return { ok: false, error: 'Invalid username or password.' };
       currentUser = user;
+      endedBecause = null;
       return { ok: true, data: user };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   });
   ipcMain.handle('auth:logout', async () => {
+    liveSession();   // an account removed elsewhere has no audit line to write
     if (currentUser) db.audit(currentUser, 'logout', 'user', currentUser.id, null);
     currentUser = null;
+    endedBecause = null;
     return { ok: true };
   });
-  ipcMain.handle('auth:current', async () => ({ ok: true, data: currentUser }));
+  ipcMain.handle('auth:current', async () => { liveSession(); return { ok: true, data: currentUser }; });
 
   /* ---- Users ---- */
   handle('users:list', () => db.listUsers());
@@ -446,6 +473,9 @@ function register(getMainWindow) {
   // (admin / doctor / triage). It is intentionally not role-gated.
   ipcMain.handle('patients:create', async (_e, payload) => {
     try {
+      // A check-in is never refused over the account it was started under:
+      // if that account has gone, the patient is checked in as at the kiosk.
+      liveSession();
       return { ok: true, data: db.createPatient(currentUser, payload) };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -613,7 +643,8 @@ function register(getMainWindow) {
   /* ---- Dashboard / audit ---- */
   ipcMain.handle('stats:dashboard', async () => {
     try {
-      if (!currentUser) throw new Error('Please sign in first.');
+      liveSession();
+      if (!currentUser) throw new Error(endedBecause || 'Please sign in first.');
       return { ok: true, data: db.dashboardStats() };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -788,6 +819,7 @@ function register(getMainWindow) {
   // unauthenticated) — registered raw, like patients:create.
   ipcMain.handle('usb:writeCheckin', async (_e, { patientId, choose } = {}) => {
     try {
+      liveSession();   // as patients:create: the file is written, under the kiosk if need be
       const patient = db.getPatient(patientId);
       if (!patient) throw new Error('Patient not found.');
       const dir = await pickDir('Insert/choose the USB drive for this patient');

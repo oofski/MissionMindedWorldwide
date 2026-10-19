@@ -3280,17 +3280,21 @@ async function main() {
       `staff per event: staff cannot take an administrator's username, nor a new administrator (or a promotion) a staff one — "${clash1}" / "${clash2}"`);
 
     // 5. Sign-in: the account for the event the laptop is on, each with its own
-    // password. Lowell's still signs in on Sandy, and the audit log says so.
+    // password. While the active event has an "ana", only that account signs
+    // her in; on an event with none of its own (Gresham, so far), her other
+    // events' accounts still do, as every account did before v0.0.16.
     db.setActiveEvent(currentUser, evB.id);
     const sB1 = db.login('ana', 'ana-sandy-2');
     const sB2 = db.login('ana', 'ana-lowell-1');
-    const fellS = db.listAudit(5).find((a) => a.action === 'login' && a.user_id === anaA.id);
     db.setActiveEvent(currentUser, evA.id);
     const sA1 = db.login('ana', 'ana-lowell-1');
+    const sA2 = db.login('ana', 'ana-sandy-2');
+    db.setActiveEvent(currentUser, evC.id);
+    const sC1 = db.login('ana', 'ana-lowell-1'), sC2 = db.login('ana', 'ana-sandy-2');
     log(!!sB1 && sB1.id === anaB.id && !!sA1 && sA1.id === anaA.id && !db.login('ana', 'nobodys-password'),
       'staff per event: sign-in takes the account for the active event, each with its own password; a wrong password is still refused');
-    log(!!sB2 && sB2.id === anaA.id && !!fellS && /account for Lowell Oct 18; the one for Sandy Clinic has a different password/.test(fellS.detail || ''),
-      'staff per event: with Sandy active, Lowell\'s ana still signs in with her Lowell password (nothing that signs in today stops), and the audit log names the account used');
+    log(!sB2 && !sA2 && !!sC1 && sC1.id === anaA.id && !!sC2 && sC2.id === anaB.id,
+      'staff per event: with Sandy active, Lowell\'s password no longer signs ana in to her Lowell account (Sandy has its own ana); on Gresham, which has none, each of her accounts still signs in with its own password');
 
     // 6. Copy someone from another event, keeping the password.
     await openStaff(evC);
@@ -3335,6 +3339,68 @@ async function main() {
     clickText('Cancel', ovC); await settleS();
     log(/^Only an administrator can copy a password/.test(copyRefusedS) && !!againC && !anaOfferedAgain,
       'copy from another event: only an administrator can copy a password, and someone this event already has is not offered again');
+
+    // 6b. Turning off, or resetting the password of, Gresham's ana stops her
+    // Sandy password signing her in on Gresham. It used to fall through to the
+    // Sandy account, whose password Gresham's had kept, with that account's
+    // role, and nothing on Gresham's Staff tab shows that account.
+    db.setActiveEvent(currentUser, evC.id);
+    db.updateUser(currentUser, anaC.id, { active: false });
+    const offC = db.login('ana', 'ana-sandy-2');
+    db.updateUser(currentUser, anaC.id, { active: true });
+    db.updateUser(currentUser, anaC.id, { password: 'ana-gresham-3' });
+    const oldC = db.login('ana', 'ana-sandy-2'), newC = db.login('ana', 'ana-gresham-3');
+    db.updateUser(currentUser, anaC.id, { password: 'ana-sandy-2' });   // as she had it, for the steps below
+    log(offC === null && oldC === null && !!newC && newC.id === anaC.id,
+      'staff per event: turning off this event\'s ana, or giving her a new password, stops the old password signing her in through her account for another event');
+
+    // 6c. The kept password is that person's, for that username, and only from
+    // an account that is turned on. In main, whatever the screen sends...
+    const refuseS = (p) => { try { db.createUser(currentUser, p); return 'created'; } catch (e) { return e.message; } };
+    db.updateUser(currentUser, benA.id, { active: false });
+    const otherNameS = refuseS({ username: 'zed', full_name: 'Zed Park', role: 'doctor', copy_password_from: anaB.id });
+    const offSourceS = refuseS({ username: 'ben', full_name: 'Ben Ortiz', role: 'doctor', copy_password_from: benA.id });
+    const bothS = refuseS({ username: 'ben', full_name: 'Ben Ortiz', role: 'doctor', copy_password_from: benA.id, password: 'typed-too-1' });
+    log(/^The password kept is Ana Lopez's, so the username has to stay ana/.test(otherNameS)
+      && /^Ben Ortiz's account for Lowell Oct 18 is turned off, so its password is not kept/.test(offSourceS)
+      && /^Either type a password or keep the one from another event, not both/.test(bothS)
+      && !db.listUsers().some((u) => u.username === 'zed' || (u.username === 'ben' && u.event_id === evC.id)),
+      `copy from another event: main keeps a password only for the same username, from an account that is turned on, and never alongside a typed one — "${otherNameS}"`);
+    // ...and on the screen: a turned-off person is offered without "Keep the
+    // same password", and typing another username over a picked person's lets
+    // the pick go, so the toast cannot claim a password that is not kept.
+    clickText('Add staff', viewS); await settleS();
+    ovC = $all('.modal-overlay').pop();
+    const pickD = fieldS(ovC, /^Copy someone from another event/);
+    const keepRowD = ovC.querySelector('.form-check');
+    const optBen = pickD ? Array.from(pickD.options).find((o) => /^Ben Ortiz/.test(o.textContent)) : null;
+    if (optBen) pickS(pickD, optBen.value);
+    const benOffered = !!optBen && /\(turned off\)$/.test(optBen.textContent) && keepRowD.style.display === 'none';
+    db.updateUser(currentUser, benA.id, { active: true });
+    clickText('Cancel', ovC); await settleS();
+    clickText('Add staff', viewS); await settleS();
+    ovC = $all('.modal-overlay').pop();
+    const pickE = fieldS(ovC, /^Copy someone from another event/);
+    const optBenOn = pickE ? Array.from(pickE.options).find((o) => /^Ben Ortiz/.test(o.textContent)) : null;
+    if (optBenOn) pickS(pickE, optBenOn.value);
+    const keepE = ovC.querySelector('.form-check input[type=checkbox]');
+    if (keepE) { keepE.checked = true; keepE.dispatchEvent(new window.Event('change', { bubbles: true })); }
+    const keptBefore = !!keepE && keepE.closest('.form-check').style.display !== 'none' && fieldS(ovC, /^Password/).disabled;
+    setInput(fieldS(ovC, /^Full name/), 'Bob Ortiz');
+    setInput(fieldS(ovC, /^Username/), 'bob');
+    setInput(fieldS(ovC, /^Password/), 'bob-gresham-1');
+    const letGo = pickE.value === '' && !keepE.checked && keepE.closest('.form-check').style.display === 'none' && !fieldS(ovC, /^Password/).disabled;
+    const sentE = [];
+    const realCreateE = window.api.usersCreate;
+    window.api.usersCreate = async (p) => { sentE.push(p); return realCreateE(p); };
+    clickText('Save', ovC); await settleS();
+    window.api.usersCreate = realCreateE;
+    const bobToast = toastS();
+    const bob = db.login('bob', 'bob-gresham-1');
+    log(benOffered && keptBefore && letGo && sentE.length === 1 && !('copy_password_from' in sentE[0]) && bobToast === 'Saved'
+      && !!bob && bob.event_id === evC.id && !db.login('bob', 'ben-lowell-1'),
+      `copy from another event: a turned-off person comes without "Keep the same password", and typing another username over the picked one lets the pick go — Bob gets his own password, not Ben's (${bobToast})`);
+    if (bob) db.deleteUser(currentUser, bob.id);
 
     // 7. Start fresh on Lowell (the real button): Lowell's ana and Ben go, by
     // their own uids; Sandy's and Gresham's ana stay. 8. Delete Sandy's ana:
@@ -3476,8 +3542,10 @@ try{
      uids:anas.map((u)=>uidOf(u.id)).sort().join(',')===[ana1A,ana1B].sort().join(','),
      admins:us.filter((u)=>u.username==='admin').length,adminUid:uidOf(us.find((u)=>u.username==='admin').id),
      ben:us.filter((u)=>u.username==='ben').length,skipped:res2.skipped,deferred:res2.deferred};h.close();
-   out.s2Login={adminClinic:!!db.login('admin','clinic-admin-pw'),adminShipped:!db.login('admin','admin'),
-     sandy:(db.login('ana','ana-sandy')||{}).event_id===lB2.id,lowell:(db.login('ana','ana-lowell')||{}).event_id===lA2.id};
+   // Each on her own event: while an event has an ana, only that one signs in.
+   const ad2=db.login('admin','clinic-admin-pw');const onEv=(e,pw)=>{db.setActiveEvent(ad2,e.id);return db.login('ana',pw)||{};};
+   out.s2Login={adminClinic:!!ad2,adminShipped:!db.login('admin','admin'),
+     lowell:onEv(lA2,'ana-lowell').event_id===lA2.id,sandy:onEv(lB2,'ana-sandy').event_id===lB2.id};
    // An edit to one of the two accounts here reaches that account only.
    const b2=anas.find((u)=>u.event_id===lB2.id);db.updateUser(db.login('admin','clinic-admin-pw'),b2.id,{full_name:'Ana M. Lopez'});}
   const rows2=db.collectSyncRows(5000);db.markSynced(rows2.mark);
@@ -3535,6 +3603,64 @@ try{
    out.uBoot.demoOff=us.filter((u)=>u.username==='doctor'&&u.active===0).length;
    out.uBoot.staffRole=(us.find((u)=>u.username==='admin'&&u.event_id!=null)||{}).role;
    out.uBoot.globalAdmins=us.filter((u)=>u.username==='admin'&&u.event_id==null&&u.role==='admin').length;}
+
+  /* --- D: a refused delete sends no deletion --- */
+  const dD=mk('mmwstaffD-');dirs.push(dD);db.init(dD);db.ensureDeviceId();
+  {const a=db.login('admin','admin');db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw-d'});
+   let s=db.collectSyncRows(5000);db.markSynced(s.mark);
+   const anna=db.login('anna','anna-pw-d');
+   try{db.deleteUser(anna,anna.id);out.dRefused='allowed';}catch(e){out.dRefused=e.message;}
+   s=db.collectSyncRows(5000);db.markSynced(s.mark);
+   const h=raw(dD);out.dSent={tombs:h.prepare("SELECT COUNT(*) AS n FROM tombstones WHERE entity='user'").get().n,
+     deletions:s.rows.filter((r)=>r.deleted).length};h.close();
+   // What the server hands back on the next pull: this laptop's own rows.
+   const res=db.applyRemoteRows(s.rows);out.dKept={deleted:res.deleted,deferred:res.deferred,annaIn:!!db.login('anna','anna-pw-d')};}
+  db.close();
+
+  /* --- G: a deletion that would leave a laptop with no administrator --- */
+  const g1=mk('mmwstaffG1-'),g2=mk('mmwstaffG2-');dirs.push(g1,g2);
+  db.init(g1);db.ensureDeviceId();
+  {let a=db.login('admin','admin');db.updateUser(a,a.id,{password:'clinic-pw-g'});a=db.login('admin','clinic-pw-g');
+   db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw-g'});}
+  const gRows=db.collectSyncRows(5000);db.markSynced(gRows.mark);
+  {const anna=db.login('anna','anna-pw-g');db.deleteUser(anna,db.listUsers().find((u)=>u.username==='admin').id);}
+  const gDel=db.collectSyncRows(5000);db.markSynced(gDel.mark);
+  db.close();
+  db.init(g2);db.ensureDeviceId();
+  const isAnna=(r)=>r.entity==='user'&&r.data&&r.data.username==='anna';
+  // The clinic's admin is here; Anna's account is still to come (a later page).
+  db.applyRemoteRows(gRows.rows.filter((r)=>!isAnna(r)));
+  db.login('admin','clinic-pw-g');
+  const gR1=db.applyRemoteRows(gDel.rows);
+  out.gHeld={deferred:gR1.deferred,deleted:gR1.deleted,adminIn:!!db.login('admin','clinic-pw-g')};
+  db.applyRemoteRows(gRows.rows.filter(isAnna));
+  const gR2=db.applyRemoteRows(gR1.deferredRows);
+  out.gLater={deleted:gR2.deleted,deferred:gR2.deferred,adminIn:!!db.login('admin','clinic-pw-g'),annaIn:!!db.login('anna','anna-pw-g')};
+  db.close();
+
+  /* --- V: deletions a refused delete left behind before v0.0.16 --- */
+  const dV=mk('mmwstaffV-');dirs.push(dV);db.init(dV);db.ensureDeviceId();
+  {const a=db.login('admin','admin');
+   db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw-v'});
+   db.createUser(a,{username:'cara',full_name:'Cara Diaz',role:'admin',password:'cara-pw-v'});
+   const s=db.collectSyncRows(5000);db.markSynced(s.mark);}
+  db.close();
+  const vStamp=new Date().toISOString()+'@laptop-on-0.0.15';
+  {const h=raw(dV);const uid=(n)=>h.prepare('SELECT uid FROM users WHERE username=?').get(n).uid;out.vAnna=uid('anna');out.vCara=uid('cara');
+   const t=h.prepare("INSERT INTO tombstones (uid,entity,event_uid,updated_at,synced_rev,created_at) VALUES (?,'user',NULL,?,?,?)");
+   t.run(out.vAnna,vStamp,'sent',vStamp);   // Anna's, already sent to the server
+   t.run(out.vCara,vStamp,null,vStamp);     // Cara's, made offline, never sent
+   h.close();}
+  db.init(dV);
+  {const h=raw(dV);out.vTombs=h.prepare("SELECT COUNT(*) AS n FROM tombstones WHERE entity='user'").get().n;h.close();
+   const s=db.collectSyncRows(5000);const an=s.rows.find((r)=>r.uid===out.vAnna);
+   out.vSend={anna:an?{undelete:!!an.undelete,deleted:an.deleted,newer:String(an.updated_at)>vStamp}:null,cara:s.rows.some((r)=>r.uid===out.vCara)};
+   db.markSynced(s.mark);
+   const again=db.collectSyncRows(5000);out.vSend.once=!again.rows.some((r)=>r.uid===out.vAnna);
+   // The server's copy of her deletion, pulled again: older than her account now.
+   const res=db.applyRemoteRows([{entity:'user',uid:out.vAnna,event_uid:null,patient_uid:null,deleted:1,updated_at:vStamp,data:{}}]);
+   out.vAfter={deleted:res.deleted,anna:!!db.login('anna','anna-pw-v'),cara:!!db.login('cara','cara-pw-v')};}
+  db.close();
 }catch(e){out.crash=String((e&&e.stack)||e);}
 try{db.close();}catch(_){}
 for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
@@ -3584,6 +3710,146 @@ process.stdout.write('@@S@@'+JSON.stringify(out));
       `a laptop holding an unscoped "ana" beside the active event's still starts, keeping both (adopting it into the event would be a second "ana" there)${S.nBoot === true ? '' : ' — ' + String(S.nBoot).slice(0, 120)}`);
     log(!!S.uBoot && S.uBoot.demoOff === 2 && S.uBoot.staffRole === 'emt' && S.uBoot.staffPw === 'Adam Min' && S.uBoot.globalAdmins === 1 && S.uBoot.shipped === 'admin',
       'start-up lookups by username are per event: the demo-password check disables every event\'s "doctor", and the shipped-admin repair never promotes (or resets the password of) an event\'s EMT called "admin"');
+    log(S.dRefused === 'You cannot delete your own account.' && !!S.dSent && S.dSent.tombs === 0 && S.dSent.deletions === 0
+      && !!S.dKept && S.dKept.deleted === 0 && S.dKept.annaIn === true,
+      'a refused delete — an administrator clicking Delete on her own row — records and sends no deletion, and what the server hands back keeps her account (it deleted her everywhere, this laptop included)');
+    log(!!S.gHeld && S.gHeld.deferred === 1 && S.gHeld.deleted === 0 && S.gHeld.adminIn === true
+      && !!S.gLater && S.gLater.deleted === 1 && S.gLater.deferred === 0 && S.gLater.adminIn === false && S.gLater.annaIn === true,
+      'sync never deletes the last administrator who can sign in on a laptop: the deletion waits until the clinic\'s other administrator is there too, then goes through');
+    log(S.vTombs === 0 && !!S.vSend && !!S.vSend.anna && S.vSend.anna.undelete === true && S.vSend.anna.deleted === 0 && S.vSend.anna.newer === true
+      && S.vSend.cara === false && S.vSend.once === true && !!S.vAfter && S.vAfter.deleted === 0 && S.vAfter.anna === true && S.vAfter.cara === true,
+      'upgrade: a deletion an older version recorded for a refused delete is retired at start; one already sent is undone by sending the account back as a revival, newer than the deletion — so pulling that deletion again deletes nobody');
+
+    /* ---- the real handlers: a session whose account went elsewhere, and
+       the upgrade of two laptops with such a deletion on their server ---- */
+    const probeT = `
+const os=require('os'),fs=require('fs'),path=require('path'),{pathToFileURL}=require('url');
+const [dbPath,ipcPath,cloudPath,workerPath]=process.argv.slice(2);
+const handlers={};
+const ep=require.resolve('electron');
+require.cache[ep]={id:ep,filename:ep,loaded:true,exports:{ipcMain:{handle:(c,f)=>{handlers[c]=f;}},dialog:{},shell:{openExternal(){}},
+  app:{getPath:()=>os.tmpdir(),getVersion:()=>'0.0.0',isPackaged:false,on(){}},BrowserWindow:class{}}};
+const B=require('better-sqlite3');
+const out={};const dirs=[];const mk=(p)=>{const d=fs.mkdtempSync(path.join(os.tmpdir(),p));dirs.push(d);return d;};
+const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h);}finally{h.close();}};
+(async()=>{try{
+  const worker=(await import(pathToFileURL(workerPath).href)).default;
+  const db=require(dbPath),cloud=require(cloudPath),ipc=require(ipcPath);
+  ipc.register(()=>null);
+  const call=(ch,p)=>handlers[ch]({},p);
+  const said=(r)=>(r&&r.ok?'ok':(r&&r.error)||'');
+  const push=()=>{const s=db.collectSyncRows(5000);db.markSynced(s.mark);return s.rows;};
+
+  /* --- the session: removed or turned off while signed in here --- */
+  const d1=mk('mmwsesA-'),d2=mk('mmwsesB-');
+  db.init(d1);db.ensureDeviceId();
+  let a1=db.login('admin','admin');const ev=db.createEvent(a1,{name:'Lowell'});db.setActiveEvent(a1,ev.id);
+  const ana=db.createUser(a1,{username:'ana',full_name:'Ana Lopez',role:'doctor',password:'pw-ana'});
+  const r1=push();db.close();
+  db.init(d2);db.ensureDeviceId();db.applyRemoteRows(r1);
+  const a2=db.login('admin','admin');
+  const pt=db.createPatient(a2,{first_name:'Pat',last_name:'One',dob:'1990-01-01'});
+  await call('auth:login',{username:'ana',password:'pw-ana'});
+  out.save1=said(await call('triage:save',{patientId:pt.id,data:{complaint:'pain'}}));
+  const r2=push();db.close();
+  db.init(d1);db.applyRemoteRows(r2);a1=db.login('admin','admin');db.deleteUser(a1,ana.id);const r3=push();db.close();
+  db.init(d2);out.applied=db.applyRemoteRows(r3).deleted;
+  out.save2=said(await call('triage:save',{patientId:pt.id,data:{complaint:'pain, upper left'}}));
+  out.signedOut=ipc.getCurrentUser()===null;
+  out.save3=said(await call('triage:save',{patientId:pt.id,data:{complaint:'x'}}));
+  out.current=(await call('auth:current')).data;
+  out.logout=said(await call('auth:logout'));
+  out.afterLogout=said(await call('triage:save',{patientId:pt.id,data:{complaint:'x'}}));
+  const ben=db.createUser(a2,{username:'ben',full_name:'Ben Ortiz',role:'doctor',password:'pw-ben'});
+  await call('auth:login',{username:'ben',password:'pw-ben'});db.deleteUser(a2,ben.id);
+  try{out.staleLogout=said(await call('auth:logout'));}catch(e){out.staleLogout='threw: '+e.message;}
+  const cy=db.createUser(a2,{username:'cy',full_name:'Cy Park',role:'doctor',password:'pw-cy'});
+  await call('auth:login',{username:'cy',password:'pw-cy'});db.updateUser(a2,cy.id,{active:false});
+  out.off=said(await call('triage:save',{patientId:pt.id,data:{complaint:'y'}}));
+  const di=db.createUser(a2,{username:'di',full_name:'Di Moss',role:'registration',password:'pw-di'});
+  await call('auth:login',{username:'di',password:'pw-di'});db.deleteUser(a2,di.id);
+  out.checkin=said(await call('patients:create',{first_name:'Kio',last_name:'Sk',dob:'1991-01-01'}));
+  await call('auth:login',{username:'admin',password:'admin'});out.adminAgain=said(await call('users:list'));
+  db.close();
+
+  /* --- two laptops, one server, a deletion recorded for a refused delete --- */
+  const mkDB=()=>{const rows=new Map();let seq=0;
+  return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+      if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
+      if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
+    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+      return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
+  const KEY='right horse battery 42',URL_A='https://mmw-sync.clinic.workers.dev';let DB=null;
+  globalThis.fetch=async(url,init)=>worker.fetch(new Request(url,init),{CLINIC_KEY:KEY,DB},{});
+  const sync=async()=>{const r=await cloud.syncOnce();if(!r.ok)throw new Error('sync: '+JSON.stringify(r));return r;};
+  const upgrade=async(order)=>{
+    DB=mkDB();const o={};const L1=mk('mmwstrayA-'),L2=mk('mmwstrayB-');
+    db.init(L1);db.ensureDeviceId();db.setSyncMeta({url:URL_A,key:KEY,enabled:true});
+    let a=db.login('admin','admin');db.updateUser(a,a.id,{password:'clinic-pw'});a=db.login('admin','clinic-pw');
+    db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw'});
+    await sync();const annaUid=raw(L1,(h)=>h.prepare("SELECT uid FROM users WHERE username='anna'").get().uid);db.close();
+    db.init(L2);db.ensureDeviceId();db.setSyncMeta({url:URL_A,key:KEY,enabled:true});await sync();
+    const annaL2=db.login('anna','anna-pw');
+    if(order==='onlyAdmin'){db.updateUser(annaL2,db.login('admin','clinic-pw').id,{active:false});await sync();}
+    db.close();
+    // On 0.0.15, laptop 1: Anna clicks Delete on her own row. Refused, but the
+    // deletion was recorded first and sent; laptop 2 pulled it and held it
+    // back (its audit log points at her), parked for the next pull.
+    const stamp=new Date().toISOString()+'@laptop-1-on-0.0.15';
+    const tomb={entity:'user',uid:annaUid,event_uid:null,patient_uid:null,deleted:1,updated_at:stamp,data:{}};
+    raw(L1,(h)=>h.prepare("INSERT INTO tombstones (uid,entity,event_uid,updated_at,synced_rev,created_at) VALUES (?,'user',NULL,?,'sent',?)").run(annaUid,stamp,stamp));
+    await worker.fetch(new Request(URL_A+'/v1/push',{method:'POST',headers:{authorization:'Bearer '+KEY,'content-type':'application/json'},
+      body:JSON.stringify({device_id:'laptop-1',rows:[tomb]})}),{CLINIC_KEY:KEY,DB},{});
+    o.serverDeleted=DB.rows.get(annaUid).deleted===1;
+    raw(L2,(h)=>{const set=h.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)');
+      set.run('cloud_pending',JSON.stringify([tomb]));set.run('cloud_cursor',String(Math.max(...[...DB.rows.values()].map((r)=>r.seq))));});
+    // Then both are updated to 0.0.16, and each starts and syncs.
+    const onL2=async()=>{db.init(L2);await sync();const id=raw(L2,(h)=>(h.prepare('SELECT id FROM users WHERE uid=?').get(annaUid)||{}).id);
+      const r={sameAccount:id===annaL2.id,annaIn:!!db.login('anna','anna-pw'),parked:db.getSyncPending().length};db.close();return r;};
+    const onL1=async()=>{db.init(L1);await sync();const r={annaIn:!!db.login('anna','anna-pw'),server:DB.rows.get(annaUid).deleted};db.close();return r;};
+    if(order==='l2First'){o.l2Before=await onL2();o.l1=await onL1();o.l2=await onL2();}
+    else{if(order==='onlyAdmin')o.l2Before=await onL2();o.l1=await onL1();o.l2=await onL2();}
+    return o;
+  };
+  out.l1First=await upgrade('l1First');
+  out.l2First=await upgrade('l2First');
+  out.onlyAdmin=await upgrade('onlyAdmin');
+}catch(e){out.crash=String((e&&e.stack)||e);}
+try{require(dbPath).close();}catch(_){}
+for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
+process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
+})();
+`;
+    const probeFileT = path.join(fileURLToPathSev(new URL('.', import.meta.url)), '.session-probe.cjs');
+    let T;
+    try {
+      fs.writeFileSync(probeFileT, probeT);
+      const srcT = (f) => fileURLToPathSev(new URL(f, import.meta.url));
+      const outT = execS(process.execPath, [probeFileT, srcT('../src/main/db.js'), srcT('../src/main/ipc.js'), srcT('../src/main/cloud.js'), srcT('../cloud/worker.js')],
+        { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] });
+      T = JSON.parse(outT.slice(outT.lastIndexOf('@@T@@') + 5));
+    } catch (e) {
+      T = { crash: String((e && e.message) || e) + (e && e.stderr ? ' ' + String(e.stderr).slice(-300) : '') };
+    } finally {
+      fs.rmSync(probeFileT, { force: true });
+    }
+    log(!T.crash, 'staff per event: the session / upgrade probe runs against the real ipc.js, cloud.js and Worker' + (T.crash ? ' — ' + T.crash.slice(0, 400) : ''));
+    const goneT = 'Your account was removed on another computer — sign in again.';
+    log(T.save1 === 'ok' && T.applied === 1 && T.save2 === goneT && T.signedOut === true && T.save3 === goneT && T.current === null
+      && T.logout === 'ok' && T.afterLogout === 'Please sign in first.' && T.staleLogout === 'ok',
+      `a session whose account was deleted on another laptop ends with that said, instead of the next save failing with "FOREIGN KEY constraint failed" — and signing out still works (it failed the same way) — "${T.save2}"`);
+    log(/^Your account was turned off/.test(T.off || '') && T.checkin === 'ok' && T.adminAgain === 'ok',
+      `a session whose account was turned off ends too; a patient's check-in started under a removed account is still saved, as at the kiosk — "${T.off}"`);
+    log(!!T.l1First && T.l1First.serverDeleted === true && !!T.l1First.l1 && T.l1First.l1.annaIn === true && T.l1First.l1.server === 0
+      && !!T.l1First.l2 && T.l1First.l2.sameAccount === true && T.l1First.l2.annaIn === true && T.l1First.l2.parked === 0,
+      'upgrade, two laptops: the laptop that recorded a refused self-delete sends the account back, and the other — holding that deletion from before — keeps the same account (the older deletion beside the revival is not applied)');
+    log(!!T.onlyAdmin && !!T.onlyAdmin.l2Before && T.onlyAdmin.l2Before.sameAccount === true && T.onlyAdmin.l2Before.parked === 1
+      && !!T.onlyAdmin.l2 && T.onlyAdmin.l2.sameAccount === true && T.onlyAdmin.l2.parked === 0,
+      'upgrade, two laptops: where that administrator is the only one who can sign in, the deletion is held back, never applied, and let go once she is sent back');
+    log(!!T.l2First && !!T.l2First.l2Before && T.l2First.l2Before.annaIn === false && !!T.l2First.l2 && T.l2First.l2.annaIn === true,
+      'upgrade, two laptops: a laptop updated first applies the old deletion while another administrator remains, and has her account back once the other laptop has synced');
     // The guide said two staff accounts with the same username on two laptops
     // "become one account" — true now only for the same event. And a laptop
     // still on 0.0.15 adopts by username alone (S.s2 is what it gets wrong).
