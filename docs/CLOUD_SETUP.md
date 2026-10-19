@@ -24,7 +24,17 @@ It happens in three steps:
 > older version cannot show or keep what newer laptops record. Laptops on
 > versions before 0.0.16 have no connection-code box at all; if a code is
 > refused as being from a different version, update both laptops to the same
-> version.
+> version. A laptop before 0.0.16 also merges staff accounts that share a
+> username across two events into one account: update **every** laptop
+> before you set somebody up for a second event under the same username.
+> Until every laptop is updated, **delete accounts only on a laptop that is
+> already on 0.0.16** — and on an older one never click **Delete** on your
+> own row. On an older version, Delete sends the deletion to the other
+> laptops even when it refuses it ("You cannot delete your own account.", the
+> last administrator, or "FOREIGN KEY constraint failed"), and an updated
+> laptop may carry it out: a staff member's always, an administrator's on a
+> laptop she has never used. The account comes back once the older laptop is
+> updated.
 
 ---
 
@@ -137,8 +147,10 @@ out on — brings everything on it into the clinic when it connects:
    ready to use this laptop's `admin` password everywhere afterwards. Other
    administrators — accounts with a username of their own — are separate
    accounts and keep their own passwords. But two staff accounts with the
-   **same username** on two laptops become one account, with the password of
-   the laptop connected last.
+   **same username for the same event** on two laptops become one account,
+   with the password of the laptop connected last. (The same username for two
+   *different* events is two accounts, each with its own password — that is
+   how somebody is set up again for the next clinic.)
 2. **Everything already on this laptop goes to every laptop** — test patients,
    test events and test accounts included — and it cannot be taken back: a
    record deleted afterwards is deleted on every laptop. To start clean, back
