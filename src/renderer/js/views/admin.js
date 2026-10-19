@@ -443,7 +443,7 @@ export function renderAdmin(ctx, params = {}) {
         toast('Event deleted', 'success'); store.setEvent(await api.activeEvent()); paint();
       } catch (err) {
         // Has patients — offer a forced cascade delete.
-        const force = await modal({ title: 'Permanently delete with patients?', body: `${err.message}<br><br>This will permanently delete the event <b>and all ${e.patient_count} patient record(s)</b>. This cannot be undone.`, confirmText: 'Delete everything', cancelText: 'Cancel', danger: true });
+        const force = await modal({ title: 'Permanently delete with patients?', body: `${err.message}<br><br>This will permanently delete the event <b>and all ${e.patient_count} patient record(s)</b>.${staffNote} This cannot be undone.`, confirmText: 'Delete everything', cancelText: 'Cancel', danger: true });
         if (!force) return;
         try { await api.deleteEvent(e.id, true); toast('Event and patients deleted', 'success'); store.setEvent(await api.activeEvent()); paint(); } catch (e2) { toast(e2.message, 'error'); }
       }

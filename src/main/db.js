@@ -1263,7 +1263,9 @@ function reviveRefusedUserDeletions() {
   for (const r of strays) {
     db.transaction(() => {
       db.prepare('DELETE FROM tombstones WHERE uid = ?').run(r.uid);
-      if (!r.tomb_sent) return;   // it never left this laptop
+      // It never left this laptop — not yet sent, or held back here on a move
+      // to another server ('held' / 'local'), which no server has seen.
+      if (!r.tomb_sent || r.tomb_sent === 'held' || r.tomb_sent === 'local') return;
       const latest = [r.tomb_at, r.updated_at].filter(Boolean).map(String).sort().pop();
       db.prepare('UPDATE users SET updated_at = ?, content_rev = ?, synced_rev = NULL WHERE id = ?')
         .run(justAbove(latest), sig(buildData('user', r)), r.id);
