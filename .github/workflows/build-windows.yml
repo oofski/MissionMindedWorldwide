@@ -114,6 +114,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # The clinic-network checks connect from 127.0.0.2–127.0.0.4 to prove a
+      # crowd of connections from one address cannot lock the others out. Linux
+      # and Windows route all of 127/8 to loopback; macOS answers only on
+      # 127.0.0.1 until the others are aliased, so the gate would fail here for
+      # a reason that is not the app's.
+      - name: Alias extra loopback addresses for the clinic-network checks
+        run: for i in 2 3 4; do sudo ifconfig lo0 alias 127.0.0.$i up; done
+
       # Run the gate here too. It exercises the data layer and the whole
       # renderer, so it is also the only thing standing between a macOS-specific
       # path bug and a shipped DMG.
@@ -228,50 +236,41 @@ jobs:
 
             ### New in this build
 
-            **Update every laptop to this version before creating the same
-            staff member on a second event, and before deleting any account.**
-            An older laptop would merge two events' accounts into one, and its
-            Delete sends a deletion even when it refuses one.
+            **Direct connect — sync the clinic's laptops over a router, no
+            internet needed.** In **Admin → Cloud**, choose **Clinic network
+            (no internet)**:
 
-            **Staff are created per event — and can be created again for the
-            next one.** Adding a staff member who already exists on another
-            event no longer fails with "That username already exists": each
-            event can have its own "ana", with her own password, and the
-            laptop signs her in to the account for the event that is active.
-            **Add staff** can copy someone from another event — name, username
-            and role filled in, and optionally the same password — so setting
-            up the next clinic's team is a few clicks. Within one event a
-            username is still unique, and administrators' usernames stay
-            unique everywhere. Deleting an event now also deletes that event's
-            staff accounts (the confirm says how many); administrators stay.
+            1. Connect every laptop to the same Wi-Fi router. Any router will
+               do; give it a Wi-Fi password (WPA2 or WPA3). It does not need
+               internet.
+            2. On the laptop that stays on all day (registration is a good
+               choice), set that Wi-Fi to a **Private** network (Settings →
+               Network & internet → Wi-Fi → the network → Network profile
+               type → Private), type a clinic network name and press **Host
+               the clinic network**. When Windows says the firewall "has
+               blocked some features of this app", tick **Private networks**
+               and press **Allow access** — or press **Allow through the
+               firewall** on the same screen.
+            3. On every other laptop, open Admin → Cloud → Clinic network,
+               press **Choose** beside the clinic network it finds, type the
+               clinic key shown on the host and press **Join** — or paste the
+               host's connection code. A new laptop can do this from the
+               sign-in screen with **Join a clinic already set up**. **Test the
+               clinic network** says what is wrong if it cannot connect.
 
-            **Connecting to the cloud, explained where you need it.** Admin →
-            Cloud now says the three steps on screen: the clinic's sync server
-            is set up once (about 10 minutes on a free Cloudflare account —
-            Mission Minded does not run a shared server), and its address and
-            clinic key are entered on every laptop. A connected laptop can show
-            a **connection code** that carries both, so the next laptop is one
-            paste — in Admin → Cloud, or from the sign-in screen with **Join a
-            clinic already set up**. Treat the code like a password. The setup
-            guide (docs/CLOUD_SETUP.md) is rewritten for MMW; it wrongly said
-            the cloud was built in.
+            From then on the laptops sync exactly as they do online — the same
+            process and the same screens. If the host laptop sleeps or is
+            switched off, everyone keeps working and catches up when it is
+            back; if the router gives it a new address, the others find it
+            again on their own. Records travel encrypted, and a laptop only
+            accepts its own clinic's host. Opened away from the clinic's Wi-Fi
+            (a hotel, a phone hotspot), the host pauses and starts again by
+            itself once it is back. On a Mac, allow incoming connections when
+            asked.
 
-            **Fixed:** moving a laptop to a different sync server exchanged
-            nothing while reporting success; a laptop joining the clinic could
-            overwrite the clinic's event with its own untouched copy; Join a
-            clinic said "downloaded" when nothing had come down; a deletion of
-            the shipped admin / admin could be forgotten when a laptop first
-            connected, letting it back in; a deleted administrator could keep
-            signing in on another laptop after a disconnect or a restored
-            backup; a dropped connection mid-download could lose records
-            waiting for their event; an administrator could turn off her own
-            account and lock herself out; the Dashboard, Admin and Management
-            headers still carried the old Caring Hands tagline.
-
-            **If you ever move the clinic to a different server:** sign in on
-            one laptop on the new server and change (or delete) the shipped
-            admin / admin account there, and delete any empty "Mission Minded
-            Clinic" placeholder event that reappears.
+            Update **every laptop** to this version before using direct
+            connect. The online pre-registration link still needs an internet
+            server.
 
             ### Signing in
             Every install now comes with an administrator already set up:
