@@ -9,8 +9,17 @@
 // server and key and connected every install at boot; getSyncMeta() fails
 // closed again, and this module never invents an endpoint. All network failures
 // are swallowed into a status field so the app keeps working.
+//
+// v0.0.17: the same client, and the same push / pull / cursor / deletion
+// rules, serve the clinic network (no internet) — one laptop hosts the real
+// cloud/worker.js (hub.js) and every laptop syncs with it here. Only how a
+// request travels differs: to a clinic network host it goes over a pinned
+// connection (lan.request) instead of fetch(), because the host's certificate
+// is its own and is trusted by its fingerprint, carried in a saved pin.
 
+const os = require('os');
 const db = require('./db');
+const lan = require('./lan');
 
 const INTERVAL_MS = 4000;
 const HTTP_TIMEOUT_MS = 12000;
@@ -45,8 +54,11 @@ function keyProblem(key) {
   return `The clinic key has a character this app cannot send${shown}, such as a curly quote or a long dash that a phone or Mac puts in by itself. In Cloudflare, change CLINIC_KEY to plain letters, numbers and spaces, Deploy, then type the new key here.`;
 }
 
-async function httpJson(method, url, key, body) {
+// pin: the clinic network host's certificate fingerprint. With one, the
+// request goes over the pinned connection; the answer is read the same way.
+async function httpJson(method, url, key, body, pin) {
   if (key && keyProblem(key)) throw new Error(keyProblem(key));
+  if (pin) return lanJson(method, url, key, body, pin);
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
@@ -72,14 +84,32 @@ async function httpJson(method, url, key, body) {
   } finally { clearTimeout(to); }
 }
 
+// The same request to a clinic network host. Every request also says which
+// laptop it is from (its device id and computer name — no secret), so the
+// host's screen can list the laptops connected now.
+async function lanJson(method, url, key, body, pin) {
+  const headers = { 'content-type': 'application/json', 'x-mmw-device': db.ensureDeviceId(), 'x-mmw-computer': String(os.hostname() || '').slice(0, 64) };
+  if (key) headers.authorization = 'Bearer ' + key;
+  const r = await lan.request(url, { method, headers, body: body ? JSON.stringify(body) : undefined, pin, timeoutMs: HTTP_TIMEOUT_MS });
+  let json = null;
+  try { json = JSON.parse(r.text); } catch { /* non-json */ }
+  if (r.status < 200 || r.status >= 300) {
+    const err = new Error((json && json.error) || `HTTP ${r.status}`); err.status = r.status; throw err;
+  }
+  return json || {};
+}
+
 // What a failed request means, in words a clinic director can act on. The raw
 // messages ("fetch failed", "unauthorized", "This operation was aborted") were
 // shown as they came, and none of them says whether to check the wifi, the
 // address or the key. Used for the connection test and for the reason the
 // Cloud tab shows while sync is retrying.
-function explain(err, base) {
+function explain(err, base, pin) {
   let host = base;
   try { host = new URL(base).host; } catch { /* keep what was typed */ }
+  // On the clinic network the reasons, and what to do, are the Wi-Fi's and
+  // the host laptop's — never "check this laptop is online".
+  if (pin) return lan.explain(err, host);
   if (err && err.status === 401) {
     return 'The server answered, but refused the clinic key. Type it exactly as it was set on the server (CLINIC_KEY) — capital letters and spaces count.';
   }
@@ -107,9 +137,33 @@ function isPlainHttp(base) {
   try { const u = new URL(base); return u.protocol === 'http:' && !LOOPBACK.has(u.hostname); } catch { return false; }
 }
 const PLAIN_HTTP = 'Use the https:// address Cloudflare gives you. A plain http:// address would send the clinic key unprotected.';
+const isLoopbackUrl = (base) => { try { return LOOPBACK.has(new URL(base).hostname); } catch { return false; } };
+
+// A clinic network host's address as it is saved: https://, and the port the
+// host uses when none was typed ("192.168.1.23" is 192.168.1.23:47800).
+function lanUrl(u) {
+  let s = String(u || '').trim();
+  if (!s) return '';
+  if (!/^[a-z]+:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const x = new URL(s);
+    if (x.protocol === 'https:' && !x.port && !/:443(\/|$)/.test(s)) x.port = String(lan.DEFAULT_PORT);
+    return x.origin;
+  } catch { return s.replace(/\/+$/, ''); }
+}
+
+// Which server a laptop is on. An internet server is its address; a clinic
+// network host is its certificate, whatever address it has today — so a host
+// whose address changed (the router handed out another) is the same server,
+// and a host set up again at the same address (erased, a new certificate) is
+// not. applyConfig moves a laptop only when this changes.
+const identityOf = (url, pin) => (lan.normPin(pin) ? 'lan:' + lan.normPin(pin) : trimUrl(url));
+const savedIdentity = (m) => identityOf(m.url, m.lanPin);
 
 // Verify a URL + key: /health must be reachable, and the key must authorize a pull.
-async function testConnection(url, key) {
+// opts.lan: the address is a clinic network host (see testClinicNetwork).
+async function testConnection(url, key, opts = {}) {
+  if (opts && opts.lan) return testClinicNetwork(url, key, opts.lan);
   const base = trimUrl(url);
   if (!base) throw new Error('Enter the Cloud URL first.');
   try { new URL(base); } catch {
@@ -134,12 +188,68 @@ async function testConnection(url, key) {
   return { ok: true, service: health.service, version: health.version, time: health.time };
 }
 
+// The same test on the clinic network — "Test the clinic network" on a
+// joined laptop, and the check before joining. It says which of the local
+// network's own failures this is (lan.diagnose): host not found, its firewall
+// blocking, a certificate that does not match, the wrong key. With no pin yet
+// (a host picked from the list found, or a typed address), the host first
+// proves it holds the clinic key (lan.learnPin), so the key is only ever sent
+// to the clinic's own host. Returns the pin, for the saving that follows.
+async function testClinicNetwork(url, key, t) {
+  const base = lanUrl(url);
+  if (!base) throw new Error('Enter the host laptop\'s address first — it looks like 192.168.1.23:47800.');
+  let host;
+  try { host = new URL(base).host; } catch {
+    throw new Error('That does not look like a clinic network address. It looks like 192.168.1.23:47800, as the host laptop\'s Cloud tab shows it.');
+  }
+  if (!/^https:/.test(base)) throw new Error(PLAIN_HTTP);
+  if (!String(key || '').trim()) throw new Error('Enter the clinic key shown on the host laptop\'s Cloud tab, or paste its connection code.');
+  if (keyProblem(key)) throw new Error(keyProblem(key));
+  let pin = lan.normPin(t.pin);
+  let hostId = String(t.hostId || '');
+  let name = String(t.name || '');
+  const refuse = (e, at) => { let h = at; try { h = new URL(at).host; } catch { /* as given */ } return Object.assign(new Error(lan.explain(e, h)), { code: lan.classify(e) || 'not_mmw' }); };
+  const notAnswering = (code) => code === 'timeout' || code === 'not_found' || code === 'not_hosting';
+  let at = base;
+  if (!pin) {
+    const learn = (u) => lan.learnPin(u, key, { expectPrefix: t.fp || '', expectHost: hostId });
+    let learned = null;
+    try { learned = await learn(at); } catch (e) {
+      if (!notAnswering(lan.classify(e))) throw refuse(e, at);
+      // Not answering here: why — or where it is now. Nothing is sent but
+      // a request for /health; the key goes nowhere until the host proves it.
+      const d0 = await lan.diagnose({ url: at, hostId });
+      if (!d0.movedTo) throw Object.assign(new Error(d0.message || lan.explain(e, host)), { code: d0.code });
+      at = d0.movedTo;
+      try { learned = await learn(at); } catch (e2) { throw refuse(e2, at); }
+    }
+    pin = learned.pin; hostId = learned.hostId || hostId; name = learned.name || name;
+  }
+  let d = await lan.diagnose({ url: at, key, pin, hostId });
+  // Heard somewhere else — a code made before the host's port or address
+  // changed, or a joined laptop's saved address gone stale: followed, once
+  // the certificate there is the pinned one.
+  if (!d.ok && d.movedTo) {
+    let presented = '';
+    try { presented = await lan.peerPin(d.movedTo); } catch (e) { throw refuse(e, d.movedTo); }
+    if (presented !== pin) throw refuse({ pinMismatch: true }, d.movedTo);
+    at = d.movedTo;
+    d = await lan.diagnose({ url: at, key, pin, hostId });
+  }
+  if (!d.ok) throw Object.assign(new Error(d.message), { code: d.code });
+  // A laptop joined to this host keeps it at the address it answers at now.
+  if (at !== base) repointLan(at, pin);
+  return { ok: true, service: d.health.service, version: d.health.version, time: d.health.time, lan: { pin, hostId, name }, url: at };
+}
+
 // The key saved for this server, when the address given is the one already
 // saved — so "leave blank to keep the saved key" can be tested before it is
 // saved. A different server never inherits it (see applyConfig).
-function savedKeyFor(url) {
+function savedKeyFor(url, lanT) {
   const m = db.getSyncMeta();
-  return m.url && trimUrl(url) === trimUrl(m.url) ? m.key : '';
+  if (!m.url) return '';
+  const same = lanT ? lanUrl(url) === trimUrl(m.url) && lan.normPin(lanT.pin) === m.lanPin : trimUrl(url) === trimUrl(m.url) && !m.lanPin;
+  return same ? m.key : '';
 }
 
 // The connection code: the server address and clinic key as ONE string, so
@@ -152,13 +262,35 @@ function savedKeyFor(url) {
 // every screen that shows it. src/renderer/js/connectionCode.js reads it; the
 // harness holds the two to the same format. The number is the format's
 // version, so a later change can be told apart instead of misread.
+//
+// v0.0.17: a clinic network's code also carries the host's certificate
+// fingerprint (p), its id (h) and its name (n), so a pasted code is pinned
+// from the first request. Same format version: a reader that knows only
+// u and k (v0.0.16) would try the address as an internet server, and the
+// host's own certificate stops that connection before anything is sent.
 const CODE_PREFIX = 'MMW1-';
-function encodeConnectionCode(url, key) {
-  return CODE_PREFIX + Buffer.from(JSON.stringify({ u: trimUrl(url), k: String(key) }), 'utf8').toString('base64url');
+function encodeConnectionCode(url, key, lanT) {
+  const pin = lanT ? lan.normPin(lanT.pin) : '';
+  const payload = { u: pin ? lanUrl(url) : trimUrl(url), k: String(key) };
+  if (pin) Object.assign(payload, { p: pin, h: String(lanT.hostId || ''), n: String(lanT.name || '') });
+  return CODE_PREFIX + Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
 function connectionCode() {
   const m = db.getSyncMeta();
   if (!m.configured) throw new Error('This computer is not connected to a sync server, so there is no code to share.');
+  if (m.lanPin) {
+    let url = trimUrl(m.url);
+    // The host syncs with itself over 127.0.0.1, which on any other laptop
+    // means that laptop: the code carries the address the others reach it at.
+    if (isLoopbackUrl(url)) {
+      url = require('./hub').shareUrl();
+      if (!url) throw new Error('This laptop is not on a network, so no other laptop can reach it. Connect it to the clinic\'s Wi-Fi first.');
+    }
+    const lanT = { pin: m.lanPin, hostId: m.lanHost, name: m.lanName };
+    // The key itself rides along for the dialog: a laptop that picks this
+    // host from the list found types it instead of pasting the code.
+    return { code: encodeConnectionCode(url, m.key, lanT), url, lan: true, key: m.key, name: m.lanName };
+  }
   return { code: encodeConnectionCode(m.url, m.key), url: trimUrl(m.url) };
 }
 
@@ -167,13 +299,18 @@ function connectionCode() {
 // disconnects); what that cycle then hears from the old one — rows it accepted,
 // rows and a cursor it handed back — is about the old server, and recording it
 // would mark rows as sent that the new one never got (see applyConfig).
-const stillOn = (base) => trimUrl(db.getSyncMeta().url) === base;
+//
+// conn is { base, key, pin }: the address, key and (on the clinic network)
+// the pinned certificate the cycle started with. A host that moved address
+// is the same server (see refind), but a cycle still talking to the old
+// address is superseded like any other.
+const stillOn = (conn) => { const m = db.getSyncMeta(); return trimUrl(m.url) === conn.base && (m.lanPin || '') === (conn.pin || ''); };
 
-async function pushOnce(base, key, deviceId) {
+async function pushOnce(conn, deviceId) {
   const { rows, mark } = db.collectSyncRows(PULL_LIMIT);
   if (!rows.length) return 0;
-  const r = await httpJson('POST', base + '/v1/push', key, { device_id: deviceId, rows });
-  if (r && r.ok && stillOn(base)) { db.markSynced(mark); db.setSyncMeta({ lastPush: new Date().toISOString() }); }
+  const r = await httpJson('POST', conn.base + '/v1/push', conn.key, { device_id: deviceId, rows }, conn.pin);
+  if (r && r.ok && stillOn(conn)) { db.markSynced(mark); db.setSyncMeta({ lastPush: new Date().toISOString() }); }
   return rows.length;
 }
 
@@ -183,15 +320,16 @@ async function pushOnce(base, key, deviceId) {
 // clock is behind).
 const isSeqCursor = (c) => /^\d+$/.test(String(c || ''));
 
-async function pullOnce(base, key) {
+async function pullOnce(conn) {
+  const { base, key, pin } = conn;
   let cursor = db.getSyncMeta().cursor || '';
   // Still on a timestamp cursor? Ask whether this server now delivers by
   // counter, and if so restart from the beginning ONCE. That both switches this
   // station over and re-reads anything the old timestamp cursor stepped past.
   if (cursor && !isSeqCursor(cursor)) {
     let health = null;
-    try { health = await httpJson('GET', base + '/health', null); } catch { /* offline / older server */ }
-    if (!stillOn(base)) return { pulled: 0, applied: 0, deleted: 0 };
+    try { health = await httpJson('GET', base + '/health', null, undefined, pin); } catch { /* offline / older server */ }
+    if (!stillOn(conn)) return { pulled: 0, applied: 0, deleted: 0 };
     if (health && health.seq === true) { cursor = ''; db.setSyncMeta({ cursor }); }
   }
   let pulled = 0, applied = 0, removed = 0, guard = 0;
@@ -220,8 +358,8 @@ async function pullOnce(base, key) {
   for (;;) {
     if (guard++ > 500) break;
     const qs = `?since=${encodeURIComponent(cursor)}&limit=${PULL_LIMIT}`;
-    const r = await httpJson('GET', base + '/v1/pull' + qs, key);
-    if (!stillOn(base)) return { pulled, applied, deleted: removed };
+    const r = await httpJson('GET', base + '/v1/pull' + qs, key, undefined, pin);
+    if (!stillOn(conn)) return { pulled, applied, deleted: removed };
     const rows = (r && r.rows) || [];
     const last = !r || !r.more;
     let batch = carry.length ? carry.concat(rows) : rows;
@@ -273,21 +411,80 @@ async function syncOnce() {
 let inflight = null;      // the cycle in flight, for syncSettled()
 async function cycle(meta) {
   const base = trimUrl(meta.url);
+  const conn = { base, key: meta.key, pin: meta.lanPin || '' };
   const deviceId = db.ensureDeviceId();
   try {
-    const pushed = await pushOnce(base, meta.key, deviceId);
-    const { pulled, applied, deleted } = await pullOnce(base, meta.key);
-    if (!stillOn(base)) return { ok: false, superseded: true };
+    const pushed = await pushOnce(conn, deviceId);
+    const { pulled, applied, deleted } = await pullOnce(conn);
+    if (!stillOn(conn)) return { ok: false, superseded: true };
     db.setSyncMeta({ lastOk: new Date().toISOString(), lastError: '' });
     lastResult = { pushed, pulled, applied, deleted };
     if (applied > 0) notifyRenderer();
     return { ok: true, pushed, pulled, applied, deleted };
   } catch (e) {
-    const msg = explain(e, base);
-    if (!stillOn(base)) return { ok: false, superseded: true };
+    const msg = explain(e, base, conn.pin);
+    if (!stillOn(conn)) return { ok: false, superseded: true };
     db.setSyncMeta({ lastError: msg });
+    // The clinic network host may simply have a new address (the router
+    // handed it another, or its port was taken): look for it by its id.
+    if (conn.pin && !e.status) scheduleRefind();
     return { ok: false, error: msg };
   }
+}
+
+// Finding the host again. The laptops joined to a clinic network know it by
+// its id and certificate, not by its address, so when it stops answering
+// they listen for its beacon (and ask "who is there?"), and follow it to the
+// address it is heard at — once a handshake there shows the pinned
+// certificate, so a beacon from anyone else moves nothing. Nobody re-enters
+// anything. Not on the host itself, which reaches its own hub at 127.0.0.1.
+// At most one look every ten seconds (each listens for two); the harness sets
+// it to 0 so a probe need not wait.
+const refindTiming = { everyMs: 10000 };
+let lastRefind = 0;
+let refinding = null;
+// Asked again while a look is under way — which may have started before the
+// host came back — it looks once more when that one ends, rather than not
+// at all.
+let refindAgain = false;
+function scheduleRefind() {
+  if (refinding) { refindAgain = true; return; }
+  if (Date.now() - lastRefind < refindTiming.everyMs) return;
+  lastRefind = Date.now();
+  refinding = refind().then((moved) => { if (moved) syncOnce(); }).catch(() => {}).finally(() => {
+    refinding = null;
+    if (refindAgain) { refindAgain = false; scheduleRefind(); }
+  });
+}
+async function refind({ scan = lan.scan } = {}) {
+  const m = db.getSyncMeta();
+  if (!m.configured || !m.lanPin || !m.lanHost) return '';
+  if (require('./hub').runningHostId() === m.lanHost) return '';
+  const hosts = await scan({ ms: 2000 });
+  const here = hosts.find((h) => h.hostId === m.lanHost && m.lanPin.startsWith(h.fp));
+  if (!here) return '';
+  for (const url of here.urls) {
+    if (url === trimUrl(m.url)) continue;
+    let presented = '';
+    try { presented = await lan.peerPin(url); } catch { continue; }
+    if (presented === m.lanPin && repointLan(url, m.lanPin)) return url;
+  }
+  return '';
+}
+
+// The same clinic network host, at another address: saved without the move
+// a new server makes (no cursor reset, nothing re-sent) — it IS the same
+// server. Refused unless the pin is still the one this laptop is joined with.
+function repointLan(url, pin, name) {
+  const m = db.getSyncMeta();
+  const next = lanUrl(url);
+  if (!m.configured || !m.lanPin || lan.normPin(pin) !== m.lanPin || !next) return false;
+  const patch = {};
+  if (next !== trimUrl(m.url)) patch.url = next;
+  if (name && name !== m.lanName) patch.lanName = String(name).slice(0, 80);
+  if (Object.keys(patch).length) db.setSyncMeta(patch);
+  if (patch.url) db.setSetting('cloud_last_url', next);
+  return true;
 }
 
 // A full cycle the caller can wait for. syncOnce() answers "busy" while the
@@ -310,21 +507,44 @@ function notifyRenderer() {
 
 function status() {
   const m = db.getSyncMeta();
+  // kind: 'internet' or 'lan' (the clinic network), for the screens; isHost:
+  // this laptop is the clinic network's host, syncing with itself.
+  const kind = !m.configured ? '' : (m.lanPin ? 'lan' : 'internet');
+  let isHost = false;
+  if (kind === 'lan') { try { isHost = require('./hub').ownHostId() === m.lanHost; } catch { isHost = false; } }
   return {
     enabled: m.enabled, mode: m.mode, online: m.mode === 'online',
     url: m.url, hasKey: !!m.key, configured: m.configured,
+    kind, lanPin: m.lanPin, lanPinShown: lan.showPin(m.lanPin, 4), lanHost: m.lanHost, lanName: m.lanName, isHost,
     deviceId: m.deviceId, cursor: m.cursor,
     lastOk: m.lastOk, lastPush: m.lastPush, lastError: m.lastError,
     running, ...lastResult,
   };
 }
 
-function applyConfig({ url, key, enabled, mode, online }) {
+// lan: { pin, hostId, name } — the address is a clinic network host, with the
+// pin its test returned (testConnection). Without it, an address is an
+// internet server, and any clinic network details saved before are dropped.
+function applyConfig({ url, key, enabled, mode, online, lan: lanIn }) {
   const patch = {};
-  if (url !== undefined && isPlainHttp(trimUrl(url))) throw new Error(PLAIN_HTTP);
-  if (url !== undefined) patch.url = trimUrl(url);
-  const prior = trimUrl(db.getSyncMeta().url);
-  const newServer = url !== undefined && trimUrl(url) !== prior;
+  const lanT = lanIn && typeof lanIn === 'object'
+    ? { pin: lan.normPin(lanIn.pin), hostId: String(lanIn.hostId || '').slice(0, 64), name: String(lanIn.name || '').slice(0, 80) } : null;
+  if (lanT && (url === undefined || !lanT.pin)) throw new Error('Test the clinic network connection before saving it.');
+  const base = url === undefined ? undefined : (lanT ? lanUrl(url) : trimUrl(url));
+  if (url !== undefined && isPlainHttp(base)) throw new Error(PLAIN_HTTP);
+  if (url !== undefined) {
+    patch.url = base;
+    patch.lanPin = lanT ? lanT.pin : '';
+    patch.lanHost = lanT ? lanT.hostId : '';
+    patch.lanName = lanT ? lanT.name : '';
+  }
+  const prior = savedIdentity(db.getSyncMeta());
+  // A server is new when its identity is: a different internet address, a
+  // different clinic network host (a different certificate), or a switch
+  // between the internet and the clinic network. The same host at a new
+  // address is not (repointLan).
+  const next = url !== undefined ? identityOf(base, lanT && lanT.pin) : prior;
+  const newServer = url !== undefined && next !== prior;
   // A key must travel with a server change. Letting a new URL inherit the
   // stored key is how a clinic could end up pointing at its own server while
   // still authenticating with somebody else's credential.
@@ -350,11 +570,14 @@ function applyConfig({ url, key, enabled, mode, online }) {
   // Reconnected after a Disconnect to the server it was last on, nothing there
   // is another server's: its own deletions of the shared admin and event go as
   // they would have had it stayed connected (see db.markAllUnsent).
-  const sameServer = newServer && !prior && trimUrl(url) === trimUrl(db.getSetting('cloud_last_url'));
+  // A clinic network host is the same server by its certificate, as above.
+  const sameServer = newServer && !prior && next === identityOf(db.getSetting('cloud_last_url'), db.getSetting('cloud_last_pin'));
   if (newServer) { db.resetSyncCursor(); db.markAllUnsent({ sameServer }); db.noteAccountsHere(); }
   db.setSyncMeta(patch);
-  // The address alone, kept through a Disconnect (never the key).
-  if (patch.url) db.setSetting('cloud_last_url', patch.url);
+  // The address alone, kept through a Disconnect (never the key) — and on
+  // the clinic network the host's pin with it, since the address is not
+  // what identifies that server there.
+  if (patch.url) { db.setSetting('cloud_last_url', patch.url); db.setSetting('cloud_last_pin', patch.lanPin || ''); }
   restartTimer();
   return status();
 }
@@ -387,4 +610,6 @@ async function resyncAll() {
 module.exports = {
   start, stop, syncOnce, syncSettled, resyncAll, testConnection, savedKeyFor, status, applyConfig, normalizeUrl: trimUrl,
   connectionCode, encodeConnectionCode, CODE_PREFIX,
+  // v0.0.17: the clinic network.
+  lanUrl, identityOf, repointLan, refind, refindTiming, explain,
 };

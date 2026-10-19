@@ -93,6 +93,8 @@ const PERMS = {
   'exportZip': ['admin'], 'exportClinic': ['admin'], 'importClinic': ['admin'], 'eventFinish': ['admin'], 'eventPurge': ['admin'], 'reportsRebuild': ['admin'],
   'cloudConfig': ['admin'], 'cloudTest': ['admin'], 'cloudResync': ['admin'], 'cloudDisconnect': ['admin'], 'dataReset': ['admin'],
   'cloudConnectionCode': ['admin'],
+  // v0.0.17: hosting the clinic network is the administrator's.
+  'hubStatus': ['admin'], 'hubStart': ['admin'], 'hubStop': ['admin'], 'hubFirewall': ['admin'],
   'cloudStatus': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], 'cloudSyncNow': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
 };
 // patientsCreate is intentionally UNGATED (kiosk + any role); statsDashboard needs a user.
@@ -5114,13 +5116,14 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       const OPEN_ON_PURPOSE = [
         'auth:needsSetup', 'auth:setupAdmin', 'auth:login', 'auth:logout', 'auth:current',  // signing in itself
         'cloud:join',                                                                       // v0.0.16: Join, from the sign-in screen
+        'lan:scan',                                                                         // v0.0.17: the hosts Join lists, signed out; Join's own rule
         'events:list', 'events:active', 'stats:dashboard', 'usb:writeCheckin',              // the kiosk and the shell
         'app:version', 'app:openExternal',
         'update:check', 'update:install', 'update:onlineAvailable', 'update:checkOnline', 'update:downloadOnline', 'update:installOnline',
       ].sort();
       const extraG = ungatedG.filter((c) => !OPEN_ON_PURPOSE.includes(c));
       const goneG = OPEN_ON_PURPOSE.filter((c) => !ungatedG.includes(c));
-      log(!extraG.length && !goneG.length && !('cloudJoin' in PERMS),
+      log(!extraG.length && !goneG.length && !('cloudJoin' in PERMS) && !('lanScan' in PERMS),
         `perms: the channels ipc.js answers without a PERMS entry are exactly the ones left open on purpose, cloud:join among them${extraG.length ? ' — newly ungated: ' + extraG.join(', ') : ''}${goneG.length ? ' — no longer ungated: ' + goneG.join(', ') : ''}`);
     }
 
@@ -9663,6 +9666,740 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     log(refusal('bzj', 'intake.tobacco') === 'Fi need: Do you smoke?',
       'a language without the question translated still names it, in its own Required');
     i18n.setLang('en');
+  }
+
+  /* ===== v0.0.17 — Direct connect: the clinic network, no internet =====
+     Dr. Trinh tried a plain router: "the laptops saw each other, but the
+     software did not" — the only way to sync was an internet server. Now one
+     laptop hosts the REAL cloud/worker.js over HTTPS (src/main/hub.js) and
+     every laptop, the host included, syncs with it through the same cloud.js
+     as online. Probed as a clinic would use it: every laptop its own process,
+     with its own clinic database and the real ipc.js handlers; a real HTTPS
+     host on 127.0.0.1; real UDP beacons, sent to this computer only (nothing
+     is broadcast). Then the screens, under jsdom. */
+  {
+    currentUser = signInAdmin();
+    const readSrcL = (rel) => { try { return fs.readFileSync(new URL(rel, import.meta.url), 'utf8'); } catch (_) { return ''; } };
+    const settleL = async (n = 12) => { for (let i = 0; i < n; i++) await tick(); };
+    const { spawn } = await import('node:child_process');
+    const dgramL = require('dgram');
+    const netL = require('net');
+    const httpsL = require('https');
+    // Loaded so that, were the change undone, each check below fails on its
+    // own rather than the harness stopping here.
+    const reqL = (p) => { try { return require(p); } catch (_) { return null; } };
+    const chkL = (fn) => { try { return !!fn(); } catch (_) { return false; } };
+    const lanL = reqL('../src/main/lan.js') || { showPin: () => '', MESSAGES: { blocked: () => '' }, readBeacon: () => null };
+    const hubL = reqL('../src/main/hub.js') || {};
+    const cloudL = require('../src/main/cloud.js');
+    const CCL = await import('../src/renderer/js/connectionCode.js');
+    const pathOfL = (rel) => fileURLToPathSev(new URL(rel, import.meta.url));
+    const ROOT_L = pathOfL('..');
+
+    /* ---- the laptops: one process each ---- */
+    const AGENT_L = `
+const os=require('os'),fs=require('fs'),path=require('path'),readline=require('readline');
+const [root,dir,cfgJson]=process.argv.slice(2);
+const cfg=JSON.parse(cfgJson);
+const handlers={};
+const ep=require.resolve('electron',{paths:[root]});
+require.cache[ep]={id:ep,filename:ep,loaded:true,exports:{ipcMain:{handle:(c,f)=>{handlers[c]=f;}},dialog:{},shell:{openExternal(){}},
+  app:{getPath:()=>dir,getVersion:()=>'0.0.17',isPackaged:false,on(){}},BrowserWindow:class{}}};
+const req=(m)=>require(path.join(root,m));
+const db=req('src/main/db.js'),lan=req('src/main/lan.js'),hub=req('src/main/hub.js'),cloud=req('src/main/cloud.js'),ipc=req('src/main/ipc.js');
+Object.assign(lan.defaults,{beaconPort:cfg.beaconPort,queryPort:cfg.queryPort,targets:['127.0.0.1']});
+Object.assign(hub.defaults,{bindHost:'127.0.0.1',firstPort:0,beaconPort:cfg.queryPort,announce:cfg.announce,shareAddress:'127.0.0.1'});
+cloud.refindTiming.everyMs=0;
+db.init(dir);hub.init(dir);ipc.register(()=>null);
+const call=(ch,p)=>handlers[ch]({},p);
+const sleep=(ms)=>new Promise((r)=>setTimeout(r,ms));
+const settle=async()=>{cloud.stop();const r=await cloud.syncSettled();cloud.stop();return r;};
+const err=(r)=>(r&&r.ok===false?r.error:'');
+const AsyncFunction=(async()=>{}).constructor;
+const out=(o)=>process.stdout.write('\\n@@L@@'+JSON.stringify(o)+'\\n');
+readline.createInterface({input:process.stdin}).on('line',async(line)=>{
+  let msg;try{msg=JSON.parse(line);}catch(_){return;}
+  try{
+    const fn=new AsyncFunction('db','lan','hub','cloud','ipc','call','sleep','settle','err','dir','root','require','fs','path','os',msg.code);
+    const value=await fn(db,lan,hub,cloud,ipc,call,sleep,settle,err,dir,root,require,fs,path,os);
+    cloud.stop();
+    out({id:msg.id,ok:true,value:value===undefined?null:value});
+  }catch(e){out({id:msg.id,ok:false,error:String((e&&e.stack)||e)});}
+});
+process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
+`;
+    const agentFileL = path.join(pathOfL('.'), '.lan-laptop-agent.cjs');
+    fs.writeFileSync(agentFileL, AGENT_L);
+    const freeUdpL = () => new Promise((resolve) => { const s = dgramL.createSocket('udp4'); s.bind(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+    const QPORT_L = await freeUdpL();
+    const BPORT_L = await freeUdpL();
+    // What goes over the air: every beacon the host sends, as raw bytes.
+    const capturedL = [];
+    const captureL = dgramL.createSocket('udp4');
+    captureL.on('message', (m, rinfo) => capturedL.push({ text: m.toString('utf8'), rinfo }));
+    await new Promise((r) => captureL.bind(0, '127.0.0.1', r));
+    const cfgL = { queryPort: QPORT_L, beaconPort: BPORT_L, announce: [{ address: '127.0.0.1', port: BPORT_L }, { address: '127.0.0.1', port: captureL.address().port }] };
+    const laptopsL = [];
+    const laptopL = (name) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mmwlan' + name + '-'));
+      const proc = spawn(process.execPath, [agentFileL, ROOT_L, dir, JSON.stringify(cfgL)], { stdio: ['pipe', 'pipe', 'pipe'] });
+      let buf = '', stderr = '', n = 0;
+      const waiting = new Map();
+      proc.stdout.on('data', (d) => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          const at = line.indexOf('@@L@@');
+          if (at < 0) continue;
+          let m; try { m = JSON.parse(line.slice(at + 5)); } catch (_) { continue; }
+          const w = waiting.get(m.id);
+          if (w) { waiting.delete(m.id); if (m.ok) w.resolve(m.value); else w.reject(new Error(name + ': ' + m.error)); }
+        }
+      });
+      proc.stderr.on('data', (d) => { stderr += d; });
+      proc.on('exit', () => { for (const w of waiting.values()) w.reject(new Error(name + ' exited: ' + stderr.slice(-400))); waiting.clear(); });
+      const run = (code, ms = 90000) => new Promise((resolve, reject) => {
+        const id = ++n;
+        const to = setTimeout(() => { waiting.delete(id); reject(new Error(name + ' timed out')); }, ms);
+        waiting.set(id, { resolve: (v) => { clearTimeout(to); resolve(v); }, reject: (e) => { clearTimeout(to); reject(e); } });
+        proc.stdin.write(JSON.stringify({ id, code }) + '\n');
+      });
+      const l = { name, dir, run, end: () => { try { proc.stdin.end(); } catch (_) { /* gone */ } setTimeout(() => { try { proc.kill(); } catch (_) { /* gone */ } }, 3000); } };
+      laptopsL.push(l);
+      return l;
+    };
+    const L = {};
+    const serversL = [];
+    let crashL = '';
+    let readL = {}, foundL = null;
+    try {
+      const A = laptopL('A'), B = laptopL('B'), C = laptopL('C'), D = laptopL('D');
+
+      /* laptop A: the registration laptop, which hosts */
+      L.aSignedOut = await A.run(`const o={};
+        for(const ch of ['hub:status','hub:start','hub:stop','hub:firewall']) o[ch]=err(await call(ch,{}));
+        const s=await call('lan:scan',{ms:300});o.scanOpen=s.ok;return o;`);
+      L.aRoles = await A.run(`await call('auth:login',{username:'admin',password:'admin'});
+        const a=ipc.getCurrentUser();
+        db.createUser(a,{username:'ana.reyes',full_name:'Ana Reyes',role:'registration',password:'ana-pass-1'});
+        const R=['registration','emt','triage','doctor','hygienist','checkout'];
+        for(const r of R) db.createUser(a,{username:'l_'+r,full_name:'L '+r,role:r,password:'pw-'+r});
+        const o={};
+        for(const r of R){await call('auth:login',{username:'l_'+r,password:'pw-'+r});o[r]=[];
+          for(const ch of ['hub:status','hub:start','hub:stop','hub:firewall','lan:scan','cloud:connectionCode','cloud:join']) o[r].push(err(await call(ch,{})));}
+        await call('auth:login',{username:'admin',password:'admin'});
+        return o;`);
+      L.aHost = await A.run(`const r=await call('hub:start',{name:'Lowell clinic network'});
+        if(!r.ok) return {error:r.error};
+        const s=cloud.status(),id=hub.identity(),ev=db.getActiveEvent();
+        db.createPatient(ipc.getCurrentUser(),{first_name:'Ana',last_name:'FromA'});
+        const sync=await settle();
+        const files=fs.readdirSync(dir);
+        const Sqlite=require(path.join(root,'node_modules','better-sqlite3'));
+        const own=new Sqlite(path.join(dir,'mission-minded.db'),{readonly:true});
+        const clinicHasRows=!!own.prepare("SELECT 1 FROM sqlite_master WHERE name='sync_rows'").get();own.close();
+        return {running:r.data.running,kind:s.kind,isHost:s.isHost,url:s.url,lanName:s.lanName,pin:id.pin,key:id.key,hostId:id.hostId,
+          port:hub.status().port,sync:sync.ok,eventUid:ev&&ev.uid,hubFile:files.includes(hub.HUB_FILE),clinicHasRows};`);
+      L.aCode = await A.run(`const c=await call('cloud:connectionCode');return c.ok?c.data:{error:c.error};`);
+      readL = (() => { try { return CCL.readConnectionCode(L.aCode.code); } catch (e) { return { error: e.message }; } })();
+
+      /* laptop B: new to the clinic, joins from the list found, signed out */
+      L.bScan = await B.run(`const r=await call('lan:scan',{ms:1500});return r.ok?r.data:{error:r.error};`);
+      foundL = Array.isArray(L.bScan) ? L.bScan.find((h) => h.hostId === L.aHost.hostId) : null;
+      const pickL = foundL ? { hostId: foundL.hostId, fp: foundL.fp, name: foundL.name } : {};
+      L.bWrong = await B.run(`const r=await call('cloud:join',${JSON.stringify({ url: foundL && foundL.url, key: 'WRONG-KEY22-22222-22222-22222', lan: pickL })});
+        return {error:err(r),configured:db.getSyncMeta().configured};`);
+      L.aSawWrong = await A.run(`return hub.status().laptops.map((l)=>l.self?'self':l.computer);`);
+      L.bJoin = await B.run(`const r=await call('cloud:join',${JSON.stringify({ url: foundL && foundL.url, key: L.aHost.key, lan: pickL })});
+        if(!r.ok) return {error:r.error};
+        const m=db.getSyncMeta();
+        return {accounts:r.data.accounts,sync:!!(r.data.sync&&r.data.sync.ok),pin:m.lanPin,host:m.lanHost,url:m.url,kind:cloud.status().kind,
+          ana:!!db.login('ana.reyes','ana-pass-1'),fromA:db.listPatients({eventId:'all'}).some((p)=>p.last_name==='FromA')};`);
+      L.bAdd = await B.run(`const u=db.login('admin','admin');db.createPatient(u,{first_name:'Ben',last_name:'FromB'});return (await settle()).ok;`);
+      L.aGotB = await A.run(`await settle();return {fromB:db.listPatients({eventId:'all'}).some((p)=>p.last_name==='FromB'),laptops:hub.status().laptops.map((l)=>l.self?'self':'other')};`);
+
+      /* laptop C: joins with the connection code */
+      L.cJoin = await C.run(`const r=await call('cloud:join',${JSON.stringify({ url: readL.url, key: readL.key, lan: readL.lan })});
+        if(!r.ok) return {error:r.error};
+        const n=db.listPatients({eventId:'all'}).map((p)=>p.last_name);
+        return {accounts:r.data.accounts,fromA:n.includes('FromA'),fromB:n.includes('FromB'),pin:db.getSyncMeta().lanPin};`);
+
+      /* edits, deletions and x-rays, every way round */
+      L.edit = await A.run(`const u=ipc.getCurrentUser();const all=db.listPatients({eventId:'all'});
+        const b=all.find((x)=>x.last_name==='FromB');db.saveVitals(u,b.id,{bp_systolic:'131',bp_diastolic:'82',heart_rate:'70'});
+        const a=all.find((x)=>x.last_name==='FromA');db.deletePatient(u,a.id);return (await settle()).ok;`);
+      // The station takes its x-ray with the vitals already on screen, as it
+      // would: synced first. (Two laptops changing the same record between
+      // two syncs is last-write-wins, online and here alike.)
+      L.bXray = await B.run(`await settle();const u=db.login('admin','admin');const p=db.listPatients({eventId:'all'}).find((x)=>x.last_name==='FromB');
+        db.addXray(u,p.id,{station:'triage',image_png:'data:image/png;base64,TEFOWFJBWQ==',tooth:'14'});
+        await settle();const g=db.getPatient(p.id);
+        return {bp:!!g.triage&&g.triage.bp_systolic===131,fromAGone:!db.listPatients({eventId:'all'}).some((x)=>x.last_name==='FromA')};`);
+      L.cSees = await C.run(`await settle();const p=db.listPatients({eventId:'all'}).find((x)=>x.last_name==='FromB');
+        const xs=p?db.listXrays(p.id):[];const g=p?db.getPatient(p.id):null;
+        return {xray:xs.some((x)=>x.image_png==='data:image/png;base64,TEFOWFJBWQ=='&&x.tooth==='14'),bp:!!g&&!!g.triage&&g.triage.bp_systolic===131,
+          fromAGone:!db.listPatients({eventId:'all'}).some((x)=>x.last_name==='FromA')};`);
+      L.aXray = await A.run(`await settle();const p=db.listPatients({eventId:'all'}).find((x)=>x.last_name==='FromB');return db.listXrays(p.id).length;`);
+
+      /* the host closes (the app quits, the laptop sleeps): the others work on; it reopens */
+      L.down = await A.run(`const p=hub.status().port;hub.shutdown();return p;`);
+      L.bOffline = await B.run(`const u=db.login('admin','admin');db.createPatient(u,{first_name:'Olga',last_name:'WhileHostOff'});
+        const r=await cloud.syncOnce();
+        return {ok:r.ok,error:r.error||'',local:db.listPatients({eventId:'all'}).some((x)=>x.last_name==='WhileHostOff')};`);
+      L.up = await A.run(`hub.init(dir);const st=await hub.resume({version:'0.0.17',selfDevice:db.ensureDeviceId()});
+        if(st&&st.running){const t=hub.ownTarget();cloud.repointLan(t.url,t.lan.pin,t.lan.name);}
+        return {running:!!(st&&st.running),port:st&&st.port,pin:st&&st.pin,url:db.getSyncMeta().url};`);
+      L.bBack = await B.run(`const r=await settle();return {ok:r.ok,lastError:db.getSyncMeta().lastError};`);
+      L.aCaught = await A.run(`await settle();return db.listPatients({eventId:'all'}).some((x)=>x.last_name==='WhileHostOff');`);
+
+      /* the host gets a new address: the joined laptops find it again */
+      L.moved = await A.run(`const old=hub.status().port;await hub.stop({keepHosting:true});const st=await hub.start({port:0});
+        const t=hub.ownTarget();cloud.repointLan(t.url,t.lan.pin,t.lan.name);await settle();return {old,now:st.port};`);
+      // A move to a new server restarts the cursor and marks everything
+      // unsent; the same host at a new address must do neither.
+      L.refind = await B.run(`const m0=db.getSyncMeta();let moves=0;
+        const r0=db.resetSyncCursor,u0=db.markAllUnsent;db.resetSyncCursor=(...a)=>{moves++;return r0(...a);};db.markAllUnsent=(...a)=>{moves++;return u0(...a);};
+        try{const first=await cloud.syncOnce();
+          let m=db.getSyncMeta();for(let i=0;i<80&&m.url===m0.url;i++){await sleep(100);m=db.getSyncMeta();}
+          const r=await settle();
+          return {before:m0.url,after:m.url,firstOk:first.ok,cursorKept:moves===0&&m.cursor!=='',ok:r.ok,samePin:m.lanPin===m0.lanPin};
+        }finally{db.resetSyncCursor=r0;db.markAllUnsent=u0;}`);
+
+      /* a different laptop at the host's address, with a certificate of its own */
+      L.aStop = await A.run(`const p=hub.status().port;await hub.stop({keepHosting:true});return p;`);
+      const fakeL = hubL.makeCertificate();
+      const hitsL = [];
+      const mkImpostor = (port) => new Promise((resolve, reject) => {
+        const s = httpsL.createServer({ key: fakeL.key, cert: fakeL.cert }, (req, res) => {
+          hitsL.push({ path: req.url, auth: !!req.headers.authorization });
+          if (String(req.url).startsWith('/lan/hello')) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, app: 'mmw-clinic-network', host: 'look-alike-0001', name: 'Lowell clinic network', proof: 'f'.repeat(64) }));
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true,"service":"mmw-sync","version":"1.7.0","seq":true,"app":"mmw-clinic-network","proof":"x"}');
+        });
+        s.once('error', reject);
+        s.listen(port, '127.0.0.1', () => { serversL.push(s); resolve(s.address().port); });
+      });
+      await mkImpostor(L.aStop);
+      const otherPortL = await mkImpostor(0);
+      L.pin = await B.run(`await call('auth:login',{username:'admin',password:'admin'});const m=db.getSyncMeta();
+        const r=await cloud.syncOnce();
+        const t=await call('cloud:test',{url:m.url,key:'',lan:{pin:m.lanPin,hostId:m.lanHost}});
+        const spoof=await cloud.refind({scan:async()=>[{hostId:m.lanHost,fp:m.lanPin.slice(0,16),name:'Look-alike',address:'127.0.0.1',port:${otherPortL},urls:['https://127.0.0.1:${otherPortL}']}]});
+        return {ok:r.ok,error:r.error||'',test:err(t),spoofMoved:spoof,url:db.getSyncMeta().url===m.url};`);
+      L.hitsDuringPin = hitsL.length;
+      // Picked from a list as "Lowell clinic network", it is asked to prove it
+      // holds the key — and cannot — so the key typed never goes to it.
+      L.lookAlike = await B.run(`const r=await call('cloud:join',{url:'https://127.0.0.1:${otherPortL}',key:'typed clinic key',lan:{hostId:'look-alike-0001',name:'Lowell clinic network'}});
+        return {error:err(r),url:db.getSyncMeta().url};`);
+      L.lookAlikeHits = hitsL.slice();
+      for (const s of serversL.splice(0)) await new Promise((r) => { s.close(() => r()); if (s.closeAllConnections) s.closeAllConnections(); });
+      L.aAgain = await A.run(`const st=await hub.start({port:${L.aStop}});const t=hub.ownTarget();cloud.repointLan(t.url,t.lan.pin,t.lan.name);return st.port;`);
+      L.bAfterPin = await B.run(`const r=await settle();return r.ok;`);
+
+      /* "Test the clinic network" and joining, refused the right way */
+      L.tests = await B.run(`const m=db.getSyncMeta();const o={};
+        o.ok=(await call('cloud:test',{url:m.url,key:'',lan:{pin:m.lanPin,hostId:m.lanHost}})).ok;
+        o.wrongKey=err(await call('cloud:test',{url:m.url,key:'NOT-THE-KEY',lan:{pin:m.lanPin,hostId:m.lanHost}}));
+        o.notHosting=err(await call('cloud:test',{url:'https://127.0.0.1:1',key:'x',lan:{pin:'ee'.repeat(32),hostId:'no-such-host-01'}}));
+        return o;`);
+      const flippedL = readL.lan ? (readL.lan.pin[0] === 'a' ? 'b' : 'a') + readL.lan.pin.slice(1) : '';
+      L.dTampered = await D.run(`const r=await call('cloud:join',${JSON.stringify({ url: readL.url, key: readL.key, lan: { ...(readL.lan || {}), pin: flippedL } })});
+        return {error:err(r),configured:db.getSyncMeta().configured};`);
+
+      /* laptop D: on an internet server first, then the clinic network, then back */
+      L.dInet = await D.run(`const Sqlite=require(path.join(root,'node_modules','better-sqlite3'));
+        const inet=new Sqlite(':memory:');const w=await hub.loadWorker();const env={CLINIC_KEY:'internet key 1',DB:hub.d1(inet)};
+        globalThis.__inet=inet;
+        globalThis.fetch=async(url,init)=>{const u=new URL(url);if(u.host!=='mmw-sync.clinic.workers.dev')throw new TypeError('fetch failed');return w.fetch(new Request(url,init),env,{});};
+        await call('auth:login',{username:'admin',password:'admin'});
+        db.createPatient(ipc.getCurrentUser(),{first_name:'Ivy',last_name:'InternetOnlyD'});
+        const t=await call('cloud:test',{url:'https://mmw-sync.clinic.workers.dev',key:'internet key 1'});
+        const c=await call('cloud:config',{url:'https://mmw-sync.clinic.workers.dev',key:'internet key 1',online:true});
+        const s=await settle();
+        const onInet=JSON.stringify(inet.prepare("SELECT data FROM sync_rows WHERE entity='patient'").all());
+        return {test:t.ok,config:c.ok,sync:s.ok,kind:cloud.status().kind,cursor:db.getSyncMeta().cursor,inetHasD:onInet.includes('InternetOnlyD')};`);
+      L.dToLan = await D.run(`const t=await call('cloud:test',${JSON.stringify({ url: readL.url, key: readL.key, lan: readL.lan })});
+        if(!t.ok) return {error:t.error};
+        const c=await call('cloud:config',{url:t.data.url,key:${JSON.stringify(readL.key)},online:true,lan:t.data.lan});
+        const cursorAtMove=db.getSyncMeta().cursor;const s=await settle();const n=db.listPatients({eventId:'all'}).map((p)=>p.last_name);
+        return {config:c.ok,cursorAtMove,sync:s.ok,kind:cloud.status().kind,pin:db.getSyncMeta().lanPin,fromB:n.includes('FromB'),offline:n.includes('WhileHostOff')};`);
+      L.aGotD = await A.run(`await settle();return db.listPatients({eventId:'all'}).some((x)=>x.last_name==='InternetOnlyD');`);
+      L.dBack = await D.run(`const c=await call('cloud:config',{url:'https://mmw-sync.clinic.workers.dev',key:'internet key 1',online:true});
+        const m=db.getSyncMeta();const cursorAtMove=m.cursor;const s=await settle();
+        const onInet=JSON.stringify(globalThis.__inet.prepare("SELECT data FROM sync_rows WHERE entity='patient'").all());
+        return {config:c.ok,cursorAtMove,lanCleared:!m.lanPin&&!m.lanHost&&!m.lanName,kind:cloud.status().kind,sync:s.ok,
+          inetHasB:onInet.includes('FromB'),inetHasOffline:onInet.includes('WhileHostOff')};`);
+      // On an internet server, asked to host: the question first (moveFrom),
+      // and nothing made — no certificate, no hub file — until it is answered.
+      L.dAskHost = await D.run(`const r=await call('hub:start',{name:'Not yet'});
+        return {moveFrom:r.ok?r.data.moveFrom:'',noFile:!fs.readdirSync(dir).includes(hub.HUB_FILE),still:cloud.status().kind};`);
+      // Once a laptop has its own administrator password, the sign-in screen
+      // can no longer list the hosts (nor join), as Join itself is closed.
+      L.dClosed = await D.run(`const u=ipc.getCurrentUser();db.updateUser(u,u.id,{password:'d-own-admin-pw'});await call('auth:logout');
+        return err(await call('lan:scan',{ms:300}));`);
+
+      /* the hub refuses the online pre-registration form the worker would serve */
+      const hubUrlL = 'https://127.0.0.1:' + L.aAgain;
+      const formL = await lanL.request(hubUrlL + '/checkin/' + L.aHost.eventUid, { pin: L.aHost.pin }).catch((e) => ({ status: 0, text: e.message }));
+      {
+        const SqliteL = require('better-sqlite3');
+        // A copy of the host's file, so the worker can run over it as it would.
+        const copyDirL = fs.mkdtempSync(path.join(os.tmpdir(), 'mmwhubcopy-'));
+        for (const sfx of ['', '-wal']) {
+          const from = path.join(A.dir, hubL.HUB_FILE + sfx);
+          if (fs.existsSync(from)) fs.copyFileSync(from, path.join(copyDirL, hubL.HUB_FILE + sfx));
+        }
+        const roL = new SqliteL(path.join(copyDirL, hubL.HUB_FILE));
+        const directL = await (await hubL.loadWorker()).fetch(new Request('https://x/checkin/' + L.aHost.eventUid), { CLINIC_KEY: 'unused', DB: hubL.d1(roL) }, {});
+        L.directForm = directL.status;
+        roL.close();
+        fs.rmSync(copyDirL, { recursive: true, force: true });
+      }
+      L.form = { status: formL.status, refused: /not available on the clinic network/.test(formL.text || ''), form: /<form/i.test(formL.text || '') };
+      L.beaconsSoFar = capturedL.length;
+      L.hostStatus = await A.run(`const s=await call('hub:status');return s.ok?{ok:true,laptops:s.data.laptops.length,platform:s.data.platform,running:s.data.running}:{error:s.error};`);
+      L.aStopErase = await A.run(`const r=await call('hub:stop',{erase:false});const m=db.getSyncMeta();
+        const kept=fs.readdirSync(dir).includes(hub.HUB_FILE);
+        const again=await call('hub:start',{name:'Lowell clinic network'});const m2=db.getSyncMeta();
+        const samePin=again.ok&&m2.lanPin===m.lanPin;
+        const e=await call('hub:stop',{erase:true});const gone=!fs.readdirSync(dir).includes(hub.HUB_FILE);
+        return {stopped:r.ok&&!r.data.running,disconnected:!m.configured,kept,again:again.ok,samePinAfterRestart:m2.lanPin===L_PIN,gone,erased:e.ok,meta:db.getSyncMeta().configured};`.replace('L_PIN', JSON.stringify(L.aHost.pin)));
+    } catch (e) {
+      crashL = String((e && e.stack) || e);
+    } finally {
+      for (const l of laptopsL) l.end();
+      for (const s of serversL) { try { s.close(); } catch (_) { /* closed */ } }
+      try { captureL.close(); } catch (_) { /* closed */ }
+      await new Promise((r) => setTimeout(r, 300));
+      fs.rmSync(agentFileL, { force: true });
+      for (const l of laptopsL) fs.rmSync(l.dir, { recursive: true, force: true });
+    }
+    log(!crashL, 'clinic network: the four-laptop probe runs — separate processes, the real ipc.js, cloud.js, hub.js and worker.js' + (crashL ? ' — ' + crashL.slice(0, 600) : ''));
+    const P = L;
+    const perm = (s) => /permission/.test(s || '');
+    log(!!P.aSignedOut && ['hub:status', 'hub:start', 'hub:stop', 'hub:firewall'].every((c) => /sign in first/i.test(P.aSignedOut[c] || ''))
+      && !!P.aRoles && Object.keys(P.aRoles).length === 6 && Object.values(P.aRoles).every((list) => list.length === 7 && list.every(perm)),
+      'clinic network (real IPC): hosting — status, start, stop, the firewall helper — the host list and the connection code are refused signed out and to all six non-admin roles (and so is Join)');
+    log(!!P.aHost && P.aHost.running === true && P.aHost.kind === 'lan' && P.aHost.isHost === true && /^https:\/\/127\.0\.0\.1:\d+$/.test(P.aHost.url || '')
+      && P.aHost.sync === true && P.aHost.hubFile === true && P.aHost.clinicHasRows === false,
+      'clinic network (real IPC): "Host" starts an HTTPS host on this laptop, which syncs with it over 127.0.0.1 like any laptop; its data is its own file in userData, not the clinic database');
+    log(!!P.aCode && /^MMW1-/.test(P.aCode.code || '') && !!readL.lan && readL.lan.pin === P.aHost.pin && readL.key === P.aHost.key
+      && readL.url === 'https://127.0.0.1:' + P.aHost.port && readL.lan.hostId === P.aHost.hostId && readL.lan.name === 'Lowell clinic network',
+      'clinic network: the host\'s connection code carries the address the others reach it at (never its own 127.0.0.1 shortcut), the key and the certificate pin — and the screens read it back');
+    const beaconsL = capturedL.map((c) => ({ raw: c.text, b: lanL.readBeacon(Buffer.from(c.text, 'utf8'), c.rinfo) }));
+    log(beaconsL.length >= 2 && beaconsL.every((x) => !!x.b && x.b.hostId === (P.aHost || {}).hostId && x.b.fp === String((P.aHost || {}).pin).slice(0, 16)
+      && x.b.name === 'Lowell clinic network' && !x.raw.includes((P.aHost || {}).key) && !x.raw.includes((P.aHost || {}).pin)),
+      `clinic network: the host announces itself every few seconds — name, port, host id, the start of its fingerprint — and no beacon carries the key or the whole fingerprint (${beaconsL.length} heard)`);
+    log(!!foundL && foundL.url === 'https://127.0.0.1:' + P.aHost.port && foundL.name === 'Lowell clinic network' && !JSON.stringify(P.bScan).includes(P.aHost.key),
+      'clinic network: a new laptop, signed out, lists the host it hears — its name and address, nothing secret');
+    log(!!P.bWrong && /refused the clinic key/.test(P.bWrong.error) && P.bWrong.configured === false && JSON.stringify(P.aSawWrong) === JSON.stringify(['self']),
+      'clinic network: joining from the list with a wrong key is refused, nothing is saved, and the host lists no new laptop');
+    log(!!P.lookAlike && /refused the clinic key/.test(P.lookAlike.error) && Array.isArray(P.lookAlikeHits) && P.lookAlikeHits.length === 1
+      && /^\/lan\/hello\?nonce=[0-9a-f]+$/.test(P.lookAlikeHits[0].path) && P.lookAlikeHits.every((h) => !h.auth) && P.lookAlike.url === 'https://127.0.0.1:' + P.aStop,
+      'clinic network: a look-alike picked from the list is asked to prove it holds the clinic key before the key is sent — it cannot, and never receives it');
+    log(!!P.aSignedOut && P.aSignedOut.scanOpen === true && /already has its own administrator password/.test(P.dClosed || ''),
+      'clinic network: the sign-in screen lists hosts only while Join is open — not once the computer has its own administrator password');
+    log(!!P.bJoin && P.bJoin.kind === 'lan' && P.bJoin.pin === P.aHost.pin && P.bJoin.host === P.aHost.hostId && P.bJoin.sync === true && P.bJoin.accounts > 0
+      && P.bJoin.ana === true && P.bJoin.fromA === true,
+      'clinic network: joined from the list and the key, a laptop pins the host\'s certificate, downloads the clinic — staff sign in with their own accounts — and sees the patient registered on the host');
+    log(P.bAdd === true && !!P.aGotB && P.aGotB.fromB === true && JSON.stringify(P.aGotB.laptops) === JSON.stringify(['self', 'other']),
+      'clinic network: a patient registered on a joined laptop appears on the host, and the host lists the laptops connected');
+    log(!!P.cJoin && P.cJoin.pin === P.aHost.pin && P.cJoin.fromA === true && P.cJoin.fromB === true,
+      'clinic network: a third laptop joins with the connection code alone and has every patient');
+    log(P.edit === true && !!P.bXray && P.bXray.bp === true && P.bXray.fromAGone === true && !!P.cSees && P.cSees.xray === true && P.cSees.bp === true
+      && P.cSees.fromAGone === true && P.aXray === 1,
+      'clinic network: an edit and a deletion made on the host, and an x-ray taken on a joined laptop, reach every laptop');
+    log(!!P.bOffline && P.bOffline.ok === false && /not hosting there/.test(P.bOffline.error) && P.bOffline.local === true
+      && !!P.up && P.up.running === true && P.up.port === P.down && P.up.pin === P.aHost.pin && !!P.bBack && P.bBack.ok === true && P.aCaught === true,
+      'clinic network: with the host closed, a laptop keeps working and says plainly the host is not hosting; the host reopens hosting by itself, same port and certificate, and the laptop\'s work arrives');
+    log(!!P.moved && P.moved.now !== P.moved.old && !!P.refind && P.refind.firstOk === false && P.refind.after === 'https://127.0.0.1:' + P.moved.now
+      && P.refind.cursorKept === true && P.refind.samePin === true && P.refind.ok === true,
+      'clinic network: when the host comes back at another address, a joined laptop finds it again by its id — nothing retyped, nothing re-sent — and syncs');
+    log(!!P.pin && P.pin.ok === false && /not this clinic's host/.test(P.pin.error) && /not this clinic's host/.test(P.pin.test) && P.hitsDuringPin === 0,
+      'clinic network: a different laptop at the host\'s address, with its own certificate, is refused with a plain reason — and receives no request at all, so never the key');
+    log(!!P.pin && P.pin.spoofMoved === '' && P.pin.url === true && P.bAfterPin === true,
+      'clinic network: a beacon naming the host at a look-alike\'s address moves nothing — the certificate there is checked first; the real host back, sync resumes');
+    log(!!P.tests && P.tests.ok === true && /refused the clinic key/.test(P.tests.wrongKey) && /not hosting there/.test(P.tests.notHosting)
+      && !!P.dTampered && /not this clinic's host/.test(P.dTampered.error) && P.dTampered.configured === false,
+      '"Test the clinic network": working, the wrong key and a host not hosting each say so; a code with a wrong fingerprint is refused and saves nothing');
+    log(!!P.dInet && P.dInet.kind === 'internet' && P.dInet.inetHasD === true && !!P.dToLan && P.dToLan.config === true && P.dToLan.cursorAtMove === ''
+      && P.dToLan.kind === 'lan' && P.dToLan.fromB === true && P.dToLan.offline === true && P.aGotD === true,
+      'clinic network: a laptop on an internet server moves to the clinic network by the existing server move — cursor restarted, everything sent — so its records reach the host and the host\'s reach it');
+    log(!!P.dBack && P.dBack.config === true && P.dBack.cursorAtMove === '' && P.dBack.lanCleared === true && P.dBack.kind === 'internet'
+      && P.dBack.inetHasB === true && P.dBack.inetHasOffline === true,
+      'clinic network: and back to the internet server the same way — the clinic network\'s patients go with it, and nothing of the host is kept');
+    log(!!P.dAskHost && P.dAskHost.moveFrom === 'mmw-sync.clinic.workers.dev' && P.dAskHost.noFile === true && P.dAskHost.still === 'internet',
+      'clinic network (real IPC): a laptop on an internet server asked to host is asked first, naming that server — and nothing is made or moved until it is confirmed');
+    log(L.directForm === 200 && !!P.form && P.form.status === 404 && P.form.refused === true && P.form.form === false,
+      'clinic network: the online pre-registration form, which the worker serves for this event, is refused by the host');
+    log(!!P.hostStatus && P.hostStatus.running === true && P.hostStatus.laptops >= 2 && !!P.aStopErase && P.aStopErase.stopped === true
+      && P.aStopErase.disconnected === true && P.aStopErase.kept === true && P.aStopErase.samePinAfterRestart === true && P.aStopErase.gone === true && P.aStopErase.meta === false,
+      'clinic network: Stop hosting stops the host and disconnects this laptop, keeping the hub file — hosting again is the same clinic network; erasing removes it');
+
+    /* ---- "Test the clinic network": host not found, or its firewall ---- */
+    try {
+      const holeSockets = [];
+      const hole = netL.createServer((s) => holeSockets.push(s));
+      await new Promise((r) => hole.listen(0, '127.0.0.1', r));
+      const holePort = hole.address().port;
+      const answer = dgramL.createSocket('udp4');
+      const fakePin = 'cd'.repeat(32);
+      answer.on('message', (m, rinfo) => {
+        if (lanL.isQuery(m)) answer.send(lanL.beaconMessage({ name: 'Behind a firewall', port: holePort, hostId: 'blocked-host-1', pin: fakePin }), rinfo.port, rinfo.address, () => {});
+      });
+      await new Promise((r) => answer.bind(0, '127.0.0.1', r));
+      const silentPort = await freeUdpL();
+      const listenPort = await freeUdpL();
+      const diag = (queryPort) => lanL.diagnose({ url: 'https://127.0.0.1:' + holePort, key: 'k', pin: fakePin, hostId: 'blocked-host-1',
+        listenMs: 1200, timeoutMs: 700, scanOpts: { port: listenPort, queryPort, targets: ['127.0.0.1'] } });
+      const blocked = await diag(answer.address().port);
+      const notFound = await diag(silentPort);
+      hole.close(); holeSockets.forEach((s) => s.destroy()); answer.close();
+      log(blocked.code === 'blocked' && /firewall is blocking/.test(blocked.message) && /Private network/.test(blocked.message)
+        && notFound.code === 'not_found' && /No clinic network host answered/.test(notFound.message),
+        `"Test the clinic network": a host that never answers is told apart by its beacon — heard, its firewall is blocking (and what to change); not heard, it is not on this Wi-Fi (${blocked.code}, ${notFound.code})`);
+    } catch (e) {
+      log(false, '"Test the clinic network": a host that never answers is told apart by its beacon — ' + String(e && e.message));
+    }
+
+    /* ---- the pieces, on their own ---- */
+    log(chkL(() => {
+      const beaconBytes = lanL.beaconMessage({ name: 'X', port: 47800, hostId: 'abcdefgh-1234', pin: 'ef'.repeat(32) });
+      return !!lanL.readBeacon(beaconBytes, { address: '192.168.1.23' }) && lanL.readBeacon(beaconBytes, { address: '192.168.1.23' }).url === 'https://192.168.1.23:47800'
+        && lanL.readBeacon(Buffer.from('{"app":"other"}'), { address: '1.2.3.4' }) === null && lanL.readBeacon(lanL.QUERY, { address: '1.2.3.4' }) === null
+        && !('key' in JSON.parse(beaconBytes.toString()));
+    }),
+      'clinic network: a beacon is read for its address from where it came, anything else on the port is ignored, and it has no field for a key');
+    log(chkL(() => cloudL.lanUrl('192.168.1.23') === 'https://192.168.1.23:47800' && cloudL.lanUrl('https://192.168.1.23:5000/x') === 'https://192.168.1.23:5000'
+      && cloudL.identityOf('https://192.168.1.23:47800', 'ab'.repeat(32)) === cloudL.identityOf('https://10.0.0.9:47811', 'ab'.repeat(32))
+      && cloudL.identityOf('https://192.168.1.23:47800', 'ab'.repeat(32)) !== cloudL.identityOf('https://192.168.1.23:47800', 'cd'.repeat(32))),
+      'clinic network: a host is the same server at any address, and a different one (a new certificate) at the same address');
+    {
+      const fw = chkL(() => hubL.firewallCommand) ? hubL.firewallCommand('C:\\Users\\O\'Brien\\AppData\\Local\\Programs\\mission-minded\\Mission Minded.exe') : { file: '', args: [] };
+      const inner = Buffer.from((/-EncodedCommand','([A-Za-z0-9+/=]+)'/.exec(fw.args[3] || '') || [])[1] || '', 'base64').toString('utf16le');
+      log(fw.file === 'powershell.exe' && /-Verb RunAs/.test(fw.args[3]) && /-Profile Private\b/.test(inner) && !/Public|Domain|Any/.test(inner.replace(/Remove-NetFirewallRule|Get-NetFirewallRule/g, ''))
+        && /-Direction Inbound -Action Allow -Program \$p/.test(inner) && inner.includes("$p = 'C:\\Users\\O''Brien\\AppData") && /Action -eq 'Block'/.test(inner)
+        && /hub:firewall/.test(readSrcL('../src/main/ipc.js')) && /process\.platform !== 'win32'/.test(readSrcL('../src/main/ipc.js')),
+        'clinic network: the Windows firewall helper asks Windows for permission, then allows this program in on Private networks only (never Public), clearing only its own block rules; Windows only');
+    }
+    log(/hub\.init\(app\.getPath\('userData'\)\)/.test(readSrcL('../src/main/main.js')) && /hub\.resume\(/.test(readSrcL('../src/main/main.js'))
+      && /resumeHosting\(\)\.finally\(\(\) => cloud\.start/.test(readSrcL('../src/main/main.js')) && /hub\.shutdown\(\)/.test(readSrcL('../src/main/main.js')),
+      'clinic network: the app hosts again as it opens — before its own sync starts — and closes the host as it quits, leaving it set to host again');
+
+    /* ---- packaging: what the host needs is in the installed app ---- */
+    {
+      const pkgL = JSON.parse(readSrcL('../package.json') || '{}');
+      const files = (pkgL.build && pkgL.build.files) || [];
+      log(files.includes('cloud/worker.js') && !!(pkgL.dependencies || {})['node-forge'] && !((pkgL.devDependencies || {})['node-forge'])
+        && /require\('node-forge'\)/.test(readSrcL('../src/main/hub.js')) && /path\.join\(__dirname, '\.\.', '\.\.', 'cloud', 'worker\.js'\)/.test(readSrcL('../src/main/hub.js')),
+        'packaging: the installer carries cloud/worker.js (build.files) and node-forge (a runtime dependency), which the host loads from inside the app');
+    }
+
+    /* ---- the guide ---- */
+    {
+      const docsL = readSrcL('../docs/CLOUD_SETUP.md');
+      const flatL = docsL.replace(/\s+/g, ' ');
+      const secL = flatL.slice(flatL.indexOf('## Clinic network (no internet)'), flatL.indexOf('## Troubleshooting'));
+      log(secL.length > 1500 && /any Wi-Fi router/i.test(secL) && /WPA2/.test(secL) && /WPA3/.test(secL) && /does not need (an )?internet/i.test(secL)
+        && /same Wi-Fi/.test(secL) && /Private network/.test(secL) && /Windows Defender Firewall has blocked some features of this app/.test(secL)
+        && /Allow through the firewall/.test(secL) && /accept incoming network connections/.test(secL)
+        && /Host the clinic network/.test(secL) && /Join/.test(secL) && /Test the clinic network/.test(secL)
+        && /host laptop is (off|asleep|switched off)/i.test(secL) && /catch up/.test(secL) && /Moving the host/i.test(secL)
+        && /same version/.test(secL) && /pre-registration/i.test(secL),
+        'cloud guide: "Clinic network (no internet)" covers the router (any, WPA2/WPA3, no internet), the same Wi-Fi, a Private network and the firewall on the host, hosting and joining, the test, the host being off, moving the host, the same version — and no online pre-registration');
+      const QUOTED_L = ['Clinic network (no internet)', 'Internet server', 'Host the clinic network', 'Join with code', 'Test the clinic network',
+        'Stop hosting', 'Allow through the firewall', 'Erase the clinic network data', 'Look again', 'Choose', 'Show connection code',
+        'Windows Defender Firewall has blocked some features of this app', 'Host address', 'Clinic network name',
+        'is not this clinic\'s host', 'its firewall is blocking the connection', 'No clinic network host answered', 'Mission Minded is not hosting there',
+        'Online pre-registration is not available on the clinic network'];
+      const appL = ['../src/renderer/js/views/admin.js', '../src/renderer/js/views/setup.js', '../src/main/lan.js', '../src/main/hub.js', '../src/main/cloud.js'].map(readSrcL).join('\n');
+      const missDocs = QUOTED_L.filter((q) => !flatL.includes(q));
+      const missApp = QUOTED_L.filter((q) => !appL.includes(q));
+      log(!missDocs.length && !missApp.length,
+        `cloud guide: every clinic network button and message it quotes is what the app shows${missDocs.length ? ' — missing from the guide: ' + missDocs.join(' | ') : ''}${missApp.length ? ' — not in the app: ' + missApp.join(' | ') : ''}`);
+    }
+
+    /* ---- Admin → Cloud, on screen: host and join ---- */
+    const savedApiL = { ...window.api };
+    const callsL = [];
+    const PIN_L = 'ab'.repeat(32), HOST_L = 'host-lowell-0001', KEY_L = 'K7QM2-ABCDE-FGHJK-LMNPQ-RSTUV';
+    const CODE_L = cloudL.encodeConnectionCode('https://192.168.1.23:47800', KEY_L, { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' });
+    const HOST_ROW_L = { hostId: HOST_L, name: 'Lowell clinic network', port: 47800, fp: PIN_L.slice(0, 16), address: '192.168.1.23', url: 'https://192.168.1.23:47800', urls: ['https://192.168.1.23:47800'], self: false };
+    const baseStL = { enabled: false, mode: 'offline', online: false, url: '', hasKey: false, configured: false, deviceId: 'dev-l', cursor: '',
+      lastOk: '', lastPush: '', lastError: '', running: false, pushed: 0, pulled: 0, applied: 0, kind: '', lanPin: '', lanPinShown: '', lanHost: '', lanName: '', isHost: false };
+    const hubNone = { running: false, hasData: false, name: '', port: 0, hostId: '', pin: '', addresses: [], laptops: [], error: '', platform: 'win32', firewallHelper: true };
+    const hubRunning = { running: true, hasData: true, hosting: true, name: 'Lowell clinic network', port: 47800, hostId: HOST_L, pin: PIN_L, pinShown: lanL.showPin(PIN_L),
+      addresses: [{ address: '192.168.1.23', iface: 'Wi-Fi', preferred: true, url: 'https://192.168.1.23:47800' }],
+      laptops: [{ computer: 'REG-LAPTOP', address: '127.0.0.1', self: true, lastSeen: new Date().toISOString() }, { computer: 'VITALS-1', address: '192.168.1.31', self: false, lastSeen: new Date().toISOString() }],
+      error: '', platform: 'win32', firewallHelper: true };
+    let stL = { ...baseStL }, hsL = { ...hubNone }, scanL = [HOST_ROW_L], testFailL = '';
+    window.api.cloudStatus = okWrap(() => ({ ...stL }), 'cloudStatus');
+    window.api.hubStatus = okWrap(() => ({ ...hsL }), 'hubStatus');
+    window.api.lanScan = async () => ({ ok: true, data: scanL.slice() });
+    window.api.hubStart = okWrap(({ name, move } = {}) => { callsL.push(['hubStart', name, !!move]); return { ...hsL, running: true }; }, 'hubStart');
+    window.api.hubStop = okWrap(({ erase } = {}) => { callsL.push(['hubStop', !!erase]); return { ...hsL, running: false }; }, 'hubStop');
+    window.api.hubFirewall = okWrap(() => { callsL.push(['hubFirewall']); return { done: true }; }, 'hubFirewall');
+    window.api.cloudTest = okWrap(({ url, key, lan } = {}) => {
+      callsL.push(['test', url, key, lan || null]);
+      if (testFailL) throw new Error(testFailL);
+      return lan ? { ok: true, service: 'mmw-sync', version: '1.7.0', url: cloudL.lanUrl(url), lan: { pin: lan.pin || PIN_L, hostId: lan.hostId || HOST_L, name: lan.name || 'Lowell clinic network' } }
+        : { ok: true, service: 'mmw-sync', version: '1.7.0' };
+    }, 'cloudTest');
+    window.api.cloudConfig = okWrap((cfg = {}) => { callsL.push(['config', cfg.url, cfg.key, cfg.lan || null]); return { ...stL }; }, 'cloudConfig');
+    window.api.cloudConnectionCode = okWrap(() => ({ code: CODE_L, url: 'https://192.168.1.23:47800', lan: true, key: KEY_L, name: 'Lowell clinic network' }), 'cloudConnectionCode');
+    const joinsL = [];
+    window.api.cloudJoin = async ({ url, key, move, lan } = {}) => { joinsL.push([url, key, !!move, lan || null]); return { ok: true, data: { ok: true, service: 'mmw-sync', version: '1.7.0', sync: { ok: true }, needsSetup: false, accounts: 2 } }; };
+    window.api.authNeedsSetup = async () => ({ ok: true, data: { needsSetup: false, defaultAdmin: { username: 'admin', password: 'admin' } } });
+    const signedL = currentUser;
+    try {
+      const storeL = (await import('../src/renderer/js/store.js')).store;
+      storeL.setUser(currentUser);
+      const ctxL = { navigate: () => {}, toast: () => {}, store: storeL, setDetail: () => {} };
+      const { renderAdmin } = await import('../src/renderer/js/views/admin.js');
+      // A screen element that is not there fails the check that needs it,
+      // rather than stopping the run (as when the change is undone).
+      const pressL = (root, label) => { if (!root) return false; const b = $all('button', root).find((x) => x.textContent.trim() === label); if (b) b.click(); return !!b; };
+      const setL = (inp, v) => { if (inp) setInput(inp, v); return !!inp; };
+      const fieldL = (root, re) => { const l = root && $all('label.field', root).find((x) => re.test(((x.querySelector('.field-label') || {}).textContent || '').trim())); return l ? l.querySelector('input') : null; };
+      const cardL = (root, re) => $all('.card', root).find((c) => re.test((c.querySelector('.card-title') || {}).textContent || ''));
+      const lastToastL = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+      const cloudPage = async () => { $all('.modal-overlay').forEach((o) => o.remove()); const r = renderAdmin(ctxL, { section: 'cloud' }); document.body.append(r); await settleL(); return r; };
+
+      // Not connected: the two ways, and the clinic network chosen.
+      stL = { ...baseStL }; hsL = { ...hubNone };
+      let pg = await cloudPage();
+      const segs = $all('.seg-btn', pg).map((b) => b.textContent.trim());
+      const startsInternet = !!cardL(pg, /Local only/) && !cardL(pg, /Join a clinic network/);
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const intro = cardL(pg, /Clinic network — no internet needed/);
+      const introSteps = intro ? $all('ol li', intro).map((li) => li.textContent) : [];
+      const join = cardL(pg, /Join a clinic network/);
+      const offer = cardL(pg, /Host the clinic network on this laptop/);
+      log(JSON.stringify(segs) === JSON.stringify(['Internet server', 'Clinic network (no internet)']) && startsInternet
+        && introSteps.length === 3 && /same Wi-Fi router/.test(introSteps[0]) && /WPA2 or WPA3/.test(introSteps[0]) && /does not need internet/.test(introSteps[0])
+        && /Host the clinic network/.test(introSteps[1]) && /join it/.test(introSteps[2]) && !!intro && /Already used this laptop\?/.test(intro.textContent)
+        && !!join && /Lowell clinic network/.test(join.textContent) && /192\.168\.1\.23:47800/.test(join.textContent)
+        && !!offer && !!fieldL(offer, /^Clinic network name/) && $all('button', offer).some((b) => b.textContent.trim() === 'Host the clinic network'),
+        'Cloud tab: two ways to sync, chosen at the top — Internet server as before, or Clinic network: the steps (router, host, join), the hosts found on this Wi-Fi, and hosting here');
+      callsL.length = 0;
+      const chooseBtn = join && $all('button', join).find((b) => b.textContent.trim() === 'Choose');
+      if (chooseBtn) chooseBtn.click();
+      const addrFilled = (fieldL(join, /^Host address/) || {}).value;
+      setL(fieldL(join, /^Clinic key/), KEY_L);
+      pressL(join, 'Join');
+      await settleL(20);
+      log(addrFilled === '192.168.1.23:47800' && JSON.stringify(callsL) === JSON.stringify([
+        ['test', '192.168.1.23:47800', KEY_L, { hostId: HOST_L, fp: PIN_L.slice(0, 16), name: 'Lowell clinic network' }],
+        ['config', 'https://192.168.1.23:47800', KEY_L, { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' }]]) && /Joined the clinic network/.test(lastToastL()),
+        'Cloud tab, clinic network: choosing a host found fills its address; with the key it is tested, then saved with the pin the test returns');
+      pg.remove();
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      callsL.length = 0;
+      const join2 = cardL(pg, /Join a clinic network/);
+      setL(fieldL(join2, /^Connection code/), cloudL.encodeConnectionCode('https://mmw-sync.x.workers.dev', 'k'));
+      pressL(join2, 'Join with code');
+      await settleL();
+      const internetRefused = /for an internet server/.test(lastToastL()) && callsL.length === 0;
+      setL(fieldL(join2, /^Connection code/), CODE_L);
+      pressL(join2, 'Join with code');
+      await settleL(20);
+      log(internetRefused && callsL.length === 2 && JSON.stringify(callsL[0]) === JSON.stringify(['test', 'https://192.168.1.23:47800', KEY_L, { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' }])
+        && callsL[1][0] === 'config' && callsL[1][3].pin === PIN_L,
+        'Cloud tab, clinic network: a pasted code joins with the pin it carries; an internet server\'s code pasted there is sent back to the internet box');
+      pg.remove();
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      callsL.length = 0;
+      const offer2 = cardL(pg, /Host the clinic network on this laptop/);
+      setL(fieldL(offer2, /^Clinic network name/), 'Lowell clinic network');
+      pressL(offer2, 'Host the clinic network');
+      await settleL(20);
+      log(JSON.stringify(callsL) === JSON.stringify([['hubStart', 'Lowell clinic network', false]]) && !$all('.modal-overlay').length,
+        'Cloud tab, clinic network: Host the clinic network starts hosting here, named, without a question on a laptop not connected to anything');
+      pg.remove();
+
+      // Hosting here (Windows).
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://127.0.0.1:47800', kind: 'lan',
+        lanPin: PIN_L, lanPinShown: lanL.showPin(PIN_L, 4), lanHost: HOST_L, lanName: 'Lowell clinic network', isHost: true, lastOk: new Date().toISOString() };
+      hsL = { ...hubRunning };
+      pg = await cloudPage();
+      const hostCard = cardL(pg, /This laptop hosts the clinic network/);
+      const conn = cardL(pg, /Connection/);
+      const hostTxt = hostCard ? hostCard.textContent : '';
+      const leakedL = pg.innerHTML.includes(KEY_L) || pg.innerHTML.includes(CODE_L);
+      log(!!hostCard && /Hosting/.test(hostTxt) && /192\.168\.1\.23:47800/.test((hostCard.querySelector('.lan-address') || {}).textContent || '')
+        && /VITALS-1/.test(hostTxt) && /REG-LAPTOP \(this laptop\)/.test(hostTxt) && /Laptops connected now\s*1/.test(hostTxt)
+        && (hostCard.querySelector('.lan-fingerprint') || {}).textContent === lanL.showPin(PIN_L) && !leakedL,
+        'Cloud tab, hosting: the network name, the address the others reach it at, the laptops connected now, and its fingerprint — and no key or code until asked');
+      log(/Windows Defender Firewall has blocked some features of this app/.test(hostTxt) && /Tick Private networks, then press Allow access/.test(hostTxt)
+        && /Network profile type → Private network/.test(hostTxt) && /Keep this laptop on, plugged in and awake/.test(hostTxt),
+        'Cloud tab, hosting on Windows: what Windows shows the first time and what to tick, how to make the Wi-Fi a Private network, and to keep the laptop awake');
+      callsL.length = 0;
+      pressL(hostCard, 'Allow through the firewall');
+      await settleL();
+      log(JSON.stringify(callsL) === JSON.stringify([['hubFirewall']]) && /allowed through the firewall on Private networks/.test(lastToastL()),
+        'Cloud tab, hosting on Windows: "Allow through the firewall" runs the helper');
+      log(!!conn && /Online/.test(conn.textContent) && /hosted on this laptop/.test(conn.textContent)
+        && $all('button', conn).some((b) => b.textContent.trim() === 'Sync now') && $all('button', conn).some((b) => b.textContent.trim() === 'Pause sync')
+        && !$all('button', conn).some((b) => b.textContent.trim() === 'Disconnect'),
+        'Cloud tab, hosting: the same Connection card — status pill, Sync now, Pause — and Stop hosting, not Disconnect, for the host');
+      pressL(pg, 'Show connection code');
+      await settleL();
+      const ovL = $all('.modal-overlay').pop();
+      log(!!ovL && (ovL.querySelector('input.cloud-code') || {}).value === CODE_L && (ovL.querySelector('input.cloud-key') || {}).value === KEY_L && /password/.test(ovL.textContent),
+        'Cloud tab, hosting: Show connection code reveals the code — and the key, for a laptop that picks this host from its list — in the dialog that calls it a password');
+      if (ovL) pressL(ovL, 'Done');
+      await settleL();
+      callsL.length = 0;
+      pressL(hostCard, 'Stop hosting');
+      await settleL();
+      const stopOv = $all('.modal-overlay').pop();
+      const stopTxt = stopOv ? stopOv.textContent : '';
+      if (stopOv) pressL(stopOv, 'Cancel');
+      await settleL();
+      const cancelled = callsL.length === 0;
+      pressL(hostCard, 'Stop hosting');
+      await settleL();
+      const stopOv2 = $all('.modal-overlay').pop();
+      if (stopOv2) pressL(stopOv2, 'Stop hosting');
+      await settleL();
+      log(/keep working on their own/.test(stopTxt) && /catch up/.test(stopTxt) && /carries on where it left off/.test(stopTxt) && cancelled
+        && JSON.stringify(callsL) === JSON.stringify([['hubStop', false]]),
+        'Cloud tab, hosting: Stop hosting says the others carry on and catch up, and that hosting again carries on — asked first, then stopped');
+      pg.remove();
+      hsL = { ...hubRunning, platform: 'darwin', firewallHelper: false };
+      pg = await cloudPage();
+      const macCard = cardL(pg, /This laptop hosts the clinic network/);
+      log(!!macCard && /accept incoming network connections, press Allow/.test(macCard.textContent) && !/Windows Defender/.test(macCard.textContent)
+        && !$all('button', macCard).some((b) => b.textContent.trim() === 'Allow through the firewall'),
+        'Cloud tab, hosting on a Mac: allow incoming connections when macOS asks — no Windows helper');
+      pg.remove();
+
+      // Stopped, with the hub file kept.
+      stL = { ...baseStL }; hsL = { ...hubRunning, running: false };
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const offer3 = cardL(pg, /Host the clinic network on this laptop/);
+      callsL.length = 0;
+      const againShown = !!offer3 && /hosted the clinic network “Lowell clinic network” before/.test(offer3.textContent) && $all('button', offer3).some((b) => b.textContent.trim() === 'Host it again');
+      pressL(offer3, 'Erase the clinic network data');
+      await settleL();
+      const eraseOv = $all('.modal-overlay').pop();
+      const eraseTxt = eraseOv ? eraseOv.textContent : '';
+      if (eraseOv) pressL(eraseOv, 'Erase');
+      await settleL();
+      log(againShown && /This laptop's own records stay/.test(eraseTxt) && /new connection code/.test(eraseTxt) && JSON.stringify(callsL) === JSON.stringify([['hubStop', true]]),
+        'Cloud tab, stopped: hosting again carries on the same clinic network; erasing it is a separate, confirmed choice that keeps every laptop\'s records');
+      pg.remove();
+
+      // Joined to another laptop's clinic network.
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://192.168.1.23:47800', kind: 'lan',
+        lanPin: PIN_L, lanPinShown: lanL.showPin(PIN_L, 4), lanHost: HOST_L, lanName: 'Lowell clinic network', isHost: false };
+      hsL = { ...hubNone };
+      pg = await cloudPage();
+      const joined = cardL(pg, /^Clinic network$/);
+      const connJ = cardL(pg, /Connection/);
+      callsL.length = 0;
+      testFailL = lanL.MESSAGES.blocked('192.168.1.23:47800');
+      pressL(joined, 'Test the clinic network');
+      await settleL();
+      const failTxt = ((joined && joined.querySelector('.lan-test-result')) || {}).textContent || '';
+      testFailL = '';
+      pressL(joined, 'Test the clinic network');
+      await settleL();
+      const okTxt = ((joined && joined.querySelector('.lan-test-result')) || {}).textContent || '';
+      log(!!joined && /Lowell clinic network/.test(joined.textContent) && /192\.168\.1\.23:47800/.test(joined.textContent) && joined.textContent.includes(lanL.showPin(PIN_L, 4))
+        && /firewall is blocking/.test(failTxt) && /working/.test(okTxt)
+        && JSON.stringify(callsL[0]) === JSON.stringify(['test', 'https://192.168.1.23:47800', '', { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' }])
+        && !!connJ && /at 192\.168\.1\.23:47800/.test(connJ.textContent) && $all('button', connJ).some((b) => b.textContent.trim() === 'Disconnect')
+        && !!cardL(pg, /Join a different clinic network/) && !!cardL(pg, /Host the clinic network on this laptop instead/),
+        'Cloud tab, joined: which clinic network and host, its fingerprint, and "Test the clinic network" saying what is wrong in plain words — with the same Connection card');
+      // Moving to the internet from the clinic network asks, naming it.
+      pressL(pg, 'Internet server');
+      await settleL(20);
+      const urlBox = fieldL(pg, /^Server address/);
+      const blankUrl = !!urlBox && urlBox.value === '';
+      callsL.length = 0;
+      setL(urlBox, 'mmw-sync.lowell.workers.dev');
+      setL(fieldL(pg, /^Clinic key/), 'online key 9');
+      pressL(pg, 'Connect');
+      await settleL();
+      const mvOv = $all('.modal-overlay').pop();
+      const mvTxt = mvOv ? mvOv.textContent : '';
+      if (mvOv) pressL(mvOv, $all('button', mvOv).pop().textContent.trim());
+      await settleL();
+      log(blankUrl && /connected to the clinic network “Lowell clinic network”/.test(mvTxt) && /every record on this laptop/.test(mvTxt)
+        && callsL.length === 2 && callsL[1][0] === 'config' && callsL[1][3] === null,
+        'Cloud tab: from the clinic network, connecting an internet server asks first — naming the clinic network — and is then the ordinary move');
+      pg.remove();
+
+      // Connected online, hosting here asks first too.
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://mmw-sync.lowell.workers.dev', kind: 'internet' };
+      hsL = { ...hubNone };
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const noteL = (pg.querySelector('.cloud-choice-note') || {}).textContent || '';
+      callsL.length = 0;
+      const offer4 = cardL(pg, /Host the clinic network on this laptop/);
+      setL(fieldL(offer4, /^Clinic network name/), 'Lowell clinic network');
+      pressL(offer4, 'Host the clinic network');
+      await settleL();
+      const hostOv = $all('.modal-overlay').pop();
+      const hostAsk = hostOv ? hostOv.textContent : '';
+      if (hostOv) pressL(hostOv, $all('button', hostOv).pop().textContent.trim());
+      await settleL();
+      log(/syncs with an internet server now/.test(noteL) && /connected to mmw-sync\.lowell\.workers\.dev/.test(hostAsk) && /Hosting the clinic network “Lowell clinic network” on this laptop/.test(hostAsk)
+        && JSON.stringify(callsL) === JSON.stringify([['hubStart', 'Lowell clinic network', true]]),
+        'Cloud tab: on an internet server, hosting a clinic network here asks first — naming both — and moves this laptop only when confirmed');
+      pg.remove();
+
+      // The sign-in screen's Join a clinic.
+      currentUser = null;
+      const { renderSetup } = await import('../src/renderer/js/views/setup.js');
+      const joinView = async () => { const v = renderSetup(ctxL, { mode: 'join' }); document.body.append(v); await settleL(20); return v; };
+      let jv = await joinView();
+      const listTxt = (jv.querySelector('.lan-found') || {}).textContent || '';
+      const choose = $all('.lan-found button', jv).find((b) => b.textContent.trim() === 'Choose');
+      if (choose) choose.click();
+      const filled = (fieldL(jv, /^Clinic address/) || {}).value;
+      setL(fieldL(jv, /^Clinic key/), KEY_L);
+      pressL(jv, 'Connect and sync');
+      await settleL(20);
+      jv.remove();
+      jv = await joinView();
+      setL(fieldL(jv, /^Clinic address/), '192.168.1.40:47800');
+      setL(fieldL(jv, /^Clinic key/), KEY_L);
+      pressL(jv, 'Connect and sync');
+      await settleL(20);
+      jv.remove();
+      jv = await joinView();
+      setL(fieldL(jv, /^Connection code/), CODE_L);
+      pressL(jv, 'Connect and sync');
+      await settleL(20);
+      jv.remove();
+      log(/Clinic networks on this Wi-Fi/.test(listTxt) && /Lowell clinic network/.test(listTxt) && filled === '192.168.1.23:47800'
+        && JSON.stringify(joinsL) === JSON.stringify([
+          ['192.168.1.23:47800', KEY_L, false, { hostId: HOST_L, fp: PIN_L.slice(0, 16), name: 'Lowell clinic network' }],
+          ['192.168.1.40:47800', KEY_L, false, {}],
+          ['https://192.168.1.23:47800', KEY_L, false, { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' }]]),
+        'Join a clinic (sign-in): it lists the clinic networks heard on this Wi-Fi; a host chosen, an address on this Wi-Fi typed, or a clinic network\'s code each join the clinic network');
+    } finally {
+      currentUser = signedL;
+      $all('.modal-overlay').forEach((o) => o.remove());
+      for (const k of Object.keys(window.api)) if (!(k in savedApiL)) delete window.api[k];
+      Object.assign(window.api, savedApiL);
+    }
   }
 
   await tick();

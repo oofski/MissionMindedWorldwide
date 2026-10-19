@@ -17,6 +17,8 @@ const aftercare = require('./aftercare');
 const updater = require('./updater');
 const autoupdate = require('./autoupdate');
 const cloud = require('./cloud');
+const hub = require('./hub');
+const lan = require('./lan');
 const usb = require('./usb');
 const xrayFolder = require('./xrayFolder');
 const zipStore = require('./zipStore');
@@ -149,6 +151,16 @@ const PERMS = {
   // sign-in screen's, used before anyone has signed in, and checks for itself
   // whether this computer may join without one (see its handler).
   'cloud:connectionCode': ['admin'],
+  // v0.0.17, the clinic network: hosting it on this laptop — starting,
+  // stopping, erasing, the firewall helper, and its status (its addresses,
+  // the laptops connected) — is the administrator's, like connecting a
+  // server. lan:scan is not listed, for the same reason as cloud:join — the
+  // sign-in screen's Join lists the hosts it hears before anyone has signed
+  // in — and its handler applies Join's own rule.
+  'hub:status': ['admin'],
+  'hub:start': ['admin'],
+  'hub:stop': ['admin'],
+  'hub:firewall': ['admin'],
   'patients:arrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'],
   'patients:confirmArrival': ['admin', 'registration', 'emt', 'triage'],
   // update:* and app:version are open to any signed-in user (available in any view).
@@ -262,7 +274,9 @@ function register(getMainWindow) {
   handle('cloud:config', (payload) => cloud.applyConfig(payload || {}));
   // A blank key means "keep the saved one", as the Cloud tab says — but only
   // for the server it was saved for.
-  handle('cloud:test', ({ url, key }) => cloud.testConnection(url, key || cloud.savedKeyFor(url)));
+  // lan: the address is a clinic network host ({ pin, hostId, fp, name } as
+  // far as known) — "Test the clinic network", and the test before joining.
+  handle('cloud:test', ({ url, key, lan: lanT } = {}) => cloud.testConnection(url, key || cloud.savedKeyFor(url, lanT), lanT ? { lan: lanT } : {}));
   handle('cloud:status', () => cloud.status());
   handle('cloud:syncNow', () => cloud.syncOnce());
   handle('cloud:resync', () => cloud.resyncAll());
@@ -308,29 +322,37 @@ function register(getMainWindow) {
   // connected, whose staff could already sign in). It changes nothing either —
   // not even a paused laptop's pause, which is the administrator's — and only
   // waits for a sync and says what is here now.
-  handle('cloud:join', async ({ url, key, move } = {}) => {
+  //
+  // v0.0.17: lan — joining the clinic network: a host picked from the list
+  // found ({ hostId, fp, name }) or from a pasted code ({ pin, hostId, name }).
+  // The same rules, by the host's certificate rather than its address.
+  handle('cloud:join', async ({ url, key, move, lan: lanT } = {}) => {
     if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
     const saved = db.getSyncMeta();
-    const already = saved.configured && !!String(url || '').trim()
-      && cloud.normalizeUrl(url) === cloud.normalizeUrl(saved.url) && String(key || '') === saved.key;
-    if (!currentUser && !already && !db.needsSetup() && !db.defaultAdminActive()) {
+    const pinIn = lanT ? lan.normPin(lanT.pin) : '';
+    const already = saved.configured && !!String(url || '').trim() && String(key || '') === saved.key
+      && (lanT ? !!pinIn && pinIn === saved.lanPin : cloud.normalizeUrl(url) === cloud.normalizeUrl(saved.url) && !saved.lanPin);
+    if (!currentUser && !already && !joinOpen()) {
       throw new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
     }
     if (!String(key || '').trim()) throw new Error('Enter the clinic key as well as the address.');
-    const health = await cloud.testConnection(url, key);
+    const health = await cloud.testConnection(url, key, lanT ? { lan: lanT } : {});
+    const target = lanT ? health.lan : null;
+    const joinUrl = target ? health.url : url;
+    const same = already || (!!target && saved.configured && target.pin === saved.lanPin && String(key) === saved.key);
+    const elsewhere = saved.configured && cloud.identityOf(joinUrl, target && target.pin) !== cloud.identityOf(saved.url, saved.lanPin);
     // A DIFFERENT server, for a laptop already connected — one tried on a
     // trial server, joining the clinic's — moves every record here to it.
     // Admin → Cloud asks first ("Move this laptop to a different server?");
     // Join moved it without a word, a pasted code for another server
     // included. So the first press only answers with the question (moveTo),
     // and the laptop moves on the confirmed one (move).
-    if (!currentUser && !already && !move && saved.configured
-        && cloud.normalizeUrl(url) !== cloud.normalizeUrl(saved.url)) {
-      return { moveTo: new URL(cloud.normalizeUrl(url)).host };
+    if (!currentUser && !same && !move && elsewhere) {
+      return { moveTo: target ? networkLabel(target.name, joinUrl) : new URL(cloud.normalizeUrl(url)).host };
     }
-    if (!already) {
-      cloud.applyConfig({ url, key, online: true });
-      db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));
+    if (!same) {
+      cloud.applyConfig({ url: joinUrl, key, online: true, ...(target ? { lan: target } : {}) });
+      db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + (target ? networkLabel(target.name, joinUrl) : cloud.normalizeUrl(url)));
     }
     const sync = await cloud.syncSettled();
     return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
@@ -350,12 +372,91 @@ function register(getMainWindow) {
     return db.accountsFromServer();
   }
 
+  // Join's rule for a signed-out caller: open while anyone at this keyboard
+  // could become the administrator anyway (see cloud:join).
+  function joinOpen() { return db.needsSetup() || db.defaultAdminActive(); }
+
+  // How a server is named in a question: a clinic network by its name, an
+  // internet server by its address.
+  function networkLabel(name, url) {
+    if (name) return `the clinic network “${name}”`;
+    try { return new URL(url).host; } catch (_) { return String(url || ''); }
+  }
+  const savedLabel = (m) => (m.lanPin ? networkLabel(m.lanName || 'Clinic network', m.url) : (() => { try { return new URL(m.url).host; } catch (_) { return m.url; } })());
+  const appVersion = () => { try { return require('electron').app.getVersion(); } catch (_) { return ''; } };
+
+  /* ---- The clinic network (v0.0.17) ---- */
+  // Which hosts this laptop hears on its Wi-Fi: their names and addresses,
+  // what their beacons say — never a key. For Join (Admin → Cloud, and the
+  // sign-in screen), under Join's rule.
+  handle('lan:scan', async ({ ms } = {}) => {
+    if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
+    if (!currentUser && !joinOpen()) {
+      throw new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
+    }
+    const own = hub.ownHostId();
+    const hosts = await lan.scan({ ms: Math.min(Math.max(Number(ms) || 2500, 500), 6000) });
+    return hosts.map((h) => ({ ...h, self: !!own && h.hostId === own }));
+  });
+
+  handle('hub:status', () => ({ ...hub.status(), platform: process.platform, firewallHelper: process.platform === 'win32' }));
+
+  // Host the clinic network here, and sync this laptop with it like every
+  // other laptop (over 127.0.0.1). A laptop on another server moves to it —
+  // asked first (moveFrom), as Save server and Join ask, and then the
+  // existing move: the cursor starts again and everything here is sent.
+  handle('hub:start', async ({ name, move } = {}) => {
+    const saved = db.getSyncMeta();
+    // Which clinic network this laptop hosts, if it ever has — asked without
+    // making one, so a move that is not confirmed leaves nothing behind.
+    const ownId = hub.ownHostId();
+    const onOwn = saved.configured && !!ownId && saved.lanHost === ownId;
+    if (saved.configured && !onOwn && !move) return { moveFrom: savedLabel(saved) };
+    await hub.start({ name, version: appVersion(), selfDevice: db.ensureDeviceId() });
+    const t = hub.ownTarget();
+    // Already joined to it (hosting again, or after a restart on a new
+    // port): the same server, at whatever port it has now.
+    if (onOwn) cloud.repointLan(t.url, t.lan.pin, t.lan.name);
+    else cloud.applyConfig({ url: t.url, key: t.key, online: true, lan: t.lan });
+    db.audit(currentUser, 'hub.start', 'settings', null, 'Hosting the clinic network ' + t.lan.name);
+    return hub.status();
+  });
+
+  // Stop hosting. The other laptops carry on by themselves and catch up when
+  // a laptop hosts again. This laptop was syncing with its own hub, so it is
+  // disconnected — its records kept, as Disconnect keeps them; hosting again
+  // here reconnects it to the same clinic network. The hub file stays unless
+  // erase is asked for.
+  handle('hub:stop', async ({ erase } = {}) => {
+    const saved = db.getSyncMeta();
+    const ownId = hub.ownHostId();
+    await hub.stop();
+    if (saved.configured && ownId && saved.lanHost === ownId) { db.disconnectCloud(); cloud.applyConfig({}); }
+    if (erase) await hub.erase();
+    db.audit(currentUser, erase ? 'hub.erase' : 'hub.stop', 'settings', null, erase ? 'Clinic network stopped and erased' : 'Clinic network stopped');
+    return hub.status();
+  });
+
+  // Windows only: add the firewall rule Windows' own "blocked some features"
+  // dialog adds when Private networks is ticked, for a host where that
+  // dialog was missed or cancelled — behind Windows' own permission prompt.
+  handle('hub:firewall', async () => {
+    if (process.platform !== 'win32') throw new Error('Only Windows needs this. On a Mac, allow incoming connections when macOS asks.');
+    const r = await hub.allowThroughFirewall(process.execPath);
+    db.audit(currentUser, 'hub.firewall', 'settings', null, 'Allowed through the Windows firewall (Private networks)');
+    return r;
+  });
+
   // Erase every clinic record on this computer and return it to first-run setup.
   // Destructive and irreversible, so the renderer confirms by typed phrase; the
   // audit line is written before the wipe because the log is cleared too.
-  handle('data:reset', () => {
+  handle('data:reset', async () => {
     db.audit(currentUser, 'data.reset', null, null, 'Full reset of this computer');
     cloud.applyConfig({});          // stop syncing before deleting anything
+    // A clinic network hosted here holds a copy of every record the clinic
+    // synced — staff password hashes too — so it goes with the rest.
+    await hub.stop();
+    await hub.erase();
     const r = db.resetClinicData();
     currentUser = null;             // the account that asked no longer exists
     return r;

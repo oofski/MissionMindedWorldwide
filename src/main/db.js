@@ -468,6 +468,8 @@ function resetClinicData() {
                        'cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
                        'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before',
                        'cloud_last_url',
+                       // v0.0.17: the clinic network host this laptop was joined to.
+                       'cloud_lan_pin', 'cloud_lan_host', 'cloud_lan_name', 'cloud_last_pin',
                        'xray_import_dir', 'xray_folder_locked', 'xray_clear_after_import']) {
         db.prepare('DELETE FROM settings WHERE key = ?').run(k);
       }
@@ -3604,8 +3606,10 @@ function listAudit(limit = 200) {
 // beside it. A backup is the clinic's records, as Disconnect leaves them; a
 // laptop put back from one is connected again under Admin → Cloud. The device
 // id goes too, so two laptops can never stamp changes as the same device.
+// The clinic network's host (v0.0.17) is part of that connection too.
 const BACKUP_DROPS = ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending', 'cloud_device_id',
-  'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before', 'cloud_last_url'];
+  'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before', 'cloud_last_url',
+  'cloud_lan_pin', 'cloud_lan_host', 'cloud_lan_name', 'cloud_last_pin'];
 async function backupTo(destPath) {
   // better-sqlite3 online backup -> single consistent .db file
   const r = await db.backup(destPath);
@@ -5076,6 +5080,13 @@ function applyRemoteRows(remoteRows) {
 // Nothing is baked in now: an endpoint exists only if an administrator typed it
 // in, and this function FAILS CLOSED — no URL or no key means no sync, whatever
 // cloud_mode happens to say.
+//
+// v0.0.17: a server can also be the clinic network's host, a laptop on the
+// same Wi-Fi (src/main/hub.js). Its certificate's fingerprint (cloud_lan_pin)
+// is what makes it that server — cloud.js pins every connection to it — with
+// its id (cloud_lan_host, to find it again at a new address) and its name.
+// All three are new keys, empty for an internet server; nothing older changes
+// meaning.
 function getSyncMeta() {
   const url = (getSetting('cloud_url') || '').trim();
   const key = (getSetting('cloud_key') || '').trim();
@@ -5093,10 +5104,14 @@ function getSyncMeta() {
     lastPush: getSetting('cloud_last_push') || '',
     lastOk: getSetting('cloud_last_ok') || '',
     lastError: getSetting('cloud_last_error') || '',
+    lanPin: (getSetting('cloud_lan_pin') || '').trim(),
+    lanHost: (getSetting('cloud_lan_host') || '').trim(),
+    lanName: getSetting('cloud_lan_name') || '',
   };
 }
 function setSyncMeta(patch) {
-  const map = { url: 'cloud_url', key: 'cloud_key', mode: 'cloud_mode', deviceId: 'cloud_device_id', cursor: 'cloud_cursor', lastPush: 'cloud_last_push', lastOk: 'cloud_last_ok', lastError: 'cloud_last_error' };
+  const map = { url: 'cloud_url', key: 'cloud_key', mode: 'cloud_mode', deviceId: 'cloud_device_id', cursor: 'cloud_cursor', lastPush: 'cloud_last_push', lastOk: 'cloud_last_ok', lastError: 'cloud_last_error',
+    lanPin: 'cloud_lan_pin', lanHost: 'cloud_lan_host', lanName: 'cloud_lan_name' };
   for (const [k, v] of Object.entries(patch || {})) {
     // Back-compat: an `enabled` boolean maps onto the online/offline mode.
     if (k === 'enabled') { setSetting('cloud_mode', v ? 'online' : 'offline'); continue; }
@@ -5121,9 +5136,11 @@ function setSyncMeta(patch) {
  */
 function disconnectCloud() {
   // cloud_last_url stays: which server this laptop was last on (see
-  // cloud.applyConfig), the address only, never the key.
+  // cloud.applyConfig), the address only, never the key — and cloud_last_pin
+  // with it, which clinic network host that address was.
   for (const k of ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
-                   'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error']) {
+                   'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error',
+                   'cloud_lan_pin', 'cloud_lan_host', 'cloud_lan_name']) {
     db.prepare('DELETE FROM settings WHERE key = ?').run(k);
   }
   // Written, not deleted: an absent cloud_mode is not treated as offline.

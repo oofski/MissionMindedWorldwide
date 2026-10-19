@@ -5,6 +5,8 @@ const path = require('path');
 const db = require('./db');
 const ipc = require('./ipc');
 const autoupdate = require('./autoupdate');
+const hub = require('./hub');
+const cloud = require('./cloud');
 
 let mainWindow = null;
 
@@ -131,11 +133,26 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Hosting the clinic network survives a restart (v0.0.17): a laptop that was
+// hosting when the app closed — or when the laptop went to sleep, or off —
+// hosts again as it opens. Its port can change if another program took it
+// meanwhile; this laptop's own connection follows it there, and the other
+// laptops find it again by its beacon.
+async function resumeHosting() {
+  try {
+    const st = await hub.resume({ version: app.getVersion(), selfDevice: db.ensureDeviceId() });
+    if (st && st.running) { const t = hub.ownTarget(); cloud.repointLan(t.url, t.lan.pin, t.lan.name); }
+  } catch (_) { /* the Cloud tab says why it is not hosting */ }
+}
+
 app.whenReady().then(() => {
   db.init(app.getPath('userData'));
+  hub.init(app.getPath('userData'));
   ipc.register(() => mainWindow);
   autoupdate.init(() => mainWindow);
-  require('./cloud').start(() => mainWindow);
+  // Sync starts once the host is listening again, so this laptop's first
+  // cycle with its own clinic network does not fail on a server not up yet.
+  resumeHosting().finally(() => cloud.start(() => mainWindow));
   buildMenu();
   createWindow();
 
@@ -152,7 +169,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('quit', () => db.close());
+app.on('quit', () => { hub.shutdown(); db.close(); });
 
 // Single-instance lock — a clinic should run one copy per device.
 const gotLock = app.requestSingleInstanceLock();

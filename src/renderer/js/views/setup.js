@@ -9,12 +9,23 @@
 //   Join  — the clinic already exists on another computer. Point this machine
 //           at the same clinic cloud; the staff accounts sync down and everyone
 //           signs in with the account they already have.
+//
+// v0.0.17: Join also reaches a clinic network (no internet) — a laptop on the
+// same Wi-Fi hosting the clinic's sync server. Its hosts are listed as they
+// are heard, and its connection code carries the host's certificate pin.
 
 import { el, toast, modal, withBusy } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { readConnectionCode } from '../connectionCode.js';
+
+// A private address on this Wi-Fi (10.x, 172.16–31.x, 192.168.x), with or
+// without https:// and a port: a clinic network host, not an internet server.
+function looksLocal(v) {
+  const s = String(v || '').trim().replace(/^https:\/\//i, '').replace(/\/.*$/, '');
+  return /^(10\.\d+|192\.168|172\.(1[6-9]|2\d|3[01]))\.\d+\.\d+(:\d+)?$/.test(s);
+}
 
 export function renderSetup(ctx, params = {}) {
   // Reached two ways now. A machine with no account at all still lands here on
@@ -104,6 +115,11 @@ export function renderSetup(ctx, params = {}) {
   function joinForm() {
     const code = el('input', { class: 'input', placeholder: 'MMW1-…', autocomplete: 'off', spellcheck: 'false', style: 'font-family:var(--font-mono);' });
     const url = el('input', { class: 'input', placeholder: 'https://mmw-sync.<subdomain>.workers.dev' });
+    // A clinic network host chosen from the list heard on this Wi-Fi:
+    // { hostId, fp, name }. Typing over its address forgets it.
+    let lanPick = null;
+    url.addEventListener('input', () => { lanPick = null; });
+    const found = el('div', { class: 'lan-found', style: 'display:none; flex-direction:column; gap:8px; margin:0 0 6px;' });
     const key = el('input', { class: 'input', type: 'password', placeholder: 'Clinic key' });
     const status = el('div', { class: 'update-status', style: 'display:none' });
     const error = el('div', { class: 'login-error', style: 'display:none' });
@@ -120,19 +136,27 @@ export function renderSetup(ctx, params = {}) {
       // replacing whatever was typed below, and a damaged code blocked the
       // typed address and key ("incomplete or damaged") until someone noticed
       // the box and cleared it.
+      // A clinic network's code brings the host's pin; a host chosen from the
+      // list brings its id; an address on this Wi-Fi typed by hand (a private
+      // one, like 192.168.1.23:47800) is a clinic network host too — never an
+      // internet server, which has a name.
+      let lanT = null;
       if (code.value.trim()) {
         let read;
         try { read = readConnectionCode(code.value); } catch (e) { code.value = ''; return fail(e.message); }
         code.value = '';
         url.value = read.url;
         key.value = read.key;
-      }
+        lanT = read.lan || null;
+        lanPick = null;
+      } else if (lanPick) lanT = lanPick;
+      else if (looksLocal(url.value)) lanT = {};
       if (!url.value.trim()) return fail('Enter the clinic address your administrator gave you, or paste a connection code.');
       if (!key.value) return fail('Enter the clinic key as well as the address.');
       try {
         await withBusy(joinBtn, async () => {
-        say('Checking the clinic address, then downloading the clinic…');
-        let r = await api.cloudJoin(url.value.trim(), key.value);
+        say(lanT ? 'Checking the clinic network, then downloading the clinic…' : 'Checking the clinic address, then downloading the clinic…');
+        let r = await api.cloudJoin(url.value.trim(), key.value, false, lanT);
         // Already connected to another server: the question Admin → Cloud
         // asks before a move, asked here too (main moves nothing until then).
         if (r.moveTo) {
@@ -150,7 +174,7 @@ export function renderSetup(ctx, params = {}) {
             confirmText: `Send everything to ${to}`, cancelText: 'Cancel', danger: true,
           });
           if (!ok) { status.style.display = 'none'; return; }
-          r = await api.cloudJoin(url.value.trim(), key.value, true);
+          r = await api.cloudJoin(url.value.trim(), key.value, true, lanT);
         }
 
         // Accounts replicate with everything else, so once the pull lands this
@@ -182,6 +206,30 @@ export function renderSetup(ctx, params = {}) {
     joinBtn.addEventListener('click', join);
     [code, url, key].forEach((inp) => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); }));
     setTimeout(() => code.focus(), 0);
+
+    // The clinic networks this laptop hears on its Wi-Fi, if any: choosing
+    // one fills the address, and the clinic key is typed below. Nothing is
+    // shown when none is heard (an internet clinic sees no change), or when
+    // this computer may not join from here (the handler refuses the scan).
+    api.lanScan().then((list) => {
+      const hosts = (list || []).filter((b) => !b.self);
+      if (!hosts.length) return;
+      found.style.display = 'flex';
+      found.replaceChildren(
+        el('span', { class: 'field-label' }, ['Clinic networks on this Wi-Fi']),
+        ...hosts.map((b) => {
+          const addr = `${b.address}:${b.port}`;
+          return el('div', { class: 'conn-item lan-host', style: 'flex-direction:row; align-items:center; justify-content:space-between;' }, [
+            el('div', { style: 'display:flex; flex-direction:column; gap:2px;' }, [el('strong', {}, [b.name]), el('span', {}, [addr])]),
+            el('button', {
+              class: 'btn btn--ghost btn--sm', type: 'button',
+              onClick: () => { code.value = ''; url.value = addr; lanPick = { hostId: b.hostId, fp: b.fp, name: b.name }; key.focus(); },
+            }, ['Choose']),
+          ]);
+        }),
+        el('span', { class: 'subtle small' }, ['Choose the clinic\'s, then type the clinic key its host laptop shows under Admin → Cloud.']),
+      );
+    }).catch(() => { /* not heard, or not allowed: the form is enough */ });
 
     const backBtn = () => (joinOnly
       ? el('button', { class: 'btn btn--ghost btn--block', onClick: () => ctx.navigate('login') },
@@ -230,7 +278,9 @@ export function renderSetup(ctx, params = {}) {
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Connection code']), code]),
       el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['Your administrator copies it from Admin → Cloud → Show connection code, on a laptop that is already connected.']),
       el('div', { class: 'login-divider' }, [el('span', {}, ['or type the address and key'])]),
+      found,
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic address']), url]),
+      el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['On a clinic network with no internet, it is the host laptop\'s address, like 192.168.1.23:47800.']),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic key']), key]),
       status,
       error,

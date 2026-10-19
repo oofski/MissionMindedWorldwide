@@ -27,6 +27,8 @@ const CHANNELS = [
   'app:openExternal',
   'cloud:config', 'cloud:test', 'cloud:status', 'cloud:syncNow', 'cloud:resync', 'cloud:disconnect',
   'cloud:connectionCode', 'cloud:join',
+  // v0.0.17: the clinic network (no internet).
+  'hub:status', 'hub:start', 'hub:stop', 'hub:firewall', 'lan:scan',
   'data:reset',
 ];
 

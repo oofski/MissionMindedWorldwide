@@ -2,9 +2,19 @@
 // Exercises the Worker's default export against a tiny in-memory fake D1 that
 // implements prepare().bind().run()/.all()/.first() over an array.
 //
+// v0.0.17: then runs every check again over the clinic network's D1 — the
+// better-sqlite3 wrapper a laptop hosting the clinic network serves this same
+// worker.js from (src/main/hub.js) — so the two can never disagree, and checks
+// the hub's HTTPS server itself. That pass needs the app's node_modules (it is
+// skipped, and says so, where only the cloud/ folder exists).
+//
 // Run: node test-worker.mjs   (exits non-zero on any failed check)
 
 import worker from './worker.js';
+import { createRequire } from 'module';
+import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 // The walk-in form's own definition of a complete medical history. The online
 // form must store exactly what it would, so the checks below compare the two.
 import { normalizeMedical, INTAKE_CONDITIONS } from '../src/renderer/js/medicalHistory.js';
@@ -12,14 +22,19 @@ import { normalizeMedical, INTAKE_CONDITIONS } from '../src/renderer/js/medicalH
 const CLINIC_KEY = 'super-secret-clinic-key';
 
 let failures = 0;
+// Which D1 the checks are running over, named in every line of the second pass.
+let passLabel = '';
 function check(name, cond) {
   if (cond) {
-    console.log('PASS: ' + name);
+    console.log('PASS: ' + passLabel + name);
   } else {
-    console.log('FAIL: ' + name);
+    console.log('FAIL: ' + passLabel + name);
     failures++;
   }
 }
+// The worker under test: the imported module for the fake, a fresh copy of
+// the same file for the clinic network pass (see makeD1).
+let activeWorker = worker;
 
 // ---------------------------------------------------------------------------
 // Tiny fake D1 — recognizes exactly the SQL that worker.js issues.
@@ -135,6 +150,34 @@ function makeFakeD1() {
 }
 
 // ---------------------------------------------------------------------------
+// The clinic network's D1: hub.js's wrapper over a real SQLite database.
+// ---------------------------------------------------------------------------
+const requireApp = createRequire(import.meta.url);
+// Skipped only where the app is not there at all (the cloud/ folder copied on
+// its own); in the app, a missing or broken hub is a failure.
+const APP_PATH = new URL('../src/main/db.js', import.meta.url);
+let hubMod = null;
+const D1_MODE = { kind: 'fake' };
+// The same _store / _log the checks read from the fake, read from SQLite.
+async function makeSqliteD1() {
+  const Database = requireApp('better-sqlite3');
+  const sqlite = new Database(':memory:');
+  const d = hubMod.d1(sqlite);
+  const log = [];
+  const DB = {
+    prepare(sql) { log.push(sql); return d.prepare(sql); },
+    get _store() { return new Map(sqlite.prepare('SELECT * FROM sync_rows').all().map((r) => [r.uid, r])); },
+    _log: log,
+  };
+  // Tables made by the worker itself, as on a real host: a fresh copy of the
+  // module, so its "schema ready" flag is not the one an earlier database set.
+  const fresh = await hubMod.loadWorker();
+  await fresh.fetch(new Request('https://sync.example.com/v1/pull?since=&limit=1', { headers: { Authorization: 'Bearer ' + CLINIC_KEY } }), { CLINIC_KEY, DB: d }, {});
+  return DB;
+}
+const makeD1 = () => (D1_MODE.kind === 'sqlite' ? makeSqliteD1() : makeFakeD1());
+
+// ---------------------------------------------------------------------------
 // Helper to invoke the worker like a real HTTP request.
 // ---------------------------------------------------------------------------
 async function call(env, method, path, { auth, body } = {}) {
@@ -146,7 +189,7 @@ async function call(env, method, path, { auth, body } = {}) {
     init.body = JSON.stringify(body);
   }
   const req = new Request('https://sync.example.com' + path, init);
-  const res = await worker.fetch(req, env, {});
+  const res = await activeWorker.fetch(req, env, {});
   let data = null;
   try {
     data = await res.json();
@@ -160,7 +203,7 @@ async function call(env, method, path, { auth, body } = {}) {
 // Tests
 // ---------------------------------------------------------------------------
 async function main() {
-  const env = { CLINIC_KEY, DB: makeFakeD1() };
+  const env = { CLINIC_KEY, DB: await makeD1() };
 
   // --- /health (no auth) ---
   const h = await call(env, 'GET', '/health');
@@ -432,7 +475,7 @@ async function main() {
     services: ['dental'],
   };
   async function getText(path) {
-    const res = await worker.fetch(new Request('https://sync.example.com' + path, { method: 'GET' }), env, {});
+    const res = await activeWorker.fetch(new Request('https://sync.example.com' + path, { method: 'GET' }), env, {});
     return { status: res.status, ctype: res.headers.get('content-type') || '', text: await res.text() };
   }
   const formGet = await getText('/checkin/evt-1');
@@ -727,7 +770,7 @@ async function main() {
   // offline check-in, or anything written by a laptop whose clock ran slow — fell
   // below another laptop's cursor and was skipped forever.
   {
-    const env2 = { CLINIC_KEY, DB: makeFakeD1() };
+    const env2 = { CLINIC_KEY, DB: await makeD1() };
     const T = (min, dev) => new Date(Date.parse('2026-07-30T17:00:00.000Z') + min * 60000).toISOString() + '@' + dev;
     const pushRows = (device, rows) => call(env2, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: device, rows } });
     const pullFrom = (since) => call(env2, 'GET', '/v1/pull?since=' + encodeURIComponent(since) + '&limit=400', { auth: CLINIC_KEY });
@@ -1003,7 +1046,7 @@ async function main() {
   // back over the tombstone, clearing `deleted` and resurrecting the patient on
   // every station — as a shell, because the chart rows stayed deleted.
   {
-    const envD = { CLINIC_KEY, DB: makeFakeD1() };
+    const envD = { CLINIC_KEY, DB: await makeD1() };
     const push = (rows) => call(envD, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: 'd', rows } });
     const pull = () => call(envD, 'GET', '/v1/pull?since=0&limit=100', { auth: CLINIC_KEY });
     const live = (stamp, extra = {}) => ({
@@ -1036,7 +1079,7 @@ async function main() {
   // and the history-review stamp vanished from the cloud copy — and a laptop
   // set up fresh or restored from the cloud never received them.
   {
-    const envM = { CLINIC_KEY, DB: makeFakeD1() };
+    const envM = { CLINIC_KEY, DB: await makeD1() };
     const push = (rows) => call(envM, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: 'd', rows } });
     const stored = (uid) => { const r = envM.DB._store.get(uid); return r ? { ...r, data: JSON.parse(r.data) } : null; };
     const pulled = async (uid) => (await call(envM, 'GET', '/v1/pull?since=0&limit=100', { auth: CLINIC_KEY })).data.rows.find((r) => r.uid === uid);
@@ -1114,7 +1157,7 @@ async function main() {
       body: { device_id: 'd1', rows: [{ entity: 'event', uid: closedUid, event_uid: null,
         updated_at: '2026-08-01T00:00:00.000Z', data: { name: 'Closing Clinic', active: 1 } }] },
     });
-    const openGet = await worker.fetch(new Request('https://sync.example.com/checkin/' + closedUid), env, {});
+    const openGet = await activeWorker.fetch(new Request('https://sync.example.com/checkin/' + closedUid), env, {});
     check('v1.6.6: an open clinic still serves its pre-registration form',
       openPush.data.applied === 1 && openGet.status === 200);
 
@@ -1124,7 +1167,7 @@ async function main() {
       body: { device_id: 'd1', rows: [{ entity: 'event', uid: closedUid, event_uid: null,
         updated_at: '2026-08-02T00:00:00.000Z', data: { name: 'Closing Clinic', active: 0 } }] },
     });
-    const closedGet = await worker.fetch(new Request('https://sync.example.com/checkin/' + closedUid), env, {});
+    const closedGet = await activeWorker.fetch(new Request('https://sync.example.com/checkin/' + closedUid), env, {});
     const closedText = await closedGet.text();
     check('v1.6.6: a finished clinic no longer serves the pre-registration form',
       closedGet.status === 410 && /has closed/i.test(closedText));
@@ -1139,6 +1182,72 @@ async function main() {
       closedPost.status === 410 && closedPost.data.ok === false && /closed/i.test(closedPost.data.error));
   }
 
+}
+
+// ---------------------------------------------------------------------------
+// The clinic network host: this worker.js behind hub.js's HTTPS server.
+// ---------------------------------------------------------------------------
+async function hubChecks() {
+  const lan = requireApp('../src/main/lan.js');
+  const dir = mkdtempSync(join(tmpdir(), 'mmw-hub-test-'));
+  hubMod.init(dir);
+  try {
+    const st = await hubMod.start({ name: 'Test clinic network', port: 0, bindHost: '127.0.0.1', beaconPort: 0, announce: [] });
+    const id = hubMod.identity();
+    const base = 'https://127.0.0.1:' + st.port;
+    const req = (path, opts = {}) => lan.request(base + path, { pin: id.pin, ...opts });
+    const auth = (key) => ({ authorization: 'Bearer ' + key, 'content-type': 'application/json' });
+    const h = await req('/health');
+    const hj = JSON.parse(h.text);
+    check('clinic network hub: /health over HTTPS is this worker.js\'s own answer (service, version, seq)',
+      h.status === 200 && hj.ok === true && hj.service === 'mmw-sync' && hj.version === '1.7.0' && hj.seq === true);
+    check('clinic network hub: the key is one the host made — long, and plain letters, numbers and dashes',
+      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(id.key) && id.key !== CLINIC_KEY);
+    const ev = { entity: 'event', uid: 'evt-hub', event_uid: null, updated_at: '2026-10-01T00:00:00.000Z@h', data: { name: 'Hub Clinic', active: 1 } };
+    const pt = { entity: 'patient', uid: 'pt-hub', event_uid: 'evt-hub', updated_at: '2026-10-01T00:00:01.000Z@h', data: { first_name: 'Rosa', last_name: 'Hub' } };
+    const push = await req('/v1/push', { method: 'POST', headers: auth(id.key), body: JSON.stringify({ device_id: 'hub-test', rows: [ev, pt] }) });
+    const pull = await req('/v1/pull?since=&limit=10', { headers: auth(id.key) });
+    const pj = JSON.parse(pull.text);
+    check('clinic network hub: a push is stored and comes back from a pull, by the delivery counter',
+      push.status === 200 && JSON.parse(push.text).applied === 2 && pull.status === 200
+      && pj.rows.map((r) => r.uid).join() === 'evt-hub,pt-hub' && pj.mode === 'seq' && pj.cursor === '2');
+    const wrong = await req('/v1/pull?since=&limit=10', { headers: auth('not the key') });
+    check('clinic network hub: a wrong key is refused exactly as online (401 unauthorized)', wrong.status === 401 && JSON.parse(wrong.text).error === 'unauthorized');
+    const form = await req('/checkin/evt-hub');
+    check('clinic network hub: the online pre-registration form is not served on the clinic network, for an open event the worker itself would serve',
+      form.status === 404 && /not available on the clinic network/.test(form.text) && !/<form/i.test(form.text));
+    let refused = null;
+    try { await req('/health', { pin: 'ab'.repeat(32) }); } catch (e) { refused = e; }
+    check('clinic network hub: a connection whose certificate is not the pinned one is refused before any request', !!refused && refused.pinMismatch === true);
+    const proof = await lan.learnPin(base, id.key);
+    let badProof = null;
+    try { await lan.learnPin(base, 'WRONG-KEYXX-XXXXX-XXXXX-XXXXX'); } catch (e) { badProof = e; }
+    check('clinic network hub: joining without a code, the host proves it holds the key — and a wrong key gets no pin',
+      proof.pin === id.pin && proof.hostId === id.hostId && !!badProof && badProof.status === 401);
+    await hubMod.stop();
+    await hubMod.erase();
+  } finally {
+    hubMod.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function run() {
+  await main();
+  if (!existsSync(APP_PATH)) {
+    console.log('SKIP: the clinic network checks — this is the cloud/ folder on its own, without the app');
+  } else {
+    try { hubMod = requireApp('../src/main/hub.js'); } catch (e) { hubMod = null; }
+    check('clinic network: the host (src/main/hub.js) loads, with its D1 over better-sqlite3', !!hubMod && typeof hubMod.d1 === 'function' && typeof hubMod.loadWorker === 'function');
+  }
+  if (hubMod) {
+    D1_MODE.kind = 'sqlite';
+    passLabel = '[clinic network D1] ';
+    activeWorker = await hubMod.loadWorker();
+    await main();
+    passLabel = '';
+    await hubChecks();
+  }
   // --- summary ---
   console.log('');
   if (failures) {
@@ -1150,7 +1259,7 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+run().catch((e) => {
   console.error('Test harness crashed:', e);
   process.exit(1);
 });
