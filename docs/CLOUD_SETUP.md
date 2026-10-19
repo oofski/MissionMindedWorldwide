@@ -79,7 +79,10 @@ The clinic key is the one password every laptop uses to talk to this server.
 2. **Add** a variable of type **Secret**:
    - **Name:** `CLINIC_KEY`
    - **Value:** a long passphrase you make up — four or five unrelated words
-     and a number is good. Capitals and spaces count.
+     and a number is good. Capitals and spaces count. Use **plain letters,
+     numbers and spaces only**: a curly quote (’) or a long dash (–), which a
+     phone or Mac puts in by itself, cannot be sent by the app, and it says
+     so.
 3. Save, and **Deploy** if asked. Write the key down somewhere safe.
 
 Without `CLINIC_KEY` the server refuses every laptop — it never runs open.
@@ -162,15 +165,20 @@ out on — brings everything on it into the clinic when it connects:
    event on all of them, like `admin`. If it was renamed, re-dated, given a
    city list or **Set active** on this laptop, this laptop's copy — name,
    dates, city list and Set active together — replaces the clinic's on every
-   laptop. Left untouched here, it changes nothing. So set the clinic's event
-   up on one laptop only, or check it under **Events** once this laptop is
-   connected.
+   laptop. Left untouched here, it changes nothing. Deleted here before this
+   laptop was ever connected, it changes nothing either: the clinic's event
+   arrives when it connects. So set the clinic's event up on one laptop only,
+   or check it under **Events** once this laptop is connected.
 
    The same goes for a laptop that was connected to **another server** first
    — a test server, say. Pointing it at the clinic's server (or connecting it
    again after **Disconnect**) sends everything on it to that server too, and
    brings the clinic's records down. What it had sent to the old server stays
-   on that server.
+   on that server. Deletions it only heard about from the old server are not
+   passed on, and neither is a deletion of the shared `admin` account or of
+   **Mission Minded Clinic** made before the move, so a trial cannot delete
+   the clinic's. On a laptop that is already connected, **Save server** with
+   a different address asks first, naming the new server.
 
 ### On a laptop you can sign in to as an administrator
 1. Sign in as an administrator and open **Cloud** (the Admin part of the
@@ -257,6 +265,7 @@ desk confirms each person's arrival when they walk in.
 | What you see | Why | What to do |
 |---|---|---|
 | "The server answered, but refused the clinic key." | The key typed is not exactly the `CLINIC_KEY` on the server, or the secret was never saved | Retype it — capitals and spaces count. In Cloudflare check **Settings → Variables and Secrets** has `CLINIC_KEY`, and Deploy |
+| "The clinic key has a character this app cannot send…" | The key has a curly quote (’), a long dash (–) or another character a phone or Mac put in by itself, and the app cannot send it | In Cloudflare, change `CLINIC_KEY` to plain letters, numbers and spaces, Deploy, and type the new key on every laptop |
 | "Could not reach mmw-sync…workers.dev. Check this laptop is online…" | No internet, or the address is mistyped | Check the wifi. Open the address with `/health` in this laptop's browser — if that fails too, it is the connection or the address |
 | "…did not answer in time." | Very slow wifi, or a hotspot that wants you to sign in first | Open any website in the browser to clear the hotspot's sign-in page, then try again |
 | "That address did not return a Mission Minded sync server." | The address points somewhere else, or the Worker still has Cloudflare's sample code | Copy the address from the Worker's page again; if `/health` does not show `mmw-sync`, redo Part A step 3 |
@@ -286,6 +295,8 @@ desk confirms each person's arrival when they walk in.
   finished clinics.
 - **Stays on each laptop:** the connection settings themselves (address, key,
   online or paused), the audit log, and the X-ray import folder setting.
+  Backups leave the connection settings out: **Back up database (.db)** and
+  **Export clinic ZIP** hold no server address or clinic key.
 
 **The sync server is a meeting point, not a backup.** A deletion — including
 **Finish clinic** — made on one laptop reaches the server and every other
@@ -304,6 +315,9 @@ laptop. Keep making backups under **Backup & Export**.
   is running, and the link can only add a sign-up to its own clinic event.
 - Showing the connection code is recorded in the audit log of the laptop it
   was shown on.
+- Backups do not contain the clinic key. A database backup, or the ZIP made
+  for a hard drive, is the clinic's records as **Disconnect** leaves them; a
+  laptop put back from one is connected again under **Admin → Cloud**.
 - **Changing the key:** set a new `CLINIC_KEY` in Cloudflare and Deploy. Each
   laptop then stops syncing until an administrator types the new key under
   **Admin → Cloud** and presses **Save server**. Connection codes made before

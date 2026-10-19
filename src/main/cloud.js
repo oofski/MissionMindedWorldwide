@@ -32,7 +32,21 @@ function trimUrl(u) {
   try { return new URL(s).origin; } catch { return s.replace(/\/+$/, ''); }
 }
 
+// The clinic key goes in a request header, and a header can only carry
+// characters up to U+00FF and no line break. A phone or a Mac turns a typed '
+// into ’ and -- into –, and with one of those in the key every request failed
+// on this laptop before anything was sent — reported as "Could not reach
+// <host>. Check this laptop is online", wrong on both counts. Said plainly
+// instead, wherever a key is tested, saved or used.
+function keyProblem(key) {
+  const bad = [...String(key || '')].find((c) => c.codePointAt(0) > 0xff || /[\0\r\n]/.test(c));
+  if (bad === undefined) return '';
+  const shown = bad.codePointAt(0) > 0xff ? ` (“${bad}”)` : '';
+  return `The clinic key has a character this app cannot send${shown}, such as a curly quote or a long dash that a phone or Mac puts in by itself. In Cloudflare, change CLINIC_KEY to plain letters, numbers and spaces, Deploy, then type the new key here.`;
+}
+
 async function httpJson(method, url, key, body) {
+  if (key && keyProblem(key)) throw new Error(keyProblem(key));
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
@@ -102,6 +116,7 @@ async function testConnection(url, key) {
     throw new Error('That does not look like a web address. It should look like https://mmw-sync.<your-subdomain>.workers.dev');
   }
   if (isPlainHttp(base)) throw new Error(PLAIN_HTTP);
+  if (keyProblem(key)) throw new Error(keyProblem(key));
   let health;
   try {
     health = await httpJson('GET', base + '/health', null);
@@ -308,6 +323,7 @@ function applyConfig({ url, key, enabled, mode, online }) {
   if (newServer && !key) {
     throw new Error('Enter the clinic key for this server as well as its address.');
   }
+  if (key && keyProblem(key)) throw new Error(keyProblem(key));
   if (key !== undefined) patch.key = key;
   // Accept mode ('online'|'offline'), an `online` boolean, or legacy `enabled`.
   if (mode !== undefined) patch.mode = mode === 'offline' ? 'offline' : 'online';
@@ -320,8 +336,10 @@ function applyConfig({ url, key, enabled, mode, online }) {
   // already sent to the old one stayed marked as sent, so nothing went to the
   // new one: a laptop moved from a test server to the clinic's exchanged
   // nothing while Join reported success. Everything here goes, each row with
-  // its own stamp, and everything there comes back.
-  if (newServer) { db.resetSyncCursor(); db.markAllUnsent(); }
+  // its own stamp, and everything there comes back — but not the deletions
+  // this laptop only heard from the old server (see db.markAllUnsent). The
+  // accounts here now are noted, so Join can tell which came from the server.
+  if (newServer) { db.resetSyncCursor(); db.markAllUnsent(); db.noteAccountsHere(); }
   db.setSyncMeta(patch);
   restartTimer();
   return status();

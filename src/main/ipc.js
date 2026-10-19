@@ -326,17 +326,18 @@ function register(getMainWindow) {
     return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
   });
 
-  // How many accounts someone could sign in with here, besides the shipped
+  // How many accounts the clinic's server brought here, besides the shipped
   // admin / admin — Join's answer to "did the clinic arrive?". needsSetup()
   // cannot answer it: every install comes with admin / admin, so it is false
   // on a new laptop whether or not anything came down, and Join reported
   // "Clinic downloaded" off an empty server. A count of what the last sync
   // applied cannot either: the timer's own cycle, started by saving the
-  // server, usually takes everything before syncSettled() runs its one.
+  // server, usually takes everything before syncSettled() runs its one. Nor
+  // can a count of every account here: a used laptop's own staff accounts are
+  // not the clinic arriving. So only accounts that came from the server count
+  // (db.accountsFromServer).
   function ownAccounts() {
-    const shipped = db.defaultAdminActive();
-    return db.listUsers().filter((u) => u.active
-      && !(shipped && u.role === 'admin' && u.username === db.DEFAULT_ADMIN_USERNAME)).length;
+    return db.accountsFromServer();
   }
 
   // Erase every clinic record on this computer and return it to first-run setup.

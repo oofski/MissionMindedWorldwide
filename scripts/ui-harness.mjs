@@ -3697,8 +3697,10 @@ try{
      signIns:h.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='login' AND user_name='Anna Reed' AND user_id IS NULL").get().n,
      tomb:h.prepare('SELECT updated_at, carried_out FROM tombstones WHERE uid=?').get(fUid.anna.uid)};
    out.fNew.newest=!!out.fNew.tomb&&String(out.fNew.tomb.updated_at)===String(fDel.rows.find((r)=>r.uid===fUid.anna.uid).updated_at);h.close();}
-  // Moved to a new server, this laptop sends every deletion it holds again:
-  // each as it came.
+  // Moved to a new server, this laptop passes on only deletions it made
+  // itself (see markAllUnsent). These three it only received from the old
+  // server, so none goes to the new one: a trial server's deletions must not
+  // delete the clinic's real records.
   db.markAllUnsent();
   {const s=db.collectSyncRows(5000);const d=(n)=>{const r=s.rows.find((x)=>x.uid===fUid[n].uid&&x.deleted);return r?JSON.stringify(r.data):null;};
    out.fRelay={anna:d('anna'),cara:d('cara'),ben:d('ben')};}
@@ -3771,8 +3773,8 @@ process.stdout.write('@@S@@'+JSON.stringify(out));
     log(S.fWire === '{"carried_out":1}' && !!S.fNew && S.fNew.deleted === 1 && S.fNew.deferred === 0 && S.fNew.anna === false && S.fNew.signIns >= 1
       && S.fNew.newest === true && !!S.fNew.tomb && S.fNew.tomb.carried_out === 1,
       'an administrator deleted on an updated laptop: the deletion says it was carried out there, and the other laptop carries it out — where she has signed in, the old deletion held back beside it — her sign-ins kept under her name' + (S.fNew ? ' — ' + JSON.stringify(S.fNew) : ''));
-    log(!!S.fRelay && S.fRelay.anna === '{"carried_out":1}' && S.fRelay.cara === '{}' && S.fRelay.ben === '{}',
-      'after a change of server a laptop sends the deletions it received on as they came: the updated laptop\'s still says it was carried out, the older version\'s still does not' + (S.fRelay ? ' — ' + JSON.stringify(S.fRelay) : ''));
+    log(!!S.fRelay && S.fRelay.anna === null && S.fRelay.cara === null && S.fRelay.ben === null,
+      'after a change of server a laptop does not pass on account deletions it only received from the old server — marked carried out or not' + (S.fRelay ? ' — ' + JSON.stringify(S.fRelay) : ''));
 
     /* ---- the real handlers: a session whose account went elsewhere, and
        the upgrade of two laptops with such a deletion on their server ---- */
@@ -5620,6 +5622,343 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
     log(P.dConnect === true && !!P.lastAdminD && P.lastAdminD.own === true && P.lastAdminD.clinic === false
       && !!P.lastAdminA && P.lastAdminA.d === true && P.lastAdminA.own === false && P.lastAdminA.dPatient === true,
       'cloud (real IPC): what the guide warns of is so — a laptop used on its own first brings its test patient to the clinic, and its admin password replaces the clinic\'s on every laptop');
+  }
+
+  /* ===== v0.0.16 fix pass — moving a laptop, the shipped event, backups, keys =
+     A second review of connecting to the cloud. Each of these was probed on the
+     real handlers: a trial server's deletions of the shared event and admin
+     reached the clinic's server when a laptop that had heard them moved there
+     (and every laptop that joined afterwards then had no patients and no staff
+     of the clinic's event); deleting the shipped placeholder on a laptop not
+     yet connected did the same the moment it connected; Join said "Clinic
+     downloaded" for a used laptop's own accounts; every backup carried the
+     clinic key; a key with a curly quote read as "Could not reach … check this
+     laptop is online"; and Save server moved a connected laptop's records to
+     another server without asking. Real ipc.js, db.js and Worker, in a
+     separate process; the Cloud tab on screen. */
+  {
+    currentUser = signInAdmin();
+    const readSrcV = (rel) => { try { return fs.readFileSync(new URL(rel, import.meta.url), 'utf8'); } catch (_) { return ''; } };
+    const settleV = async (n = 10) => { for (let i = 0; i < n; i++) await tick(); };
+
+    /* ---- the guide ---- */
+    const docsV = readSrcV('../docs/CLOUD_SETUP.md').replace(/\s+/g, ' ');
+    const step5V = docsV.slice(docsV.indexOf('### 5. Set the clinic key'), docsV.indexOf('### 6.'));
+    log(/plain letters, numbers and spaces only/.test(step5V) && /curly quote/.test(step5V),
+      'cloud guide: Part A step 5 says to make the clinic key of plain letters, numbers and spaces — a curly quote or long dash cannot be sent');
+    const partBV = docsV.slice(docsV.indexOf('## Part B'), docsV.indexOf('## Part C'));
+    log(/Deletions it only heard about from the old server are not passed on/.test(partBV)
+      && /Deleted here before this laptop was ever connected, it changes nothing either/.test(partBV)
+      && /\*\*Save server\*\* with a different address asks first/.test(partBV),
+      'cloud guide: Part B says a move passes on no deletion heard from the old server (nor of the shared admin or event), deleting the shipped event before connecting changes nothing, and Save server asks before moving');
+    const securityV = docsV.slice(docsV.indexOf('## Security'), docsV.indexOf('## Cost'));
+    log(/Backups do not contain the clinic key/.test(securityV),
+      'cloud guide: Security says backups do not contain the clinic key');
+
+    /* ---- the real handlers ---- */
+    const probeV = `
+const os=require('os'),fs=require('fs'),path=require('path'),{pathToFileURL}=require('url');
+const [dbPath,ipcPath,cloudPath,workerPath]=process.argv.slice(2);
+const handlers={};
+const ep=require.resolve('electron');
+require.cache[ep]={id:ep,filename:ep,loaded:true,exports:{ipcMain:{handle:(c,f)=>{handlers[c]=f;}},dialog:{},shell:{openExternal(){}},
+  app:{getPath:()=>os.tmpdir(),getVersion:()=>'0.0.0',isPackaged:false,on(){}},BrowserWindow:class{}}};
+const done=(o)=>process.stdout.write('\\n@@V@@'+JSON.stringify(o),()=>process.exit(0));
+(async()=>{
+  const out={};
+  const worker=(await import(pathToFileURL(workerPath).href)).default;
+  const mkDB=()=>{const rows=new Map();let seq=0;
+  return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+      if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
+      if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
+    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+      return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
+  const CURLY='it\\u2019s our clinic';
+  const SERVERS={};
+  for(const [h,k] of [['clinic','clinic key 1'],['trial','trial key 1'],['tidy1','k'],['tidy2','k'],['tidy3','k'],['empty','e key'],['legacy','l key'],['backup','second secret key'],['curly',CURLY]])
+    SERVERS[h+'.mmw.workers.dev']={CLINIC_KEY:k,DB:mkDB()};
+  globalThis.fetch=async(url,init)=>{const u=new URL(url);const env=SERVERS[u.host];if(!env)throw new TypeError('fetch failed');return worker.fetch(new Request(url,init),env,{});};
+  const db=require(dbPath),cloud=require(cloudPath),ipc=require(ipcPath);
+  ipc.register(()=>null);
+  const call=(ch,p)=>handlers[ch]({},p);
+  const err=(r)=>(r&&r.ok===false?r.error:'');
+  const settle=async()=>{cloud.stop();await cloud.syncSettled();};
+  const sleep=(ms)=>new Promise((r)=>setTimeout(r,ms));
+  const Sqlite=require('better-sqlite3');
+  const EV='00000000-0000-4000-8000-000000000001',AD='00000000-0000-4000-8000-000000000002';
+  const url=(h)=>'https://'+h+'.mmw.workers.dev';
+  const on=(h,uid)=>{const r=SERVERS[h+'.mmw.workers.dev'].DB.rows.get(uid);return r?r.deleted:null;};
+  const dirs=[];const mk=(n)=>{const d=fs.mkdtempSync(path.join(os.tmpdir(),'mmwfix'+n+'-'));dirs.push(d);return d;};
+  const clinicHere=()=>({patient:db.listPatients({eventId:'all'}).some((p)=>p.last_name==='Patient'),
+    ana:!!db.login('ana.reyes','ana-pass-1'),admin:!!db.login('admin','clinic-admin-pw')});
+  const moveTo=async(h,key)=>(await call('cloud:test',{url:url(h),key})).ok===true&&(await call('cloud:config',{url:url(h),key,online:true})).ok===true;
+  // Each part on its own, so one that breaks (as they did before the fix) is
+  // reported and the others still run.
+  const section=async(name,fn)=>{try{await fn();}catch(e){out['crash_'+name]=String((e&&e.stack)||e).slice(0,300);}
+    finally{try{cloud.stop();}catch(_){}try{db.close();}catch(_){}}};
+
+  /* 1. A trial server's deletions, carried to the clinic's by a laptop that moves. */
+  await section('move',async()=>{
+  // A: the clinic's first laptop. Names the shipped event, a patient, Ana, its own admin password.
+  const dA=mk('A');db.init(dA);
+  await call('auth:login',{username:'admin',password:'admin'});
+  let u=ipc.getCurrentUser();
+  {const ev=db.getActiveEvent();db.updateEvent(u,ev.id,{name:'Lowell Nov 2026',location:'Lowell, OR',cities:['Lowell']});db.setActiveEvent(u,ev.id);}
+  db.createPatient(u,{first_name:'Real',last_name:'Patient'});
+  db.createUser(u,{username:'ana.reyes',full_name:'Ana Reyes',role:'registration',password:'ana-pass-1'});
+  db.updateUser(u,u.id,{password:'clinic-admin-pw'});
+  await call('cloud:config',{url:url('clinic'),key:'clinic key 1',online:true});await settle();
+  await call('auth:logout');cloud.stop();db.close();
+  await sleep(15);
+  // Q: the trial laptop, on the trial server. Its director makes his own admin and
+  // event, then deletes the shipped event, the shipped admin and a test patient there.
+  const dQ=mk('Q');db.init(dQ);
+  await call('auth:login',{username:'admin',password:'admin'});
+  await call('cloud:config',{url:url('trial'),key:'trial key 1',online:true});await settle();
+  u=ipc.getCurrentUser();
+  db.createUser(u,{username:'trinh',full_name:'Dr Trinh',role:'admin',password:'trinh-pass-1'});
+  await call('auth:login',{username:'trinh',password:'trinh-pass-1'});u=ipc.getCurrentUser();
+  {const te=db.createEvent(u,{name:'Trial event'});db.setActiveEvent(u,te.id);}
+  const gone=db.createPatient(u,{first_name:'Trial',last_name:'Gone'});
+  await settle();
+  const goneUid=db.getPatient(gone.id).uid;
+  db.deletePatient(u,gone.id);
+  db.deleteEvent(u,db.listEvents().find((e)=>e.uid===EV).id,{force:true});
+  db.deleteUser(u,db.listUsers().find((x)=>x.username==='admin').id);
+  await settle();
+  out.trialHolds={ev:on('trial',EV),ad:on('trial',AD),gone:on('trial',goneUid)};
+  await call('auth:logout');cloud.stop();db.close();
+  // P: a second trial laptop, which hears those deletions, then is moved to the clinic's server.
+  const dP=mk('P');db.init(dP);
+  await call('cloud:join',{url:url('trial'),key:'trial key 1'});await settle();
+  {const h=new Sqlite(path.join(dP,'mission-minded.db'),{readonly:true});
+   out.pHeard=h.prepare('SELECT synced_rev FROM tombstones WHERE uid IN (?,?,?)').all(EV,AD,goneUid).map((t)=>t.synced_rev);h.close();}
+  await call('auth:login',{username:'trinh',password:'trinh-pass-1'});
+  out.pMoved=await moveTo('clinic','clinic key 1');
+  await settle();await settle();
+  out.pGot=clinicHere();
+  out.clinicAfterP={ev:on('clinic',EV),ad:on('clinic',AD),gone:on('clinic',goneUid)};
+  await call('auth:logout');cloud.stop();db.close();
+  // Q itself moves too: its own deletions go, but never the shared event's or admin's.
+  db.init(dQ);
+  await call('auth:login',{username:'trinh',password:'trinh-pass-1'});
+  out.qMoved=await moveTo('clinic','clinic key 1');
+  await settle();await settle();
+  out.qGot=clinicHere();
+  out.clinicAfterQ={ev:on('clinic',EV),ad:on('clinic',AD),gone:on('clinic',goneUid)};
+  await call('auth:logout');cloud.stop();db.close();
+  // N: a new clinic laptop joins afterwards.
+  const dN=mk('N');db.init(dN);
+  {const j=await call('cloud:join',{url:url('clinic'),key:'clinic key 1'});await settle();await settle();
+   out.nGot={...clinicHere(),accounts:j.ok?j.data.accounts:-1,lowell:db.listEvents().some((e)=>e.name==='Lowell Nov 2026')};}
+  cloud.stop();db.close();
+  db.init(dA);await settle();
+  out.aAfter={lowell:db.listEvents().some((e)=>e.name==='Lowell Nov 2026'),...clinicHere(),pending:db.getSyncPending().length};
+  cloud.stop();db.close();
+  });
+
+  /* 2. The shipped placeholder, deleted on a laptop not yet connected — or with
+     the server saved but sync paused, so nothing was ever exchanged. */
+  const tidy=async(h,{renameFirst,deleteFirst,savedPaused})=>{
+    const r={};const dL=mk('L'+h),dC=mk('C'+h);
+    const lTidies=async()=>{db.init(dL);await call('auth:login',{username:'admin',password:'admin'});const lu=ipc.getCurrentUser();
+      if(savedPaused)await call('cloud:config',{url:url(h),key:'k',online:false});
+      const e=db.createEvent(lu,{name:'Our clinic'});db.setActiveEvent(lu,e.id);
+      db.deleteEvent(lu,db.listEvents().find((x)=>x.uid===EV).id);
+      await call('auth:logout');db.close();await sleep(15);};
+    if(deleteFirst)await lTidies();
+    db.init(dC);await call('auth:login',{username:'admin',password:'admin'});const cu=ipc.getCurrentUser();
+    if(renameFirst){const ev=db.getActiveEvent();db.updateEvent(cu,ev.id,{name:'Lowell Nov 2026',cities:['Lowell']});}
+    db.createPatient(cu,{first_name:'Real',last_name:'Patient'});
+    db.createUser(cu,{username:'ana.reyes',full_name:'Ana Reyes',role:'registration',password:'ana-pass-1'});
+    await call('cloud:config',{url:url(h),key:'k',online:true});await settle();
+    await call('auth:logout');cloud.stop();db.close();await sleep(15);
+    if(!deleteFirst)await lTidies();
+    db.init(dL);
+    if(savedPaused){await call('auth:login',{username:'admin',password:'admin'});await call('cloud:config',{online:true});await call('auth:logout');}
+    else await call('cloud:join',{url:url(h),key:'k'});
+    await settle();await settle();
+    r.lGot=clinicHere().patient;cloud.stop();db.close();
+    r.server=on(h,EV);
+    const dJ=mk('J'+h);db.init(dJ);await call('cloud:join',{url:url(h),key:'k'});await settle();await settle();
+    r.newLaptop={patient:clinicHere().patient,ana:clinicHere().ana};
+    // A laptop that HAS the clinic's event deletes it: that is deleting the clinic's event.
+    await call('auth:login',{username:'admin',password:'admin'});
+    {const ju=ipc.getCurrentUser();const e=db.createEvent(ju,{name:'Next clinic'});db.setActiveEvent(ju,e.id);
+     const shared=db.listEvents().find((x)=>x.uid===EV);if(shared)db.deleteEvent(ju,shared.id,{force:true});}
+    await settle();r.deliberate=on(h,EV);
+    await call('auth:logout');cloud.stop();db.close();
+    return r;};
+  await section('tidy1',async()=>{out.tidyAfterRename=await tidy('tidy1',{renameFirst:true,deleteFirst:false});});
+  await section('tidy2',async()=>{out.tidyBeforeSetup=await tidy('tidy2',{renameFirst:false,deleteFirst:true});});
+  await section('tidy3',async()=>{out.tidyPaused=await tidy('tidy3',{renameFirst:false,deleteFirst:false,savedPaused:true});});
+
+  /* 3. A deletion heard from the server before v0.0.16 was marked like the laptop's own. */
+    await section('legacy',async()=>{const dR=mk('R');db.init(dR);db.setSetting('cloud_device_id','devR');db.close();
+   const h=new Sqlite(path.join(dR,'mission-minded.db'));
+   const t=h.prepare("INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at) VALUES (?,?,?,?,'sent',?)");
+   t.run('uid-own-r','patient',EV,'2026-01-02T00:00:00.000Z@devR','2026-01-02');
+   t.run('uid-heard-r','patient',EV,'2026-01-02T00:00:00.000Z@devX','2026-01-02');
+   h.prepare("DELETE FROM settings WHERE key = 'tombstones_received_v1'").run();h.close();
+   db.init(dR);
+   const h2=new Sqlite(path.join(dR,'mission-minded.db'),{readonly:true});
+   out.legacyMarks=Object.fromEntries(h2.prepare("SELECT uid, synced_rev FROM tombstones WHERE uid LIKE 'uid-%'").all().map((x)=>[x.uid,x.synced_rev]));h2.close();
+   await call('auth:login',{username:'admin',password:'admin'});
+   await moveTo('legacy','l key');await settle();
+   out.legacyServer={own:on('legacy','uid-own-r'),heard:on('legacy','uid-heard-r')};
+   await call('auth:logout');cloud.stop();db.close();});
+
+  /* 4. Join on a used laptop, against a server nobody has sent anything to. */
+    await section('used',async()=>{const dU=mk('U');db.init(dU);
+   await call('auth:login',{username:'admin',password:'admin'});
+   db.createUser(ipc.getCurrentUser(),{username:'local.nurse',full_name:'Local Nurse',role:'triage',password:'nurse-pass-1'});
+   await call('auth:logout');
+   const j=await call('cloud:join',{url:url('empty'),key:'e key'});
+   out.usedJoin=j.ok?{accounts:j.data.accounts,needsSetup:j.data.needsSetup}:{error:j.error};
+   cloud.stop();db.close();
+   // The clinic's first laptop connects only now; the used laptop picks its account up.
+   const dE=mk('E');db.init(dE);
+   await call('auth:login',{username:'admin',password:'admin'});
+   db.createUser(ipc.getCurrentUser(),{username:'eva.ruiz',full_name:'Eva Ruiz',role:'triage',password:'eva-pass-1'});
+   await call('cloud:config',{url:url('empty'),key:'e key',online:true});await settle();
+   await call('auth:logout');cloud.stop();db.close();
+   db.init(dU);await settle();
+   const j2=await call('cloud:join',{url:url('empty'),key:'e key'});
+   out.usedJoinAgain=j2.ok?{accounts:j2.data.accounts,eva:!!db.login('eva.ruiz','eva-pass-1')}:{error:j2.error};
+   cloud.stop();db.close();});
+
+  /* 5. The clinic key in a backup. */
+    await section('backup',async()=>{const dB=mk('B');db.init(dB);
+   await call('auth:login',{username:'admin',password:'admin'});
+   await call('cloud:config',{url:url('backup'),key:'first secret key',online:true});await settle();
+   await call('cloud:config',{url:url('backup'),key:'second secret key',online:true});await settle();
+   db.createPatient(ipc.getCurrentUser(),{first_name:'Backed',last_name:'Up'});await settle();
+   const file=path.join(mk('bk'),'backup.db');
+   await db.backupTo(file);
+   const bytes=fs.readFileSync(file).toString('latin1');
+   const h=new Sqlite(file,{readonly:true});
+   const st=Object.fromEntries(h.prepare('SELECT key, value FROM settings').all().map((s)=>[s.key,s.value]));
+   out.backup={keyBytes:bytes.includes('first secret key')||bytes.includes('second secret key'),
+     cloud:['cloud_url','cloud_key','cloud_device_id','cloud_cursor','cloud_pending','cloud_last_push','cloud_last_ok','cloud_last_error'].filter((k)=>k in st),
+     mode:st.cloud_mode,patients:h.prepare('SELECT COUNT(*) AS n FROM patients').get().n,
+     sidecar:fs.existsSync(file+'-wal'),liveStill:db.getSyncMeta().key==='second secret key'&&db.getSyncMeta().configured};
+   h.close();
+   await call('auth:logout');cloud.stop();db.close();});
+
+  /* 6. A clinic key with a curly apostrophe, as a phone or a Mac types it. */
+    await section('curly',async()=>{const dK=mk('K');db.init(dK);
+   out.curlyJoin=err(await call('cloud:join',{url:url('curly'),key:CURLY}));
+   await call('auth:login',{username:'admin',password:'admin'});
+   out.curlyTest=err(await call('cloud:test',{url:url('curly'),key:CURLY}));
+   out.curlySave=err(await call('cloud:config',{url:url('curly'),key:CURLY,online:true}));
+   out.curlyNotSaved=!db.getSyncMeta().configured;
+   await call('auth:logout');cloud.stop();db.close();});
+
+  for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
+  done(out);
+})().catch((e)=>done({crash:String((e&&e.stack)||e)}));
+`;
+    const { execFileSync: execV } = await import('node:child_process');
+    const pathOfV = (rel) => fileURLToPathSev(new URL(rel, import.meta.url));
+    const probeFileV = path.join(pathOfV('.'), '.cloud-fix-probe.cjs');
+    let V;
+    try {
+      fs.writeFileSync(probeFileV, probeV);
+      const outV = execV(process.execPath, [probeFileV, pathOfV('../src/main/db.js'), pathOfV('../src/main/ipc.js'), pathOfV('../src/main/cloud.js'),
+        pathOfV('../cloud/worker.js')], { encoding: 'utf8', timeout: 240000, stdio: ['ignore', 'pipe', 'pipe'] });
+      V = JSON.parse(outV.slice(outV.lastIndexOf('@@V@@') + 5));
+    } catch (e) {
+      V = { crash: String((e && e.message) || e) + (e && e.stderr ? ' ' + String(e.stderr).slice(-300) : '') };
+    } finally {
+      fs.rmSync(probeFileV, { force: true });
+    }
+    const brokeV = Object.keys(V).filter((k) => /^crash_/.test(k)).map((k) => k.slice(6) + ': ' + V[k]);
+    log(!V.crash && !brokeV.length, 'cloud fix pass: the probe runs against the real ipc.js, db.js and Worker'
+      + (V.crash ? ' — ' + V.crash.slice(0, 400) : '') + (brokeV.length ? ' — broke in ' + brokeV.join(' | ').slice(0, 600) : ''));
+    const heldV = (o) => !!o && o.ev === 1 && o.ad === 1 && o.gone === 1;
+    log(heldV(V.trialHolds) && Array.isArray(V.pHeard) && V.pHeard.length === 3 && V.pHeard.every((m) => m === 'received'),
+      'cloud: a deletion heard from the server is marked as heard, not as this laptop\'s own (the trial server holds three, the laptop that joined it heard all three)');
+    log(V.pMoved === true && !!V.clinicAfterP && V.clinicAfterP.ev === 0 && V.clinicAfterP.ad === 0 && V.clinicAfterP.gone === null,
+      'cloud: a laptop moved from a trial server to the clinic\'s passes on none of the trial\'s deletions — the clinic\'s event and admin stay, and a trial patient\'s deletion is not sent');
+    log(V.qMoved === true && !!V.clinicAfterQ && V.clinicAfterQ.ev === 0 && V.clinicAfterQ.ad === 0 && V.clinicAfterQ.gone === 1,
+      'cloud: the trial laptop that made those deletions moves too — its own deletion of a patient goes to the clinic\'s server, its deletion of the shared event and admin does not');
+    const allClinicV = (o) => !!o && o.patient === true && o.ana === true && o.admin === true;
+    log(allClinicV(V.pGot) && allClinicV(V.qGot) && allClinicV(V.nGot) && V.nGot.lowell === true && V.nGot.accounts > 0,
+      'cloud: after both moves, each moved laptop and a laptop joining afterwards get the clinic\'s event, its patient, its event staff (Ana) and its administrator');
+    log(!!V.aAfter && V.aAfter.lowell === true && V.aAfter.patient === true && V.aAfter.pending === 0,
+      'cloud: the clinic\'s first laptop keeps its event and patient, with no deletion of them left waiting');
+    const tidyV = (o) => !!o && o.server === 0 && o.lGot === true && !!o.newLaptop && o.newLaptop.patient === true && o.newLaptop.ana === true;
+    log(tidyV(V.tidyAfterRename) && tidyV(V.tidyBeforeSetup),
+      'cloud: deleting the shipped placeholder on a laptop not yet connected deletes nothing on the server — after the clinic named its event, or before the clinic was set up — and the clinic\'s event, patient and staff arrive when it connects');
+    log(tidyV(V.tidyPaused),
+      'cloud: nor does deleting it on a laptop with the server saved but sync paused, before anything was exchanged — resumed, it gets the clinic\'s event instead');
+    log([V.tidyAfterRename, V.tidyBeforeSetup, V.tidyPaused].every((o) => !!o && o.deliberate === 1),
+      'cloud: deleting that event on a laptop that has it from the server still deletes it everywhere');
+    log(!!V.legacyMarks && V.legacyMarks['uid-own-r'] === 'sent' && V.legacyMarks['uid-heard-r'] === 'received'
+      && !!V.legacyServer && V.legacyServer.own === 1 && V.legacyServer.heard === null,
+      'cloud: on an older install, a deletion stamped by this laptop counts as its own and goes to a new server; one stamped by another laptop counts as heard, and does not');
+    log(!!V.usedJoin && V.usedJoin.accounts === 0 && V.usedJoin.needsSetup === false
+      && !!V.usedJoinAgain && V.usedJoinAgain.eva === true && V.usedJoinAgain.accounts === 1,
+      `Join a clinic (real IPC): a used laptop's own staff account is not the clinic arriving — 0 accounts off an empty server, then ${V.usedJoinAgain && V.usedJoinAgain.accounts} once the clinic's first laptop sends one`);
+    log(!!V.backup && V.backup.keyBytes === false && V.backup.cloud.length === 0 && V.backup.mode === 'offline' && V.backup.patients === 1
+      && V.backup.sidecar === false && V.backup.liveStill === true,
+      `backup: the database backup holds the clinic's records but no server address, clinic key (current or earlier) or device id — one file, as Disconnect leaves it — and this laptop stays connected${V.backup && V.backup.cloud && V.backup.cloud.length ? ' — left in: ' + V.backup.cloud.join(', ') : ''}`);
+    const curlyV = (s) => /character this app cannot send/.test(s || '') && /plain letters, numbers and spaces/.test(s || '') && !/Could not reach/.test(s || '');
+    log(curlyV(V.curlyTest) && curlyV(V.curlySave) && curlyV(V.curlyJoin) && V.curlyNotSaved === true,
+      'cloud (real IPC): a clinic key with a curly apostrophe is refused by the test, by saving and by Join as a character that cannot be sent — not "Could not reach … check this laptop is online"');
+
+    /* ---- Save server, on a laptop already connected ---- */
+    const savedApiV = { ...window.api };
+    const callsV = [];
+    const FROM_V = 'https://clinic-x.mmw.workers.dev';
+    const stV = { enabled: true, mode: 'online', online: true, url: FROM_V, hasKey: true, configured: true, deviceId: 'dev-v', cursor: '',
+      lastOk: '', lastPush: '', lastError: '', running: false, pushed: 0, pulled: 0, applied: 0 };
+    window.api.cloudStatus = okWrap(() => ({ ...stV }), 'cloudStatus');
+    window.api.cloudTest = okWrap(({ url, key } = {}) => { callsV.push(['test', url, key]); return { ok: true, service: 'mmw-sync', version: 'x' }; }, 'cloudTest');
+    window.api.cloudConfig = okWrap((cfg = {}) => { callsV.push(['config', cfg.url, cfg.key]); return { ...stV }; }, 'cloudConfig');
+    try {
+      const storeV = (await import('../src/renderer/js/store.js')).store;
+      storeV.setUser(currentUser);
+      const ctxV = { navigate: () => {}, toast: () => {}, store: storeV, setDetail: () => {} };
+      const { renderAdmin } = await import('../src/renderer/js/views/admin.js');
+      const fieldV = (root, re) => { const l = $all('label.field', root).find((x) => re.test(((x.querySelector('.field-label') || {}).textContent || '').trim())); return l ? l.querySelector('input') : null; };
+      const pressV = (root, label) => { const b = $all('button', root).find((x) => x.textContent.trim() === label); if (b) b.click(); return !!b; };
+      const tryServer = async (address, key, answer) => {
+        $all('.modal-overlay').forEach((o) => o.remove());
+        const root = renderAdmin(ctxV, { section: 'cloud' }); document.body.append(root);
+        await settleV();
+        callsV.length = 0;
+        setInput(fieldV(root, /^Server address/), address);
+        setInput(fieldV(root, /^Clinic key/), key);
+        pressV(root, 'Save server');
+        await settleV();
+        const ov = $all('.modal-overlay').pop();
+        const asked = ov ? ov.textContent : '';
+        const configuredBefore = callsV.some((c) => c[0] === 'config');
+        if (ov) pressV(ov, answer === 'yes' ? $all('button', ov).pop().textContent.trim() : 'Cancel');
+        await settleV();
+        const r = { asked, configuredBefore, config: callsV.filter((c) => c[0] === 'config').map((c) => c[1]) };
+        $all('.modal-overlay').forEach((o) => o.remove());
+        root.remove();
+        return r;
+      };
+      const cancelV = await tryServer('mmw-sync.other-clinic.workers.dev', 'other key', 'no');
+      const yesV = await tryServer('https://mmw-sync.other-clinic.workers.dev/health', 'other key', 'yes');
+      const sameV = await tryServer(FROM_V + '/', 'rotated key', 'yes');
+      log(/mmw-sync\.other-clinic\.workers\.dev/.test(cancelV.asked) && /clinic-x\.mmw\.workers\.dev/.test(cancelV.asked)
+        && /every record on this laptop/.test(cancelV.asked) && /Reset this computer/.test(cancelV.asked)
+        && cancelV.configuredBefore === false && cancelV.config.length === 0,
+        'Cloud tab, connected: Save server with a different address asks first — naming both servers, that every record here goes there, and Reset this computer for a laptop changing clinics — and Cancel saves nothing');
+      log(!!yesV.asked && yesV.configuredBefore === false && yesV.config.length === 1 && /other-clinic/.test(yesV.config[0] || '')
+        && !sameV.asked && sameV.config.length === 1,
+        'Cloud tab, connected: confirmed, the new server is saved; a new key for the same server (typed with a trailing slash) is saved without asking');
+    } finally {
+      $all('.modal-overlay').forEach((o) => o.remove());
+      for (const k of Object.keys(window.api)) if (!(k in savedApiV)) delete window.api[k];
+      Object.assign(window.api, savedApiV);
+    }
   }
 
   /* ===== The report, exported ===============================================
