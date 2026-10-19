@@ -140,6 +140,11 @@ const PERMS = {
   'cloud:status': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'cloud:syncNow': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
   'cloud:resync': ['admin'],
+  // The connection code carries the clinic key, so it is the administrator's,
+  // like the key itself. 'cloud:join' is deliberately NOT listed: it is the
+  // sign-in screen's, used before anyone has signed in, and checks for itself
+  // whether this computer may join without one (see its handler).
+  'cloud:connectionCode': ['admin'],
   'patients:arrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'],
   'patients:confirmArrival': ['admin', 'registration', 'emt', 'triage'],
   // update:* and app:version are open to any signed-in user (available in any view).
@@ -184,6 +189,9 @@ function register(getMainWindow) {
   handle('auth:needsSetup', () => ({
     needsSetup: db.needsSetup(),
     defaultAdmin: db.defaultAdminActive() ? { username: db.DEFAULT_ADMIN_USERNAME, password: db.DEFAULT_ADMIN_PASSWORD } : null,
+    // Whether a server is saved, never which: Join a clinic, on the sign-in
+    // screen, tells "already connected" apart from "closed" (setup.js).
+    connected: db.getSyncMeta().configured,
   }));
   handle('auth:setupAdmin', (payload) => {
     const user = db.createFirstAdmin(payload || {});
@@ -217,7 +225,9 @@ function register(getMainWindow) {
 
   // v1.1.0 cloud sync
   handle('cloud:config', (payload) => cloud.applyConfig(payload || {}));
-  handle('cloud:test', ({ url, key }) => cloud.testConnection(url, key));
+  // A blank key means "keep the saved one", as the Cloud tab says — but only
+  // for the server it was saved for.
+  handle('cloud:test', ({ url, key }) => cloud.testConnection(url, key || cloud.savedKeyFor(url)));
   handle('cloud:status', () => cloud.status());
   handle('cloud:syncNow', () => cloud.syncOnce());
   handle('cloud:resync', () => cloud.resyncAll());
@@ -230,6 +240,69 @@ function register(getMainWindow) {
     db.audit(currentUser, 'cloud.disconnect', 'settings', null, 'Cloud sync disconnected');
     return r;
   });
+
+  // The server address and clinic key as one code, for connecting the next
+  // laptop. Only on an administrator's explicit request, and audited, because
+  // whoever holds it can read and change every record the clinic syncs.
+  handle('cloud:connectionCode', () => {
+    const r = cloud.connectionCode();
+    db.audit(currentUser, 'cloud.code', 'settings', null, 'Connection code shown');
+    return r;
+  });
+
+  // "Join a clinic already set up", from the sign-in screen. It runs before
+  // anyone has signed in, so it cannot go through cloud:test / cloud:config:
+  // both are the administrator's, and signed out they refused with "Please
+  // sign in first" — Join never connected anything in the installed app.
+  //
+  // Signed out, it is allowed only while anyone at this keyboard could become
+  // the administrator anyway: no account exists yet, or the shipped admin /
+  // admin still works (the sign-in screen prints it). That grants nothing new.
+  // Once the clinic has set its own administrator password, pointing this
+  // laptop at a server — which would send it every record here and take back
+  // whatever accounts that server holds — is that administrator's, in Admin →
+  // Cloud. Same test first as typing the address there, then the first full
+  // sync is waited for, because the next step is signing in with an account
+  // that only exists here once it has synced down.
+  //
+  // Pressed again for the server and key this laptop already has — what Join
+  // tells someone to do when no accounts had come down yet — it repoints
+  // nothing, so it is not refused even though the clinic's own administrator
+  // password has arrived meanwhile (that arrival is what closed the computer,
+  // and it used to answer "connect it under Admin → Cloud" on a laptop already
+  // connected, whose staff could already sign in). It changes nothing either —
+  // not even a paused laptop's pause, which is the administrator's — and only
+  // waits for a sync and says what is here now.
+  handle('cloud:join', async ({ url, key } = {}) => {
+    if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
+    const saved = db.getSyncMeta();
+    const already = saved.configured && !!String(url || '').trim()
+      && cloud.normalizeUrl(url) === cloud.normalizeUrl(saved.url) && String(key || '') === saved.key;
+    if (!currentUser && !already && !db.needsSetup() && !db.defaultAdminActive()) {
+      throw new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
+    }
+    if (!String(key || '').trim()) throw new Error('Enter the clinic key as well as the address.');
+    const health = await cloud.testConnection(url, key);
+    if (!already) {
+      cloud.applyConfig({ url, key, online: true });
+      db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));
+    }
+    const sync = await cloud.syncSettled();
+    return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
+  });
+
+  // How many accounts someone could sign in with here, besides the shipped
+  // admin / admin — Join's answer to "did the clinic arrive?". needsSetup()
+  // cannot answer it: every install comes with admin / admin, so it is false
+  // on a new laptop whether or not anything came down, and Join reported
+  // "Clinic downloaded" off an empty server. A count of what the last sync
+  // applied cannot either: the timer's own cycle, started by saving the
+  // server, usually takes everything before syncSettled() runs its one.
+  function ownAccounts() {
+    const shipped = db.defaultAdminActive();
+    return db.listUsers().filter((u) => u.active
+      && !(shipped && u.role === 'admin' && u.username === db.DEFAULT_ADMIN_USERNAME)).length;
+  }
 
   // Erase every clinic record on this computer and return it to first-run setup.
   // Destructive and irreversible, so the renderer confirms by typed phrase; the

@@ -674,6 +674,35 @@ function convergeSeedAdmin() {
   }
 }
 
+// The default event is seeded on every laptop under the ONE shared uid, but
+// with no stamp — so a laptop's first sync stamped it with that moment, and
+// sync pushes before it pulls. A laptop new to the clinic therefore sent its
+// blank "Mission Minded Clinic" (install date, no city list, never Set active)
+// as the NEWEST version of the clinic's event, and it replaced the event the
+// director had named, dated and given cities, on the server and then on every
+// laptop — each time another laptop joined. Stamped "ancient" like the shipped
+// admin / admin (convergeSeedAdmin), the untouched seed loses to an edit made
+// anywhere, and is still what every laptop shows until somebody makes one.
+//
+// Only the untouched seed, never yet sent or received (content_rev IS NULL):
+// a fresh install, or an install from before this that nobody has edited or
+// connected. Edits never set updated_at here (collectSyncRows stamps them), so
+// "untouched" is read from the content: the seed's name, no place, no cities,
+// never Set active, one day — the day it was created. An edited event, or one
+// already synced, keeps the stamp it has. The random suffix keeps two laptops'
+// seeds totally ordered, so they still agree on one of them.
+function convergeSeedEvent() {
+  const ev = db.prepare('SELECT * FROM events WHERE uid = ? AND content_rev IS NULL AND synced_rev IS NULL').get(DEFAULT_EVENT_UID);
+  if (!ev || ev.updated_at) return;
+  const created = String(ev.created_at || '').slice(0, 10);
+  const untouched = ev.name === 'Mission Minded Clinic' && !ev.location && isEmptyJson(ev.cities) && !ev.selected_at
+    && ev.languages === 'en,es' && ev.active === 1 && ev.start_date === created && ev.end_date === created;
+  if (!untouched) return;
+  const ancient = '0000-01-01T00:00:00.000Z@' + (getSetting('cloud_device_id') || crypto.randomUUID());
+  db.prepare('UPDATE events SET updated_at = ?, content_rev = ? WHERE id = ?')
+    .run(ancient, sig(buildData('event', ev)), ev.id);
+}
+
 /**
  * True when this machine has no usable account and must run first-time setup.
  *
@@ -778,6 +807,8 @@ function seed() {
   // Existing installs (or after any event change): make sure the default event is
   // the shared, cross-device identity and the queue is pointed at it.
   convergeDefaultEvent();
+  // ...and an untouched seed must never overwrite the clinic's real event.
+  convergeSeedEvent();
   // Upgrades: seed() above only fires on an empty database, so a machine that
   // was already set up needs this to get the shipped administrator. One-time.
   ensureBootstrapAdmin();
@@ -4636,6 +4667,23 @@ function resetSyncCursor() {
   return { ok: true };
 }
 
+// Count every record and deletion here as not yet sent. synced_rev means "the
+// server this laptop is connected to has this version", and once the laptop is
+// pointed at a different server — or at any server after a Disconnect — that is
+// true of nothing: a row still marked sent was never pushed to the new server,
+// so the clinic's other laptops never saw it while this one did. content_rev is
+// kept, so each row goes with the stamp of its own last change and loses to
+// anything newer the new server already holds. Used by cloud.applyConfig().
+function markAllUnsent() {
+  db.transaction(() => {
+    for (const table of Object.values(ENTITY_TABLE)) {
+      db.prepare(`UPDATE ${table} SET synced_rev = NULL WHERE synced_rev IS NOT NULL`).run();
+    }
+    db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE synced_rev IS NOT NULL').run();
+  })();
+  return { ok: true };
+}
+
 function ensureDeviceId() {
   let id = getSetting('cloud_device_id');
   if (!id) { id = crypto.randomUUID(); setSetting('cloud_device_id', id); }
@@ -4688,7 +4736,7 @@ module.exports = {
   getSetting, setSetting, disconnectCloud, resetClinicData,
   // v1.1.0 cloud sync
   collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
-  getSyncPending, setSyncPending, resetSyncCursor,
+  getSyncPending, setSyncPending, resetSyncCursor, markAllUnsent,
   // Read-only; lets the harness rebuild a database exactly as v0.0.14 left it.
   SYNC_COLS_BEFORE_V0_0_15,
 };

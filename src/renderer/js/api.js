@@ -126,6 +126,10 @@ export const api = {
   cloudSyncNow: () => call('cloudSyncNow'),
   cloudResync: () => call('cloudResync'),
   cloudDisconnect: () => call('cloudDisconnect'),
+  // v0.0.16: the server address + clinic key as one code (administrators
+  // only), and the sign-in screen's Join a clinic (test, save, first sync).
+  cloudConnectionCode: () => call('cloudConnectionCode'),
+  cloudJoin: (url, key) => call('cloudJoin', { url, key }),
   resetAllData: () => call('dataReset'),
   onCloudChanged: (cb) => window.api.onCloudChanged(cb),
 
