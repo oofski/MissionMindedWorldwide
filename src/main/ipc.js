@@ -162,14 +162,22 @@ const PERMS = {
 // lost without a word of why (signing out failed the same way, on its audit
 // line). So the account is looked up before each call, and if it is gone or
 // turned off the session ends, and every gated call says why (ensure()).
+// Its ROLE as well: the session kept the role it signed in with, so an
+// administrator made a check-out volunteer on another laptop kept every
+// administrator's power here — the staff list, making administrators, copying
+// a password — until she signed out. A changed role ends the session too: the
+// screens on show were built for the old one, and signing in again builds the
+// new one's. A changed name is simply taken, for the audit lines that follow.
 function liveSession() {
   if (!currentUser) return;
   const acct = db.sessionAccount(currentUser.id);
-  if (acct && acct.active) return;
+  if (acct && acct.active && acct.role === currentUser.role) { currentUser = acct; return; }
   currentUser = null;
-  endedBecause = acct
-    ? 'Your account was turned off — sign in again, or ask an administrator.'
-    : 'Your account was removed on another computer — sign in again.';
+  endedBecause = !acct
+    ? 'Your account was removed on another computer — sign in again.'
+    : !acct.active
+      ? 'Your account was turned off — sign in again, or ask an administrator.'
+      : 'Your role was changed — sign in again.';
 }
 
 function ensure(channel) {

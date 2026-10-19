@@ -27,6 +27,14 @@ It happens in three steps:
 > version. A laptop before 0.0.16 also merges staff accounts that share a
 > username across two events into one account: update **every** laptop
 > before you set somebody up for a second event under the same username.
+> Until every laptop is updated, **delete accounts only on a laptop that is
+> already on 0.0.16** — and on an older one never click **Delete** on your
+> own row. On an older version, Delete sends the deletion to the other
+> laptops even when it refuses it ("You cannot delete your own account.", the
+> last administrator, or "FOREIGN KEY constraint failed"), and an updated
+> laptop may carry it out: a staff member's always, an administrator's on a
+> laptop she has never used. The account comes back once the older laptop is
+> updated.
 
 ---
 

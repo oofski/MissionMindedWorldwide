@@ -1558,7 +1558,10 @@ async function main() {
     // The deletion must travel, or the cloud simply sends the patient back.
     const pending = db.collectSyncRows(400).rows.filter((r) => r.deleted);
     const tombEntities = new Set(pending.map((r) => r.entity));
-    log(pending.some((r) => r.uid === bundle.patients[0].uid) && pending.every((r) => JSON.stringify(r.data) === '{}'),
+    // An account's deletion made here also says it was carried out (v0.0.16,
+    // see collectSyncRows) — that, and nothing about the account.
+    log(pending.some((r) => r.uid === bundle.patients[0].uid)
+      && pending.every((r) => JSON.stringify(r.data) === '{}' || (r.entity === 'user' && JSON.stringify(r.data) === '{"carried_out":1}')),
       'v1.6.0: a purge queues a deletion for the cloud, carrying no patient data');
     // The whole chart must be tombstoned. A patient-only tombstone would leave
     // the consent signatures and x-ray images sitting in the cloud forever —
@@ -3661,6 +3664,45 @@ try{
    const res=db.applyRemoteRows([{entity:'user',uid:out.vAnna,event_uid:null,patient_uid:null,deleted:1,updated_at:vStamp,data:{}}]);
    out.vAfter={deleted:res.deleted,anna:!!db.login('anna','anna-pw-v'),cara:!!db.login('cara','cara-pw-v')};}
   db.close();
+
+  /* --- F: deletions from a laptop still on 0.0.15, beside updated ones --- */
+  const f1=mk('mmwstaffF1-'),f2=mk('mmwstaffF2-');dirs.push(f1,f2);
+  db.init(f1);db.ensureDeviceId();
+  const fIds={};let fRows;
+  {let a=db.login('admin','admin');db.updateUser(a,a.id,{password:'clinic-pw-f'});a=db.login('admin','clinic-pw-f');fIds.admin=a.id;
+   fIds.anna=db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw-f'}).id;
+   fIds.cara=db.createUser(a,{username:'cara',full_name:'Cara Diaz',role:'admin',password:'cara-pw-f'}).id;
+   fIds.ben=db.createUser(a,{username:'ben',full_name:'Ben Ortiz',role:'doctor',password:'ben-pw-f'}).id;
+   fRows=db.collectSyncRows(5000);db.markSynced(fRows.mark);}
+  db.close();
+  const fUid={};{const h=raw(f1);for(const n of ['anna','cara','ben'])fUid[n]=h.prepare('SELECT u.uid, e.uid AS ev FROM users u LEFT JOIN events e ON e.id=u.event_id WHERE u.username=?').get(n);h.close();}
+  db.init(f2);db.ensureDeviceId();db.applyRemoteRows(fRows.rows);
+  db.login('anna','anna-pw-f');db.login('ben','ben-pw-f');   // Cara never signs in here
+  // What 0.0.15 sends for a Delete, refused or not: a deletion with nothing in it.
+  const oldDel=(n)=>({entity:'user',uid:fUid[n].uid,event_uid:fUid[n].ev||null,patient_uid:null,deleted:1,updated_at:new Date().toISOString()+'@laptop-on-0.0.15',data:{}});
+  const fR1=db.applyRemoteRows([oldDel('anna'),oldDel('cara'),oldDel('ben')]);
+  {const h=raw(f2);const has=(n)=>!!h.prepare('SELECT 1 FROM users WHERE username=?').get(n);
+   out.fOld={deleted:fR1.deleted,deferred:fR1.deferred,heldAnna:fR1.deferredRows.length===1&&fR1.deferredRows[0].uid===fUid.anna.uid,
+     anna:has('anna'),cara:has('cara'),ben:has('ben'),annaIn:!!db.login('anna','anna-pw-f')};h.close();}
+  db.close();
+  // On an updated laptop: Delete on Anna, carried out there.
+  db.init(f1);
+  {const a=db.login('admin','clinic-pw-f');db.deleteUser(a,fIds.anna);}
+  const fDel=db.collectSyncRows(5000);db.markSynced(fDel.mark);
+  {const t=fDel.rows.find((r)=>r.uid===fUid.anna.uid);out.fWire=t?JSON.stringify(t.data):null;}
+  db.close();
+  db.init(f2);
+  const fR2=db.applyRemoteRows(fDel.rows.concat(fR1.deferredRows));
+  {const h=raw(f2);out.fNew={deleted:fR2.deleted,deferred:fR2.deferred,anna:!!h.prepare("SELECT 1 FROM users WHERE username='anna'").get(),
+     signIns:h.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action='login' AND user_name='Anna Reed' AND user_id IS NULL").get().n,
+     tomb:h.prepare('SELECT updated_at, carried_out FROM tombstones WHERE uid=?').get(fUid.anna.uid)};
+   out.fNew.newest=!!out.fNew.tomb&&String(out.fNew.tomb.updated_at)===String(fDel.rows.find((r)=>r.uid===fUid.anna.uid).updated_at);h.close();}
+  // Moved to a new server, this laptop sends every deletion it holds again:
+  // each as it came.
+  db.markAllUnsent();
+  {const s=db.collectSyncRows(5000);const d=(n)=>{const r=s.rows.find((x)=>x.uid===fUid[n].uid&&x.deleted);return r?JSON.stringify(r.data):null;};
+   out.fRelay={anna:d('anna'),cara:d('cara'),ben:d('ben')};}
+  db.close();
 }catch(e){out.crash=String((e&&e.stack)||e);}
 try{db.close();}catch(_){}
 for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
@@ -3719,6 +3761,18 @@ process.stdout.write('@@S@@'+JSON.stringify(out));
     log(S.vTombs === 0 && !!S.vSend && !!S.vSend.anna && S.vSend.anna.undelete === true && S.vSend.anna.deleted === 0 && S.vSend.anna.newer === true
       && S.vSend.cara === false && S.vSend.once === true && !!S.vAfter && S.vAfter.deleted === 0 && S.vAfter.anna === true && S.vAfter.cara === true,
       'upgrade: a deletion an older version recorded for a refused delete is retired at start; one already sent is undone by sending the account back as a revival, newer than the deletion — so pulling that deletion again deletes nobody');
+    // 0.0.15 sends a deletion even for a Delete it refuses, so an updated
+    // laptop carried out what the old one had refused: an administrator
+    // clicking Delete on her own row on a laptop not yet updated was deleted on
+    // every one that was. Held back where she has signed in, as 0.0.15 does.
+    log(!!S.fOld && S.fOld.deleted === 2 && S.fOld.deferred === 1 && S.fOld.heldAnna === true && S.fOld.anna === true && S.fOld.annaIn === true
+      && S.fOld.cara === false && S.fOld.ben === false,
+      'mixed fleet: a deletion of an administrator from a laptop still on 0.0.15 is held back where she has signed in, as 0.0.15 does (that version sends one for a refused delete too) — where she never has, it goes through as it did, and a staff member\'s goes through' + (S.fOld ? ' — ' + JSON.stringify(S.fOld) : ''));
+    log(S.fWire === '{"carried_out":1}' && !!S.fNew && S.fNew.deleted === 1 && S.fNew.deferred === 0 && S.fNew.anna === false && S.fNew.signIns >= 1
+      && S.fNew.newest === true && !!S.fNew.tomb && S.fNew.tomb.carried_out === 1,
+      'an administrator deleted on an updated laptop: the deletion says it was carried out there, and the other laptop carries it out — where she has signed in, the old deletion held back beside it — her sign-ins kept under her name' + (S.fNew ? ' — ' + JSON.stringify(S.fNew) : ''));
+    log(!!S.fRelay && S.fRelay.anna === '{"carried_out":1}' && S.fRelay.cara === '{}' && S.fRelay.ben === '{}',
+      'after a change of server a laptop sends the deletions it received on as they came: the updated laptop\'s still says it was carried out, the older version\'s still does not' + (S.fRelay ? ' — ' + JSON.stringify(S.fRelay) : ''));
 
     /* ---- the real handlers: a session whose account went elsewhere, and
        the upgrade of two laptops with such a deletion on their server ---- */
@@ -3769,6 +3823,19 @@ const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h
   const di=db.createUser(a2,{username:'di',full_name:'Di Moss',role:'registration',password:'pw-di'});
   await call('auth:login',{username:'di',password:'pw-di'});db.deleteUser(a2,di.id);
   out.checkin=said(await call('patients:create',{first_name:'Kio',last_name:'Sk',dob:'1991-01-01'}));
+  // An administrator signed in here; her row changes as a change synced from
+  // another laptop leaves it: first her name, then her role.
+  const eve=db.createUser(a2,{username:'eve',full_name:'Eve Hart',role:'admin',password:'pw-eve'});
+  await call('auth:login',{username:'eve',password:'pw-eve'});
+  db.updateUser(a2,eve.id,{full_name:'Eve M. Hart'});
+  out.renamed=((await call('auth:current')).data||{}).full_name;out.renamedOk=said(await call('users:list'));
+  db.updateUser(a2,eve.id,{role:'checkout'});
+  out.demoted=said(await call('users:list'));
+  out.demotedCreate=said(await call('users:create',{username:'mal',full_name:'Mal Ory',role:'admin',password:'pw-mal-1'}));
+  out.malMade=db.listUsers().some((u)=>u.username==='mal');
+  out.demotedNow=(await call('auth:current')).data;
+  out.demotedIn=((await call('auth:login',{username:'eve',password:'pw-eve'})).data||{}).role;
+  out.demotedList=said(await call('users:list'));
   await call('auth:login',{username:'admin',password:'admin'});out.adminAgain=said(await call('users:list'));
   db.close();
 
@@ -3784,12 +3851,20 @@ const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h
   const KEY='right horse battery 42',URL_A='https://mmw-sync.clinic.workers.dev';let DB=null;
   globalThis.fetch=async(url,init)=>worker.fetch(new Request(url,init),{CLINIC_KEY:KEY,DB},{});
   const sync=async()=>{const r=await cloud.syncOnce();if(!r.ok)throw new Error('sync: '+JSON.stringify(r));return r;};
-  const upgrade=async(order)=>{
+  const pushRaw=(device,rows)=>worker.fetch(new Request(URL_A+'/v1/push',{method:'POST',headers:{authorization:'Bearer '+KEY,'content-type':'application/json'},
+    body:JSON.stringify({device_id:device,rows})}),{CLINIC_KEY:KEY,DB},{});
+  // staff: Anna is a doctor on the clinic's event instead of an administrator
+  // (0.0.15 sent a staff account's deletion for a Delete it refused with
+  // "FOREIGN KEY constraint failed"). busy: that many rows from a third laptop
+  // reach the server after laptop 2's last pull — more than one page of it.
+  const upgrade=async(order,opts)=>{
+    const staff=!!(opts&&opts.staff),busy=(opts&&opts.busy)||0;
     DB=mkDB();const o={};const L1=mk('mmwstrayA-'),L2=mk('mmwstrayB-');
     db.init(L1);db.ensureDeviceId();db.setSyncMeta({url:URL_A,key:KEY,enabled:true});
     let a=db.login('admin','admin');db.updateUser(a,a.id,{password:'clinic-pw'});a=db.login('admin','clinic-pw');
-    db.createUser(a,{username:'anna',full_name:'Anna Reed',role:'admin',password:'anna-pw'});
-    await sync();const annaUid=raw(L1,(h)=>h.prepare("SELECT uid FROM users WHERE username='anna'").get().uid);db.close();
+    db.createUser(a,{username:'anna',full_name:'Anna Reed',role:staff?'doctor':'admin',password:'anna-pw'});
+    await sync();const annaUid=raw(L1,(h)=>h.prepare("SELECT uid FROM users WHERE username='anna'").get().uid);
+    const annaEv=raw(L1,(h)=>(h.prepare("SELECT e.uid FROM users u JOIN events e ON e.id=u.event_id WHERE u.username='anna'").get()||{}).uid||null);db.close();
     db.init(L2);db.ensureDeviceId();db.setSyncMeta({url:URL_A,key:KEY,enabled:true});await sync();
     const annaL2=db.login('anna','anna-pw');
     if(order==='onlyAdmin'){db.updateUser(annaL2,db.login('admin','clinic-pw').id,{active:false});await sync();}
@@ -3798,13 +3873,16 @@ const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h
     // deletion was recorded first and sent; laptop 2 pulled it and held it
     // back (its audit log points at her), parked for the next pull.
     const stamp=new Date().toISOString()+'@laptop-1-on-0.0.15';
-    const tomb={entity:'user',uid:annaUid,event_uid:null,patient_uid:null,deleted:1,updated_at:stamp,data:{}};
-    raw(L1,(h)=>h.prepare("INSERT INTO tombstones (uid,entity,event_uid,updated_at,synced_rev,created_at) VALUES (?,'user',NULL,?,'sent',?)").run(annaUid,stamp,stamp));
-    await worker.fetch(new Request(URL_A+'/v1/push',{method:'POST',headers:{authorization:'Bearer '+KEY,'content-type':'application/json'},
-      body:JSON.stringify({device_id:'laptop-1',rows:[tomb]})}),{CLINIC_KEY:KEY,DB},{});
+    const tomb={entity:'user',uid:annaUid,event_uid:annaEv,patient_uid:null,deleted:1,updated_at:stamp,data:{}};
+    raw(L1,(h)=>h.prepare("INSERT INTO tombstones (uid,entity,event_uid,updated_at,synced_rev,created_at) VALUES (?,'user',?,?,'sent',?)").run(annaUid,annaEv,stamp,stamp));
+    await pushRaw('laptop-1',[tomb]);
     o.serverDeleted=DB.rows.get(annaUid).deleted===1;
     raw(L2,(h)=>{const set=h.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)');
       set.run('cloud_pending',JSON.stringify([tomb]));set.run('cloud_cursor',String(Math.max(...[...DB.rows.values()].map((r)=>r.seq))));});
+    for(let i=0;i<busy;i+=100){const ts=new Date().toISOString(),rows=[];
+      for(let j=i;j<Math.min(busy,i+100);j++)rows.push({entity:'inv_item',uid:'busy-item-'+j,event_uid:null,patient_uid:null,deleted:0,
+        updated_at:ts+'@laptop-3-'+String(j).padStart(4,'0'),data:{name:'Item '+j,unit:'box',category:null,notes:null,active:1,created_at:ts}});
+      await pushRaw('laptop-3',rows);}
     // Then both are updated to 0.0.16, and each starts and syncs.
     const onL2=async()=>{db.init(L2);await sync();const id=raw(L2,(h)=>(h.prepare('SELECT id FROM users WHERE uid=?').get(annaUid)||{}).id);
       const r={sameAccount:id===annaL2.id,annaIn:!!db.login('anna','anna-pw'),parked:db.getSyncPending().length};db.close();return r;};
@@ -3816,6 +3894,8 @@ const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h
   out.l1First=await upgrade('l1First');
   out.l2First=await upgrade('l2First');
   out.onlyAdmin=await upgrade('onlyAdmin');
+  out.l1Busy=await upgrade('l1First',{busy:450});
+  out.staffBusy=await upgrade('l1First',{staff:true,busy:450});
 }catch(e){out.crash=String((e&&e.stack)||e);}
 try{require(dbPath).close();}catch(_){}
 for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
@@ -3848,8 +3928,20 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
     log(!!T.onlyAdmin && !!T.onlyAdmin.l2Before && T.onlyAdmin.l2Before.sameAccount === true && T.onlyAdmin.l2Before.parked === 1
       && !!T.onlyAdmin.l2 && T.onlyAdmin.l2.sameAccount === true && T.onlyAdmin.l2.parked === 0,
       'upgrade, two laptops: where that administrator is the only one who can sign in, the deletion is held back, never applied, and let go once she is sent back');
-    log(!!T.l2First && !!T.l2First.l2Before && T.l2First.l2Before.annaIn === false && !!T.l2First.l2 && T.l2First.l2.annaIn === true,
-      'upgrade, two laptops: a laptop updated first applies the old deletion while another administrator remains, and has her account back once the other laptop has synced');
+    // It used to apply that deletion, since another administrator remained:
+    // while laptop 1 was still on 0.0.15 she was deleted on every updated
+    // laptop, her sign-ins there no longer hers, until laptop 1 was updated.
+    log(!!T.l2First && !!T.l2First.l2Before && T.l2First.l2Before.annaIn === true && T.l2First.l2Before.sameAccount === true && T.l2First.l2Before.parked === 1
+      && !!T.l2First.l2 && T.l2First.l2.sameAccount === true && T.l2First.l2.annaIn === true && T.l2First.l2.parked === 0,
+      'upgrade, two laptops: a laptop updated first holds back the old deletion of an administrator who has signed in there, as 0.0.15 did (it is from a laptop still on 0.0.15), and lets it go once that laptop is updated and sends her back');
+    log(!!T.l1Busy && !!T.l1Busy.l2 && T.l1Busy.l2.sameAccount === true && T.l1Busy.l2.annaIn === true && T.l1Busy.l2.parked === 0
+      && !!T.staffBusy && T.staffBusy.serverDeleted === true && !!T.staffBusy.l1 && T.staffBusy.l1.annaIn === true && T.staffBusy.l1.server === 0
+      && !!T.staffBusy.l2 && T.staffBusy.l2.sameAccount === true && T.staffBusy.l2.annaIn === true && T.staffBusy.l2.parked === 0,
+      'upgrade, two laptops, a busy day in between (more than a page of rows from a third laptop before the account is sent back): the held deletion — an administrator\'s, and a staff member\'s — still meets the account sent back, and the other laptop keeps the same account (it re-created the staff member under a new id)'
+      + (T.staffBusy && T.staffBusy.l2 ? ' — ' + JSON.stringify(T.staffBusy.l2) : ''));
+    log(T.renamed === 'Eve M. Hart' && T.renamedOk === 'ok' && T.demoted === 'Your role was changed — sign in again.' && T.demotedCreate === T.demoted
+      && T.malMade === false && T.demotedNow === null && T.demotedIn === 'checkout' && T.demotedList === 'Your role does not have permission for this action.',
+      `a session whose role was changed — an administrator made a check-out volunteer on another laptop — ends: she can no longer list staff or make an administrator (she could, until she signed out), and signing in again gives her the new role; a changed name is simply taken — "${T.demoted}"`);
     // The guide said two staff accounts with the same username on two laptops
     // "become one account" — true now only for the same event. And a laptop
     // still on 0.0.15 adopts by username alone (S.s2 is what it gets wrong).
@@ -3858,6 +3950,9 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
     log(/same username for the same event\*\* on two laptops become one account/.test(guideS) && /\*different\* events is two accounts/.test(guideS)
       && /A laptop before 0\.0\.16 also merges staff accounts that share a username across two events into one account: update \*\*every\*\* laptop/.test(guideS),
       'cloud guide: one username on two laptops is one account only for the same event, and a laptop before 0.0.16 merges two events\' — update every laptop first');
+    log(/Until every laptop is updated, \*\*delete accounts only on a laptop that is already on 0\.0\.16\*\*/.test(guideS)
+      && /Delete sends the deletion to the other laptops even when it refuses it/.test(guideS) && /comes back once the older laptop is updated/.test(guideS),
+      'cloud guide: while laptops differ, accounts are deleted only on an updated one — an older version\'s Delete sends the deletion even when it refuses it');
   }
 
   /* ===== Supplies ===========================================================

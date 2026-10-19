@@ -326,6 +326,10 @@ function migrate() {
   db.exec(`CREATE TABLE IF NOT EXISTS tombstones (
     uid TEXT PRIMARY KEY, entity TEXT NOT NULL, event_uid TEXT,
     updated_at TEXT NOT NULL, synced_rev TEXT, created_at TEXT NOT NULL)`);
+  // v0.0.16: an account's deletion that came from another laptop saying it was
+  // carried out there (USER_DELETION_DONE) keeps saying so when this laptop
+  // sends it on — to a new server, after a change of server. Local only.
+  addColumn('tombstones', 'carried_out', 'INTEGER');
   // v1.6.0: what a finished clinic leaves behind — counts only, no patients.
   db.exec(`CREATE TABLE IF NOT EXISTS event_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, event_id INTEGER,
@@ -4354,6 +4358,10 @@ function columnMeta(table) {
 // real entry. The Dental Triage screen always saves all four restorative
 // entries, so a genuine save is never an empty object.
 const KEEP_NONEMPTY = { treatments: ['restorative', 'services'] };
+// What an account's deletion carries when the laptop that sent it really
+// deleted the account (v0.0.16+). No details of the account, only that.
+// See collectSyncRows and the user deletion in applyRemoteRows.
+const USER_DELETION_DONE = Object.freeze({ carried_out: 1 });
 function isEmptyJson(v) {
   if (v == null || v === '') return true;
   if (typeof v === 'object') return !Object.keys(v).length;
@@ -4602,12 +4610,25 @@ function collectSyncRows(max = 400) {
   // Deletions travel too. A tombstone carries a uid and nothing else, so a
   // purge reaches every other station and the cloud instead of being quietly
   // undone by the next pull.
+  // One exception, an account's deletion made HERE: it says it was carried out
+  // (USER_DELETION_DONE). Before v0.0.16 a refused delete — an administrator
+  // clicking Delete on her own row — still sent a deletion, and the laptops
+  // still on that version keep doing so; an updated laptop holds back such a
+  // deletion of an administrator, as those versions did (see applyRemoteRows),
+  // and carries out one that says it was. From here it is true: deleteUser and
+  // Start fresh record the deletion in the same transaction as the delete, and
+  // a stray left by an older version is retired at start
+  // (reviveRefusedUserDeletions). Made here = stamped by this laptop; one that
+  // came from elsewhere, sent again after a change of server, goes as it came
+  // (tombstones.carried_out).
+  const ownStamp = '@' + (getSetting('cloud_device_id') || '0');
   for (const tomb of db.prepare('SELECT * FROM tombstones WHERE synced_rev IS NULL').all()) {
     if (rows.length >= max) break;
+    const done = tomb.entity === 'user' && (!!tomb.carried_out || String(tomb.updated_at || '').endsWith(ownStamp));
     rows.push({
       entity: tomb.entity, uid: tomb.uid,
       event_uid: tomb.event_uid || null, patient_uid: null,
-      deleted: 1, updated_at: tomb.updated_at, data: {},
+      deleted: 1, updated_at: tomb.updated_at, data: done ? { ...USER_DELETION_DONE } : {},
     });
     mark.push({ tombstone: tomb.uid });
   }
@@ -4694,7 +4715,22 @@ function applyRemoteRows(remoteRows) {
           // here and was held back as "children still to come" for good: "Start
           // fresh" and Delete never reached a laptop the person had used, and
           // they kept signing in on it. Detached first, as deleteUser does.
-          detachUserRefs([hit.id]);
+          // An ADMINISTRATOR's deletion only when it says it was carried out
+          // where it was made (USER_DELETION_DONE, sent since v0.0.16). One
+          // without it comes from a laptop on an older version, whose Delete
+          // sent the deletion even when it refused it ("You cannot delete your
+          // own account.", the last administrator): carried out here, she was
+          // deleted on every updated laptop while the clinic was still updating,
+          // and the old laptop, which kept her, put her back only once it was
+          // updated itself. Such a deletion is held back where she has signed
+          // in or worked — over the foreign key, below — exactly as before
+          // v0.0.16, until the laptop that sent it is updated and sends her back
+          // (reviveRefusedUserDeletions) or a deletion that says it was carried
+          // out arrives. A staff account's deletion goes through either way:
+          // the only refusal an older version sent one for is its own
+          // "FOREIGN KEY constraint failed" on a Delete the administrator meant,
+          // and its Start fresh sent nothing unless it went through.
+          if (acct.role !== 'admin' || (env.data && env.data.carried_out)) detachUserRefs([hit.id]);
         }
         try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(hit.id); deleted++; }
         catch (e) {
@@ -4708,11 +4744,17 @@ function applyRemoteRows(remoteRows) {
       // Remember the deletion locally too. Without this the record is gone now
       // but any station still holding an old copy re-creates it on the next
       // sync — the patient reappears and the deletion looks like it never took.
-      // Marked 'sent' because this tombstone came FROM the cloud.
-      db.prepare(`INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at)
-                  VALUES (?,?,?,?,'sent',?)
-                  ON CONFLICT(uid) DO UPDATE SET updated_at = excluded.updated_at`)
-        .run(env.uid, entity, env.event_uid || null, env.updated_at || stampNow(), now());
+      // Marked 'sent' because this tombstone came FROM the cloud. A second,
+      // older deletion of the same record (one held back from before, beside
+      // the newer one that carried it out) leaves the newer stamp, and what it
+      // said, in place.
+      const done = entity === 'user' && env.data && env.data.carried_out ? 1 : null;
+      db.prepare(`INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at, carried_out)
+                  VALUES (?,?,?,?,'sent',?,?)
+                  ON CONFLICT(uid) DO UPDATE SET
+                    carried_out = CASE WHEN excluded.updated_at >= updated_at THEN excluded.carried_out ELSE carried_out END,
+                    updated_at = MAX(updated_at, excluded.updated_at)`)
+        .run(env.uid, entity, env.event_uid || null, env.updated_at || stampNow(), now(), done);
       return;
     }
     // Was this record deleted here? A deletion beats any copy that is not newer

@@ -183,6 +183,19 @@ async function pullOnce(base, key) {
   // Retry any previously-orphaned rows first — their parent may have arrived
   // since (e.g. a treatment that was pulled before its patient).
   let carry = db.getSyncPending();
+  // A DELETION parked by an earlier pull is retried only with the last page of
+  // this one. What brings a parked deletion's record back is a newer copy of
+  // it, somewhere in what has reached the server since (an account a laptop
+  // sends back after an older version recorded its deletion by mistake — see
+  // reviveRefusedUserDeletions in db.js — or a restore). applyRemoteRows lets
+  // the older deletion go when that copy is in the same batch, or already
+  // applied here; retried with the FIRST page, it was carried out whenever the
+  // copy was further on — more than one page (PULL_LIMIT) away, a laptop off
+  // for a clinic day — and the copy then re-created the record: an account
+  // under a new id, with nothing it had done here pointing at it, and signed
+  // out; a patient without the chart the deletion took with it.
+  let held = carry.filter((r) => r && r.deleted);
+  carry = carry.filter((r) => !(r && r.deleted));
   // Follow `more` pages so a first sync catches up fully. A child whose parent
   // lands in a later page is carried forward within the loop. The server hands
   // rows out in its own counter order, so no row is ever skipped at a page
@@ -195,7 +208,9 @@ async function pullOnce(base, key) {
     const r = await httpJson('GET', base + '/v1/pull' + qs, key);
     if (!stillOn(base)) return { pulled, applied, deleted: removed };
     const rows = (r && r.rows) || [];
-    const batch = carry.length ? carry.concat(rows) : rows;
+    const last = !r || !r.more;
+    let batch = carry.length ? carry.concat(rows) : rows;
+    if (last && held.length) { batch = batch.concat(held); held = []; }
     if (batch.length) {
       const res = db.applyRemoteRows(batch);
       applied += res.applied; removed += (res.deleted || 0); pulled += rows.length;
@@ -204,10 +219,11 @@ async function pullOnce(base, key) {
     // Accept "0" as a real cursor value (a counter can legitimately be 0).
     const pageCursor = (r && r.cursor != null && r.cursor !== '') ? String(r.cursor) : cursor;
     if (pageCursor !== cursor) { cursor = pageCursor; db.setSyncMeta({ cursor }); }
-    if (!r || !r.more) break;
+    if (last) break;
   }
-  // Park still-unresolved orphans for the next cycle (bounded, persisted).
-  db.setSyncPending(carry);
+  // Park still-unresolved orphans for the next cycle (bounded, persisted) —
+  // and any parked deletion a cut-short pull never reached the end with.
+  db.setSyncPending(carry.concat(held));
   return { pulled, applied, deleted: removed };
 }
 
