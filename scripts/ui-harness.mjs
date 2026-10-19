@@ -5523,10 +5523,14 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   out.pOnTrial={cursor:db.getSyncMeta().cursor,clean:!db.collectSyncRows(400).rows.some((r)=>r.entity==='patient')};
   db.createPatient(ipc.getCurrentUser(),{first_name:'Pat',last_name:'TrialLate'});
   await call('auth:logout');
+  // Signed out, Join to a server other than the one it is on asks first, as
+  // Save server does (moveTo), and moves nothing until that is confirmed.
+  {const ask=await call('cloud:join',{url:URL_A,key:KEY});
+   out.pAsked=ask.ok?{moveTo:ask.data.moveTo||null,still:db.getSyncMeta().url==='https://trial.clinic.workers.dev'}:{error:ask.error};}
   let release;hold={host:'trial.clinic.workers.dev',wait:new Promise((r)=>{release=r;})};
   const caught=cloud.syncOnce();
   const iv=setInterval(()=>{if(db.getSyncMeta().url===URL_A){clearInterval(iv);release();}},2);
-  const jp=await call('cloud:join',{url:URL_A,key:KEY});
+  const jp=await call('cloud:join',{url:URL_A,key:KEY,move:true});
   clearInterval(iv);release();await caught;hold=null;
   out.pJoin=jp.ok?{sync:!!(jp.data.sync&&jp.data.sync.ok),accounts:jp.data.accounts}:{error:jp.error};
   await settle();
@@ -5614,6 +5618,8 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
       && !!P.oRenamed && P.oRenamed.seeded === '' && /^2\d{3}-/.test(P.oRenamed.pushed)
       && !!P.oRedated && P.oRedated.seeded === '' && /^2\d{3}-/.test(P.oRedated.pushed),
       'cloud: the shipped event is dated ancient on a new install, and on an older install nobody touched, so it loses to any edit; an older install whose event was renamed, or only re-dated, keeps the stamp of that edit');
+    log(!!P.pAsked && P.pAsked.moveTo === 'mmw-sync.clinic.workers.dev' && P.pAsked.still === true,
+      'Join a clinic (real IPC): signed out on a laptop connected to another server (admin / admin still working), it asks before moving it — naming the new server — and moves nothing until that is confirmed');
     log(!!P.pOnTrial && P.pOnTrial.clean === true && !!P.pJoin && P.pJoin.sync === true && !!P.pGot && P.pGot.ana === true
       && !!P.aFromP && P.aFromP.trial === true,
       'cloud (real IPC): a laptop tried on a trial server and then joined to the clinic\'s exchanges everything both ways — the records it had already sent to the trial server reach the clinic, and the clinic\'s accounts reach it');
@@ -5958,6 +5964,437 @@ const done=(o)=>process.stdout.write('\\n@@V@@'+JSON.stringify(o),()=>process.ex
       $all('.modal-overlay').forEach((o) => o.remove());
       for (const k of Object.keys(window.api)) if (!(k in savedApiV)) delete window.api[k];
       Object.assign(window.api, savedApiV);
+    }
+  }
+
+  /* ===== v0.0.16 final fix pass — the shipped admin, deletions, pulls, staff =
+     A last review of v0.0.16, each probed on the real handlers: admin / admin,
+     deleted before a laptop's first connection or on the server it moved
+     from, came back on every laptop once a fresh laptop joined; deleted while
+     disconnected, it came back on reconnecting; an administrator's deletion
+     lost its "carried out" after a Disconnect or from a backup, and was held
+     back wherever she had signed in; a deleted event's staff went to every
+     laptop with no event, where two "ana" clashed or became one; a pull cut
+     short lost the rows it had deferred; an older laptop's deletion of admin /
+     admin was held back for good where admin / admin had signed in; the only
+     administrator could turn herself off for good; Join and Save server
+     misled or moved without asking. Real ipc.js, db.js, cloud.js and Worker
+     in a separate process; the screens in this one. */
+  {
+    currentUser = signInAdmin();
+    const settleF = async (n = 10) => { for (let i = 0; i < n; i++) await tick(); };
+    const readSrcF = (rel) => { try { return fs.readFileSync(new URL(rel, import.meta.url), 'utf8'); } catch (_) { return ''; } };
+    const docsF = readSrcF('../docs/CLOUD_SETUP.md').replace(/\s+/g, ' ');
+    const partBF = docsF.slice(docsF.indexOf('## Part B'), docsF.indexOf('## Part C'));
+    log(/own deletion of `admin` still keeps the shipped `admin` \/ `admin` off it/.test(partBF)
+      && /deleted before this laptop was ever connected, that deletion is sent once the server turns out to hold only the shipped/.test(partBF)
+      && /after \*\*Disconnect\*\* to the same server, a laptop passes on its deletions as if it had stayed connected/.test(partBF),
+      'cloud guide: Part B says a laptop\'s own deletion of admin keeps admin / admin off it after a move, goes once the server holds only the shipped copy when made before connecting, and goes as usual after Disconnect to the same server');
+
+    const probeF = `
+const os=require('os'),fs=require('fs'),path=require('path'),{pathToFileURL}=require('url');
+const [dbPath,ipcPath,cloudPath,workerPath]=process.argv.slice(2);
+const handlers={};
+const ep=require.resolve('electron');
+require.cache[ep]={id:ep,filename:ep,loaded:true,exports:{ipcMain:{handle:(c,f)=>{handlers[c]=f;}},dialog:{},shell:{openExternal(){}},
+  app:{getPath:()=>os.tmpdir(),getVersion:()=>'0.0.0',isPackaged:false,on(){}},BrowserWindow:class{}}};
+const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.exit(0));
+(async()=>{
+  const out={};
+  const worker=(await import(pathToFileURL(workerPath).href)).default;
+  const mkDB=()=>{const rows=new Map();let seq=0;
+  return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+      if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
+      if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
+    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+      return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
+  const SERVERS={};
+  const srv=(h,k)=>{SERVERS[h+'.mmw.workers.dev']={CLINIC_KEY:k,DB:mkDB()};return 'https://'+h+'.mmw.workers.dev';};
+  const rowsOf=(u)=>SERVERS[new URL(u).host].DB.rows;
+  // cut: on that host, let 'skip' pages of a pull through, then fail 'fail' of them (the wifi drops mid-pull).
+  // The connection test's one-row pull (limit=1) is not a page.
+  const cut={host:'',skip:0,fail:0};
+  globalThis.fetch=async(url,init)=>{const u=new URL(url);const env=SERVERS[u.host];if(!env||env.down)throw new TypeError('fetch failed');
+    if(u.host===cut.host&&u.pathname==='/v1/pull'&&u.searchParams.get('limit')!=='1'){if(cut.skip>0)cut.skip--;else if(cut.fail>0){cut.fail--;throw new TypeError('fetch failed');}}
+    return worker.fetch(new Request(url,init),env,{});};
+  const db=require(dbPath),cloud=require(cloudPath),ipc=require(ipcPath);
+  ipc.register(()=>null);
+  const call=(ch,p)=>handlers[ch]({},p);
+  const err=(r)=>(r&&r.ok===false?r.error:'');
+  const settle=async()=>{cloud.stop();await cloud.syncSettled();};
+  const Sqlite=require('better-sqlite3');
+  const AD='00000000-0000-4000-8000-000000000002';
+  const dirs=[];const mk=(n)=>{const d=fs.mkdtempSync(path.join(os.tmpdir(),'mmwfin'+n+'-'));dirs.push(d);return d;};
+  const section=async(name,fn)=>{try{await fn();}catch(e){out['crash_'+name]=String((e&&e.stack)||e).slice(0,300);}
+    finally{try{cloud.stop();}catch(_){}try{db.close();}catch(_){}}};
+  const shipped=()=>!!db.login('admin','admin');
+  const hint=async()=>{const r=await call('auth:needsSetup');return r.ok?r.data.defaultAdmin:'?';};
+  const adminNamed=(n)=>db.listUsers().find((x)=>x.username===n&&x.role==='admin');
+  const connect=async(u,key)=>(await call('cloud:test',{url:u,key})).ok===true&&(await call('cloud:config',{url:u,key,online:true})).ok===true;
+  const trinh={username:'trinh',full_name:'Dr Trinh',role:'admin',password:'trinh-pass-1'};
+  const asTrinh=()=>call('auth:login',{username:'trinh',password:'trinh-pass-1'});
+
+  /* 1. admin / admin deleted before the laptop was ever connected; two fresh laptops join */
+  await section('first',async()=>{
+    const U=srv('first','first key');
+    const d1=mk('L1');db.init(d1);
+    await call('auth:login',{username:'admin',password:'admin'});
+    await call('users:create',trinh);await asTrinh();
+    out.firstDeleted=(await call('users:delete',adminNamed('admin').id)).ok===true;
+    out.firstConnected=await connect(U,'first key');await settle();
+    await call('auth:logout');cloud.stop();db.close();
+    const d2=mk('L2');db.init(d2);await call('cloud:join',{url:U,key:'first key'});await settle();cloud.stop();db.close();
+    for(let i=0;i<2;i++){db.init(d1);await settle();cloud.stop();db.close();db.init(d2);await settle();cloud.stop();db.close();}
+    const d3=mk('L3');db.init(d3);await call('cloud:join',{url:U,key:'first key'});await settle();await settle();
+    out.firstL3={shipped:shipped(),trinh:!!db.login('trinh','trinh-pass-1'),hint:await hint()};cloud.stop();db.close();
+    db.init(d1);await settle();out.firstL1={shipped:shipped(),trinh:!!db.login('trinh','trinh-pass-1'),hint:await hint()};cloud.stop();db.close();
+    db.init(d2);await settle();out.firstL2={shipped:shipped(),trinh:!!db.login('trinh','trinh-pass-1'),hint:await hint()};cloud.stop();db.close();
+    const r=rowsOf(U).get(AD);out.firstServer=r?r.deleted:null;
+  });
+
+  /* 2. deleted on the server the laptop was on, which then moves; a fresh laptop joins the new one */
+  await section('moved',async()=>{
+    const O=srv('oldsrv','old key'),N=srv('newsrv','new key');
+    const dA=mk('MA');db.init(dA);
+    await call('auth:login',{username:'admin',password:'admin'});
+    await call('users:create',trinh);
+    await connect(O,'old key');await settle();
+    await asTrinh();await call('users:delete',adminNamed('admin').id);await settle();
+    out.movedOld=rowsOf(O).get(AD)?rowsOf(O).get(AD).deleted:null;
+    out.movedTo=await connect(N,'new key');await settle();
+    await call('auth:logout');cloud.stop();db.close();
+    const dN=mk('MN');db.init(dN);await call('cloud:join',{url:N,key:'new key'});await settle();cloud.stop();db.close();
+    db.init(dA);await settle();await settle();
+    out.movedA={shipped:shipped(),trinh:!!db.login('trinh','trinh-pass-1'),hint:await hint()};cloud.stop();db.close();
+  });
+
+  /* 3. Disconnect, delete the clinic's admin (its password changed, so a real account), connect the same server again */
+  await section('same',async()=>{
+    const S=srv('samesrv','same key');
+    const dA=mk('SA');db.init(dA);
+    await call('auth:login',{username:'admin',password:'admin'});
+    await call('users:update',{id:ipc.getCurrentUser().id,password:'clinic-admin-pw'});
+    await call('users:create',trinh);
+    await connect(S,'same key');await settle();await call('auth:logout');cloud.stop();db.close();
+    const dB=mk('SB');db.init(dB);await call('cloud:join',{url:S,key:'same key'});await settle();
+    out.sameBBefore=!!db.login('admin','clinic-admin-pw');cloud.stop();db.close();
+    db.init(dA);await asTrinh();
+    await call('cloud:disconnect');
+    await call('users:delete',adminNamed('admin').id);
+    out.sameReconnect=await connect(S,'same key');await settle();await settle();
+    out.sameA=!!db.login('admin','clinic-admin-pw');await call('auth:logout');cloud.stop();db.close();
+    db.init(dB);await settle();await settle();out.sameB=!!db.login('admin','clinic-admin-pw');cloud.stop();db.close();
+  });
+
+  /* 4. an administrator deleted while the server was out of reach, then (a) Disconnect and connect again, (b) a backup put on another laptop */
+  const markerRun=async(tag,after)=>{
+    const M=srv('mark'+tag,'mark key');const host='mark'+tag+'.mmw.workers.dev';
+    const dA=mk('KA'+tag);db.init(dA);
+    await call('auth:login',{username:'admin',password:'admin'});
+    await call('users:create',trinh);
+    await call('users:create',{username:'bob',full_name:'Bob Admin',role:'admin',password:'bob-pass-12'});
+    await connect(M,'mark key');await settle();await call('auth:logout');cloud.stop();db.close();
+    const dB=mk('KB'+tag);db.init(dB);await call('cloud:join',{url:M,key:'mark key'});await settle();
+    db.login('bob','bob-pass-12');   // Bob works on B: the audit log points at him there
+    cloud.stop();db.close();
+    db.init(dA);await asTrinh();
+    SERVERS[host].down=true;
+    await call('users:delete',adminNamed('bob').id);await settle();
+    SERVERS[host].down=false;
+    await after(dA,M);
+    db.init(dB);await settle();await settle();
+    const r={bobOnB:!!db.login('bob','bob-pass-12'),deletions:[...rowsOf(M).values()].filter((x)=>x.deleted&&x.entity==='user').map((x)=>JSON.parse(x.data))};
+    cloud.stop();db.close();return r;};
+  await section('marker',async()=>{
+    out.markReconnect=await markerRun('r',async(dA,M)=>{await call('cloud:disconnect');await connect(M,'mark key');await settle();await call('auth:logout');cloud.stop();db.close();});
+    out.markBackup=await markerRun('b',async(dA,M)=>{const d2=mk('KA2');await db.backupTo(path.join(d2,'mission-minded.db'));await call('auth:logout');cloud.stop();db.close();
+      db.init(d2);await asTrinh();await connect(M,'mark key');await settle();await call('auth:logout');cloud.stop();db.close();});
+  });
+
+  /* 5. a laptop joins and its wifi drops on the second page of its first pull */
+  await section('cut',async()=>{
+    const C=srv('cutsrv','cut key');
+    const dS=mk('CS');db.init(dS);
+    await call('auth:login',{username:'admin',password:'admin'});
+    const su=ipc.getCurrentUser();
+    const ev=db.createEvent(su,{name:'Lowell Oct 18',location:'Lowell'});db.setActiveEvent(su,ev.id);
+    for(let i=0;i<450;i++)db.createPatient(su,{first_name:'P'+i,last_name:'Cut',dob:'1980-01-01',gender:'female',phone:'5035550000',demographics:{},medical_history:{},dental_history:{visit_type:'filling'},consents:[]});
+    await connect(C,'cut key');for(let i=0;i<3;i++)await settle();
+    // The city list added after the patients: the event now reaches a new laptop after them.
+    db.updateEvent(su,ev.id,{cities:['Lowell','Dexter']});await settle();
+    await call('auth:logout');cloud.stop();db.close();
+    const dN=mk('CN');db.init(dN);
+    cut.host='cutsrv.mmw.workers.dev';cut.skip=1;cut.fail=1;
+    const j=await call('cloud:join',{url:C,key:'cut key'});
+    out.cutFirst=j.ok?!!(j.data.sync&&j.data.sync.ok):j.error;out.cutWasCut=cut.fail===0;
+    for(let i=0;i<3;i++)await settle();
+    out.cutGot=db.listPatients({eventId:'all'}).length;out.cutPending=db.getSyncPending().length;
+    cloud.stop();db.close();
+  });
+
+  /* 6. two events, each with its own "ana", deleted on one laptop */
+  await section('evstaff',async()=>{
+    const E=srv('evsrv','ev key');
+    const dA=mk('EA');db.init(dA);
+    await call('auth:login',{username:'admin',password:'admin'});
+    const a=ipc.getCurrentUser();
+    const keep=db.createEvent(a,{name:'Gresham Nov 1',location:'G'});
+    const e1=db.createEvent(a,{name:'Lowell Oct 18',location:'Lowell'}),e2=db.createEvent(a,{name:'Sandy Oct 25',location:'Sandy'});
+    db.createUser(a,{username:'ana',full_name:'Ana Lopez',role:'emt',password:'ana-lowell-1',event_id:e1.id});
+    db.createUser(a,{username:'ana',full_name:'Ana Lopez',role:'doctor',password:'ana-sandy-22',event_id:e2.id});
+    db.setActiveEvent(a,keep.id);
+    out.evStaffCount=db.listEvents().filter((e)=>/Lowell|Sandy/.test(e.name)).map((e)=>e.staff_count);
+    await connect(E,'ev key');await settle();await call('auth:logout');cloud.stop();db.close();
+    const dB=mk('EB');db.init(dB);await call('cloud:join',{url:E,key:'ev key'});await settle();
+    out.evBBefore=[!!db.login('ana','ana-lowell-1'),!!db.login('ana','ana-sandy-22')];cloud.stop();db.close();
+    db.init(dA);await call('auth:login',{username:'admin',password:'admin'});
+    out.evDeleted=[];
+    for(const e of db.listEvents().filter((x)=>/Lowell|Sandy/.test(x.name))){const r=await call('events:delete',{id:e.id,force:true});out.evDeleted.push(r.ok?r.data.staff:r.error);}
+    out.evA=db.listUsers().filter((u)=>u.username==='ana').length;
+    await settle();await call('auth:logout');cloud.stop();db.close();
+    db.init(dB);await settle();await settle();
+    out.evB={anas:db.listUsers().filter((u)=>u.username==='ana').length,signIn:!!db.login('ana','ana-lowell-1')||!!db.login('ana','ana-sandy-22')};
+    cloud.stop();db.close();
+    const dN=mk('EN');db.init(dN);await call('cloud:join',{url:E,key:'ev key'});await settle();await settle();
+    out.evN=db.listUsers().filter((u)=>u.username==='ana').length;cloud.stop();db.close();
+  });
+
+  /* 7. staff accounts that arrive with no event, as a laptop sends one whose event was deleted from under it */
+  await section('orphan',async()=>{
+    const dX=mk('OX');db.init(dX);
+    const a=db.login('admin','admin');
+    const ev=db.createEvent(a,{name:'Lowell Oct 18'});
+    db.createUser(a,{username:'ana',full_name:'Ana Lopez',role:'emt',password:'ana-lowell-1',event_id:ev.id});
+    const env=db.collectSyncRows(400).rows.find((r)=>r.entity==='user'&&r.data.username==='ana');
+    const r1=db.applyRemoteRows([{...env,event_uid:null,updated_at:'2999-01-01T00:00:00.000Z@other',data:{...env.data,active:0}}]);
+    const ana=db.listUsers().find((u)=>u.username==='ana');
+    out.orphanKept={ev:!!ana&&ana.event_id===ev.id,off:!!ana&&ana.active===false,applied:r1.applied};
+    db.close();
+    const dY=mk('OY');db.init(dY);
+    db.applyRemoteRows([{...env,uid:'uid-ana-one',event_uid:null,updated_at:'2999-01-02T00:00:00.000Z@o',data:{...env.data,role:'emt'}},
+                        {...env,uid:'uid-ana-two',event_uid:null,updated_at:'2999-01-03T00:00:00.000Z@o',data:{...env.data,role:'doctor'}}]);
+    const h=new Sqlite(path.join(dY,'mission-minded.db'),{readonly:true});
+    out.orphanTwo=h.prepare("SELECT uid, role FROM users WHERE username = 'ana'").all();h.close();
+    db.close();
+  });
+
+  /* 8. a deletion of admin / admin from a laptop still on 0.0.15 (no "carried out"), where admin / admin has signed in */
+  await section('old',async()=>{
+    const dN=mk('ON');db.init(dN);
+    const a=db.login('admin','admin');
+    db.createUser(a,trinh);
+    const t=db.login('trinh','trinh-pass-1');
+    db.createUser(t,{username:'bob',full_name:'Bob Admin',role:'admin',password:'bob-pass-12'});
+    db.login('bob','bob-pass-12');
+    const bobUid=db.collectSyncRows(400).rows.find((r)=>r.entity==='user'&&r.data.username==='bob').uid;
+    const del=(uid)=>({entity:'user',uid,event_uid:null,patient_uid:null,deleted:1,updated_at:'2999-01-01T00:00:00.000Z@v15',data:{}});
+    const r=db.applyRemoteRows([del(AD)]);
+    out.oldShipped={deleted:r.deleted,deferred:r.deferred,shipped:shipped(),hint:await hint()};
+    const rb=db.applyRemoteRows([del(bobUid)]);
+    out.oldBob={deferred:rb.deferred,bob:!!db.login('bob','bob-pass-12')};
+    db.close();
+  });
+
+  /* 9. the clinic's only administrator, on her own account */
+  await section('self',async()=>{
+    const dS=mk('SS');db.init(dS);
+    await call('auth:login',{username:'admin',password:'admin'});
+    const me=ipc.getCurrentUser();
+    await call('users:update',{id:me.id,password:'director-pw-1'});
+    out.selfOff=err(await call('users:update',{id:me.id,active:false}));
+    out.selfRole=err(await call('users:update',{id:me.id,role:'doctor'}));
+    out.selfEdit=(await call('users:update',{id:me.id,full_name:'Dr Director',role:'admin'})).ok===true;
+    const cur=(await call('auth:current')).data;
+    out.selfStill=!!cur&&cur.role==='admin'&&!!db.login('admin','director-pw-1');
+    await call('users:create',{username:'bob',full_name:'Bob Admin',role:'admin',password:'bob-pass-12'});
+    out.otherOff=(await call('users:update',{id:adminNamed('bob').id,active:false})).ok===true;
+    const tryDb=(patch)=>{try{db.updateUser(null,me.id,patch);return '';}catch(e){return e.message;}};
+    out.lastOff=tryDb({active:false});out.lastRole=tryDb({role:'doctor'});
+    await call('auth:logout');db.close();
+  });
+
+  for(const d of dirs)fs.rmSync(d,{recursive:true,force:true});
+  done(out);
+})().catch((e)=>done({crash:String((e&&e.stack)||e)}));
+`;
+    const { execFileSync: execF } = await import('node:child_process');
+    const pathOfF = (rel) => fileURLToPathSev(new URL(rel, import.meta.url));
+    const probeFileF = path.join(pathOfF('.'), '.final-fix-probe.cjs');
+    let F;
+    try {
+      fs.writeFileSync(probeFileF, probeF);
+      const outF = execF(process.execPath, [probeFileF, pathOfF('../src/main/db.js'), pathOfF('../src/main/ipc.js'), pathOfF('../src/main/cloud.js'),
+        pathOfF('../cloud/worker.js')], { encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
+      F = JSON.parse(outF.slice(outF.lastIndexOf('@@F@@') + 5));
+    } catch (e) {
+      F = { crash: String((e && e.message) || e) + (e && e.stderr ? ' ' + String(e.stderr).slice(-300) : '') };
+    } finally {
+      fs.rmSync(probeFileF, { force: true });
+    }
+    const brokeF = Object.keys(F).filter((k) => /^crash_/.test(k)).map((k) => k.slice(6) + ': ' + F[k]);
+    log(!F.crash && !brokeF.length, 'final fix pass: the probe runs against the real ipc.js, db.js, cloud.js and Worker'
+      + (F.crash ? ' — ' + F.crash.slice(0, 400) : '') + (brokeF.length ? ' — broke in ' + brokeF.join(' | ').slice(0, 600) : ''));
+    const goneF = (o) => !!o && o.shipped === false && o.trinh === true && o.hint === null;
+    log(F.firstDeleted === true && F.firstConnected === true && goneF(F.firstL1) && goneF(F.firstL2) && goneF(F.firstL3) && F.firstServer === 1,
+      `cloud: admin / admin deleted before the laptop was ever connected stays gone once fresh laptops join — on that laptop, on the one that joined, and on one that joins after — and the server holds the deletion (L1 ${JSON.stringify(F.firstL1)}, L2 ${JSON.stringify(F.firstL2)}, L3 ${JSON.stringify(F.firstL3)})`);
+    log(F.movedOld === 1 && F.movedTo === true && goneF(F.movedA),
+      `cloud: admin / admin deleted on the server a laptop was on does not come back to that laptop when it moves to another server and a fresh laptop joins there (${JSON.stringify(F.movedA)})`);
+    log(F.sameBBefore === true && F.sameReconnect === true && F.sameA === false && F.sameB === false,
+      'cloud: the clinic\'s admin deleted while this laptop was disconnected, then connected again to the same server, is deleted there and on the other laptop — not taken back from the server');
+    const markF = (o) => !!o && o.bobOnB === false && o.deletions.length === 1 && o.deletions[0] && o.deletions[0].carried_out === 1;
+    log(markF(F.markReconnect), `cloud: an administrator's deletion made while the server was out of reach still says it was carried out after Disconnect and connecting again, so it lands where she had signed in (${JSON.stringify(F.markReconnect)})`);
+    log(markF(F.markBackup), `cloud: so does one still waiting in a backup, put on another laptop and connected (${JSON.stringify(F.markBackup)})`);
+    log(F.cutWasCut === true && F.cutGot === 450 && F.cutPending === 0,
+      `cloud: a laptop whose first pull is cut off after one page still ends with every patient — the rows waiting for their event were kept with the cursor (${F.cutGot} of 450, ${F.cutPending} waiting)`);
+    log(Array.isArray(F.evStaffCount) && F.evStaffCount.join() === '1,1' && Array.isArray(F.evBBefore) && F.evBBefore.every(Boolean)
+      && Array.isArray(F.evDeleted) && F.evDeleted.join() === '1,1' && F.evA === 0 && !!F.evB && F.evB.anas === 0 && F.evB.signIn === false && F.evN === 0,
+      `events: deleting an event deletes its staff accounts with it, here and on every laptop — neither event's "ana" signs in anywhere, and a laptop joining afterwards has neither (A ${F.evA}, B ${JSON.stringify(F.evB)}, new ${F.evN})`);
+    log(!!F.orphanKept && F.orphanKept.ev === true && F.orphanKept.off === true && F.orphanKept.applied === 1,
+      'cloud: a staff account arriving with no event keeps the event it has here, and the change it carries (turned off) still applies');
+    log(Array.isArray(F.orphanTwo) && F.orphanTwo.length === 1 && F.orphanTwo[0].uid === 'uid-ana-one' && F.orphanTwo[0].role === 'emt',
+      `cloud: two events' "ana" arriving with no event are never merged into one account — the second does not take over the first (${JSON.stringify(F.orphanTwo)})`);
+    log(!!F.oldShipped && F.oldShipped.deleted === 1 && F.oldShipped.deferred === 0 && F.oldShipped.shipped === false && F.oldShipped.hint === null
+      && !!F.oldBob && F.oldBob.deferred === 1 && F.oldBob.bob === true,
+      'cloud: an older laptop\'s deletion of admin / admin is carried out where admin / admin has signed in and another administrator exists — one of a real administrator who has signed in is still held back');
+    log(F.selfOff === 'You cannot turn off your own account.' && F.selfRole === 'You cannot take the administrator role from your own account.'
+      && F.selfEdit === true && F.selfStill === true && F.otherOff === true
+      && F.lastOff === 'Cannot turn off the last administrator.' && F.lastRole === 'Cannot take the administrator role from the last administrator.',
+      'staff: an administrator cannot turn off her own account or take the administrator role from it, nobody can do either to the last administrator, and she stays signed in to change her own name');
+
+    /* ---- the screens ---- */
+    const savedApiF = { ...window.api };
+    const lastToastF = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+    const pressF = (root, label) => { const b = $all('button', root).find((x) => x.textContent.trim() === label); if (b) b.click(); return !!b; };
+    const fieldF = (root, re) => { const l = root && $all('label.field', root).find((x) => re.test(((x.querySelector('.field-label') || {}).textContent || '').trim())); return l ? l.querySelector('input') : null; };
+    const signedF = currentUser;
+    try {
+      const storeF = (await import('../src/renderer/js/store.js')).store;
+      storeF.setUser(currentUser);
+      const navF = [];
+      const ctxF = { navigate: (to) => navF.push(to), toast: () => {}, store: storeF, setDetail: () => {}, refreshSecurity: () => {} };
+      const { renderAdmin } = await import('../src/renderer/js/views/admin.js');
+      $all('.modal-overlay').forEach((o) => o.remove());
+
+      // Staff: her own row, beside another administrator's.
+      const me = currentUser;
+      window.api.usersList = async () => ({ ok: true, data: [
+        { id: me.id, username: me.username, full_name: me.full_name, role: 'admin', active: true, event_id: null },
+        { id: 990001, username: 'bob.admin', full_name: 'Bob Admin', role: 'admin', active: true, event_id: null }] });
+      const sv = renderAdmin(ctxF, { section: 'staff' }); document.body.append(sv);
+      await settleF(20);
+      const adminCardF = $all('.card', sv).find((c) => /Global administrators/.test(c.textContent));
+      const rowF = (u) => adminCardF && $all('tbody tr', adminCardF).find((tr) => tr.children[1] && tr.children[1].textContent === u);
+      const btnsF = (tr) => (tr ? $all('button', tr).map((b) => b.textContent.trim()) : []);
+      const mineF = btnsF(rowF(me.username)), bobsF = btnsF(rowF('bob.admin'));
+      const roleLocked = async (u) => {
+        const tr = rowF(u); const b = tr && $all('button', tr).find((x) => x.textContent.trim() === 'Edit');
+        if (!b) return null; b.click(); await settleF();
+        const ov = $all('.modal-overlay').pop(); const sel = ov && ov.querySelector('select');
+        const locked = sel ? sel.disabled === true : null;
+        if (ov) pressF(ov, 'Cancel'); await settleF();
+        return locked;
+      };
+      const myRoleLocked = await roleLocked(me.username), bobRoleLocked = await roleLocked('bob.admin');
+      log(mineF.includes('Edit') && !mineF.includes('Disable') && bobsF.includes('Disable') && myRoleLocked === true && bobRoleLocked === false,
+        `Staff: an administrator's own row offers no Disable and her own role cannot be changed — another administrator's row can be (own ${mineF.join('/')}, other ${bobsF.join('/')})`);
+      sv.remove();
+      window.api.usersList = savedApiF.usersList;
+
+      // Delete event: the confirm says its staff accounts go with it.
+      window.api.eventsList = async () => ({ ok: true, data: [{ id: 990010, uid: 'u-990010', name: 'Lowell Oct 18', location: '', start_date: '2026-10-18', end_date: '2026-10-18', active: true, patient_count: 0, staff_count: 2, prereg_url: null }] });
+      const ev = renderAdmin(ctxF, { section: 'events' }); document.body.append(ev);
+      await settleF(20);
+      const evRow = $all('tbody tr', ev).find((tr) => /Lowell Oct 18/.test(tr.textContent));
+      const trash = evRow && $all('button.btn--danger', evRow).pop();
+      if (trash) trash.click();
+      await settleF();
+      const evOv = $all('.modal-overlay').pop();
+      log(!!evOv && /Its 2 staff account\(s\) are deleted with it/.test(evOv.textContent.replace(/\s+/g, ' ')) && /administrators are kept/.test(evOv.textContent),
+        'Events: Delete says how many staff accounts are deleted with the event, and that administrators are kept');
+      if (evOv) pressF(evOv, 'Cancel');
+      await settleF();
+      ev.remove();
+      window.api.eventsList = savedApiF.eventsList;
+
+      // Cloud tab, connected: a new address with the key left blank.
+      const callsF = [];
+      const stF = { enabled: true, mode: 'online', online: true, url: 'https://one.mmw.workers.dev', hasKey: true, configured: true, deviceId: 'dev-f', cursor: '',
+        lastOk: '', lastPush: '', lastError: '', running: false, pushed: 0, pulled: 0, applied: 0 };
+      window.api.cloudStatus = async () => ({ ok: true, data: { ...stF } });
+      window.api.cloudTest = async ({ url, key } = {}) => { callsF.push(['test', url, key]); return { ok: true, data: { service: 'mmw-sync', version: 'x' } }; };
+      window.api.cloudConfig = async (cfg = {}) => { callsF.push(['config', cfg.url, cfg.key]); return { ok: true, data: { ...stF } }; };
+      const cv = renderAdmin(ctxF, { section: 'cloud' }); document.body.append(cv);
+      await settleF();
+      setInput(fieldF(cv, /^Server address/), 'https://two.mmw.workers.dev');
+      pressF(cv, 'Save server');
+      await settleF();
+      const blankToast = lastToastF();
+      const blankOv = $all('.modal-overlay').length;
+      log(/Enter the clinic key for this server as well as its address/.test(blankToast) && callsF.length === 0 && blankOv === 0,
+        `Cloud tab, connected: Save server with a new address and the key left blank asks for that server's key — no test that reads as a wrong key (${blankToast.slice(0, 80)})`);
+      $all('.modal-overlay').forEach((o) => o.remove());
+      setInput(fieldF(cv, /^Server address/), 'https://one.mmw.workers.dev/');
+      pressF(cv, 'Save server');
+      await settleF();
+      log(callsF.length === 2 && callsF[0][0] === 'test' && callsF[0][2] === '' && callsF[1][0] === 'config',
+        'Cloud tab, connected: the same server with the key left blank still tests with the saved key and saves');
+      cv.remove();
+
+      // Join a clinic, signed out.
+      currentUser = null;
+      const joinsF = [];
+      let moveToF = null;
+      window.api.authNeedsSetup = async () => ({ ok: true, data: { needsSetup: false, defaultAdmin: { username: 'admin', password: 'admin' }, connected: !!moveToF } });
+      window.api.cloudJoin = async ({ url, key, move } = {}) => {
+        joinsF.push([url, key, !!move]);
+        if (moveToF && !move) return { ok: true, data: { moveTo: moveToF } };
+        return { ok: true, data: { ok: true, service: 'mmw-sync', version: 'x', sync: { ok: true }, needsSetup: false, accounts: 2 } };
+      };
+      const { renderSetup } = await import('../src/renderer/js/views/setup.js');
+      const joinF = () => { const v = renderSetup(ctxF, { mode: 'join' }); document.body.append(v); return v; };
+      let jv = joinF();
+      await settleF();
+      setInput(fieldF(jv, /^Connection code/), 'MMW1-abc');
+      pressF(jv, 'Connect and sync');
+      await settleF();
+      const badCodeErr = (jv.querySelector('.login-error') || {}).textContent || '';
+      setInput(fieldF(jv, /^Clinic address/), 'https://typed.mmw.workers.dev');
+      setInput(fieldF(jv, /^Clinic key/), 'typed key 9');
+      pressF(jv, 'Connect and sync');
+      await settleF();
+      log(/incomplete or damaged/.test(badCodeErr) && JSON.stringify(joinsF) === JSON.stringify([['https://typed.mmw.workers.dev', 'typed key 9', false]]),
+        'Join a clinic: after a damaged code is refused, the address and key typed next are what connect — the code box no longer stands in their way');
+      jv.remove();
+      // Already connected to another server: it asks first, as Save server does.
+      moveToF = 'two.mmw.workers.dev';
+      joinsF.length = 0; navF.length = 0;
+      jv = joinF();
+      await settleF();
+      setInput(fieldF(jv, /^Clinic address/), 'https://two.mmw.workers.dev');
+      setInput(fieldF(jv, /^Clinic key/), 'two key');
+      pressF(jv, 'Connect and sync');
+      await settleF();
+      let mv = $all('.modal-overlay').pop();
+      const askedF = mv ? mv.textContent : '';
+      if (mv) pressF(mv, 'Cancel');
+      await settleF();
+      const afterCancel = joinsF.length;
+      pressF(jv, 'Connect and sync');
+      await settleF();
+      mv = $all('.modal-overlay').pop();
+      if (mv) pressF(mv, 'Send everything to two.mmw.workers.dev');
+      await settleF();
+      log(/Move this laptop to a different server\?/.test(askedF) && /two\.mmw\.workers\.dev/.test(askedF) && /Reset this computer/.test(askedF)
+        && afterCancel === 1 && joinsF.length === 3 && joinsF[2][2] === true && navF.includes('login'),
+        'Join a clinic: on a laptop connected to another server it asks before moving it — naming the new server and Reset this computer — and Cancel moves nothing');
+      jv.remove();
+    } finally {
+      currentUser = signedF;
+      $all('.modal-overlay').forEach((o) => o.remove());
+      for (const k of Object.keys(window.api)) if (!(k in savedApiF)) delete window.api[k];
+      Object.assign(window.api, savedApiF);
     }
   }
 

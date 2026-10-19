@@ -308,7 +308,7 @@ function register(getMainWindow) {
   // connected, whose staff could already sign in). It changes nothing either —
   // not even a paused laptop's pause, which is the administrator's — and only
   // waits for a sync and says what is here now.
-  handle('cloud:join', async ({ url, key } = {}) => {
+  handle('cloud:join', async ({ url, key, move } = {}) => {
     if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
     const saved = db.getSyncMeta();
     const already = saved.configured && !!String(url || '').trim()
@@ -318,6 +318,16 @@ function register(getMainWindow) {
     }
     if (!String(key || '').trim()) throw new Error('Enter the clinic key as well as the address.');
     const health = await cloud.testConnection(url, key);
+    // A DIFFERENT server, for a laptop already connected — one tried on a
+    // trial server, joining the clinic's — moves every record here to it.
+    // Admin → Cloud asks first ("Move this laptop to a different server?");
+    // Join moved it without a word, a pasted code for another server
+    // included. So the first press only answers with the question (moveTo),
+    // and the laptop moves on the confirmed one (move).
+    if (!currentUser && !already && !move && saved.configured
+        && cloud.normalizeUrl(url) !== cloud.normalizeUrl(saved.url)) {
+      return { moveTo: new URL(cloud.normalizeUrl(url)).host };
+    }
     if (!already) {
       cloud.applyConfig({ url, key, online: true });
       db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));

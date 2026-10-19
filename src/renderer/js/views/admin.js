@@ -171,13 +171,16 @@ export function renderAdmin(ctx, params = {}) {
             : el('span', { class: 'pill pill--purple' }, [icon('globe', { size: 12 }), 'Global']),
         ]));
       }
+      // Not on her own row: turning herself off ended her session at the next
+      // click, with nobody signed in to turn her back on (main refuses it too).
+      const own = !!store.user && store.user.id === u.id;
       cells.push(
         el('td', {}, [u.active
           ? el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Active'])
           : el('span', { class: 'pill pill--neutral' }, ['Disabled'])]),
         el('td', {}, [el('div', { class: 'inline-row', style: 'margin:0; justify-content:flex-end;' }, [
           el('button', { class: 'btn btn--ghost btn--sm', onClick: () => editUser(u, activeEvent) }, [icon('pen', { size: 14 }), 'Edit']),
-          el('button', {
+          own ? null : el('button', {
             class: 'btn btn--ghost btn--sm',
             onClick: async () => {
               try { await api.updateUser({ id: u.id, active: !u.active }); paint(); } catch (e) { toast(e.message, 'error'); }
@@ -243,6 +246,9 @@ export function renderAdmin(ctx, params = {}) {
       role.append(op);
     });
     if (forceAdmin) role.disabled = true;
+    // Her own role neither: a changed role ends the session, and taking the
+    // administrator role from herself left nobody to give it back.
+    if (u && u.id && store.user && store.user.id === u.id) role.disabled = true;
     const pass = el('input', { class: 'input', type: 'password', placeholder: isNew ? 'Password' : 'New password (leave blank to keep)' });
 
     // A staff account belongs to one event, so somebody who worked another
@@ -427,7 +433,10 @@ export function renderAdmin(ctx, params = {}) {
       try { await api.setEventState(e.id, on); store.setEvent(await api.activeEvent()); toast(on ? 'Event reactivated' : 'Event turned off', 'success'); paint(); } catch (err) { toast(err.message, 'error'); }
     }
     async function delEvent(e) {
-      const ok = await modal({ title: 'Delete event?', body: `Delete <b>${e.name}</b>?${e.patient_count ? ` It has <b>${e.patient_count}</b> patient record(s).` : ''}`, confirmText: 'Delete', cancelText: 'Cancel', danger: true });
+      // Its staff accounts are deleted with it (each belongs to this one event),
+      // on every laptop, as Start fresh deletes them. Administrators stay.
+      const staffNote = e.staff_count ? ` Its <b>${e.staff_count}</b> staff account(s) are deleted with it; administrators are kept.` : '';
+      const ok = await modal({ title: 'Delete event?', body: `Delete <b>${e.name}</b>?${e.patient_count ? ` It has <b>${e.patient_count}</b> patient record(s).` : ''}${staffNote}`, confirmText: 'Delete', cancelText: 'Cancel', danger: true });
       if (!ok) return;
       try {
         await api.deleteEvent(e.id, false);
@@ -794,6 +803,12 @@ export function renderAdmin(ctx, params = {}) {
     async function connect(url, key, btn) {
       if (!url) { toast('Enter the address of your clinic\'s sync server.', 'error'); return; }
       if (!st.hasKey && !key) { toast('Enter the clinic key for this server.', 'error'); return; }
+      // The saved key is kept for the server it was saved for, never sent to
+      // another (main refuses it). Tested without one, the new server answered
+      // 401, read as "refused the clinic key", when none was given.
+      if (!key && st.configured && originOf(url) !== originOf(st.url)) {
+        toast('Enter the clinic key for this server as well as its address.', 'error'); return;
+      }
       btn.disabled = true;
       try {
         await api.cloudTest(url, key);
