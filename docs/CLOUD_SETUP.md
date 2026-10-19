@@ -363,9 +363,7 @@ On each other laptop, on the same Wi-Fi:
   connection code.
 - **Not listed?** Some routers stop laptops finding each other. Type the
   address the host shows in **Host address** (like `192.168.1.23:47800`),
-  with the clinic key. (The host announces itself only on private networks,
-  the kind a router makes — never on a hotel's or a café's, should it be
-  opened there.)
+  with the clinic key.
 - **Listed twice under the same name?** Beacons prove nothing by
   themselves, so another device can copy the clinic's name. Choose either:
   the wrong one cannot show it holds the clinic key, and says so — then
@@ -398,9 +396,16 @@ When it is back they catch up by themselves, both ways, as they do online
 when the internet drops. Leave sync on (the paused-sync rule in
 [Then](#then) applies here too).
 
-The host hosts again by itself when Mission Minded opens on it. If the router
-gives it a new address, or its port was taken, the other laptops find it
-again by its beacon — nobody retypes anything.
+The host hosts again by itself when Mission Minded opens on it — on the
+clinic's Wi-Fi. If the router gives it a new address, or its port was taken,
+the other laptops find it again by its beacon — nobody retypes anything.
+
+Opened anywhere else — at a hotel, a café, on a phone's hotspot — it does
+not announce the clinic network there. Its card says "**Not on the clinic
+Wi-Fi: hosting paused**", and it hosts again by itself as soon as it is back
+on the clinic's Wi-Fi (also when the app opened before the Wi-Fi had
+connected). A new router at the clinic counts as another network: on the
+host, press **Host here anyway** once, and it remembers that one too.
 
 ### Moving the host to another laptop
 1. On the new host, **Host the clinic network**. It asks first, because the

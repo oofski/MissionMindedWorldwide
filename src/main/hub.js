@@ -42,8 +42,20 @@ const MAX_BODY = 100 * 1024 * 1024;
 // and every laptop's sync, down with it. Nothing the app sends without the key
 // has a body at all.
 const PRE_AUTH_BODY = 64 * 1024;
-// Connections at once. Fifteen chairs' laptops each use one at a time.
-const MAX_CONNECTIONS = 64;
+// Connections at once from one address. A laptop uses one at a time, a few
+// while it tests the network. A cap on all connections together (Node's
+// maxConnections) let anyone on the Wi-Fi, without the key, stop every
+// laptop syncing — this one's own included — by holding that many
+// connections open without ever starting TLS: Node drops every connection
+// over the cap. Counted per address, the most one address takes is its own
+// share, and this laptop's own connection (127.0.0.1) is never counted.
+const PER_ADDRESS = 8;
+// And from every other address together, only so the number of open
+// sockets has a bound: far above any clinic's laptops.
+const MAX_CONNECTIONS = 1024;
+// A connection that has not finished its TLS handshake by then is let go.
+// A laptop's takes milliseconds; a silent one held its place for 20 seconds.
+const HANDSHAKE_MS = 5000;
 // A laptop counts as connected while it has synced within this long (they
 // sync every 4 seconds while open).
 const SEEN_MS = 60 * 1000;
@@ -53,6 +65,9 @@ const MAX_LAPTOPS = 200;
 const state = {
   dir: null, sqlite: null, server: null, port: 0, error: '',
   beacon: null, beaconTimer: null, beaconError: '',
+  // Hosting is on, but this laptop is not on the clinic's Wi-Fi: it waits
+  // for it (see resume) instead of hosting here.
+  paused: false, watch: null,
   laptops: new Map(),
   // This laptop's own device id (its sync client's), so the list of laptops
   // connected can say which one is this laptop — by who it is, not by its
@@ -331,6 +346,28 @@ async function onRequest(req, res, worker, env) {
   }
 }
 
+// The limits above, applied as each connection arrives — before TLS starts
+// on it (prepended, so the TLS server's own listener runs only for the ones
+// let in). A connection over a limit is closed at once.
+const isLoopback = (a) => a === '127.0.0.1' || a === '::1';
+function limitConnections(server) {
+  const byAddress = new Map();
+  let others = 0;
+  server.prependListener('connection', (sock) => {
+    const a = String(sock.remoteAddress || '').replace(/^::ffff:/, '');
+    if (isLoopback(a)) return;
+    const n = byAddress.get(a) || 0;
+    if (n >= PER_ADDRESS || others >= MAX_CONNECTIONS) { sock.destroy(); return; }
+    byAddress.set(a, n + 1);
+    others += 1;
+    sock.once('close', () => {
+      others -= 1;
+      const left = (byAddress.get(a) || 1) - 1;
+      if (left > 0) byAddress.set(a, left); else byAddress.delete(a);
+    });
+  });
+}
+
 function listenOn(server, port, host) {
   return new Promise((resolve, reject) => {
     const onErr = (e) => { server.removeListener('listening', onOk); reject(e); };
@@ -379,6 +416,46 @@ function stopBeacon() {
   if (state.beacon) { try { state.beacon.close(); } catch (_) { /* closed */ } state.beacon = null; }
 }
 
+/* ---------------- The clinic's own Wi-Fi ---------------- */
+
+// Hosting resumes by itself when the app opens — and a host laptop opened at
+// a hotel, a café or on a phone's hotspot announced the clinic network's
+// name and id there every few seconds, and took connections there. Those
+// networks are private ones too (10.x, 192.168.x, 172.20.10.x), so "private"
+// could not tell them from the clinic's router. So hosting remembers the
+// networks it was hosted on — each by its range: 192.168.1.23 with
+// 255.255.255.0 is 192.168.1.0/24, whatever address the router hands out
+// next — and resumes by itself only on one of them. Elsewhere it waits,
+// paused, and starts when the laptop is back on the clinic's Wi-Fi (also
+// when the app opened before the Wi-Fi had connected); "Host here anyway"
+// hosts where it is, and remembers that network too.
+const MAX_NETWORKS = 8;
+function networkOf(a) {
+  const ip = String(a.address || '').split('.').map(Number), mask = String(a.netmask || '').split('.').map(Number);
+  if (ip.length !== 4 || mask.length !== 4 || ![...ip, ...mask].every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) return '';
+  const bits = mask.reduce((n, m) => n + m.toString(2).replace(/0/g, '').length, 0);
+  return ip.map((n, i) => n & mask[i]).join('.') + '/' + bits;
+}
+// The clinic-kind networks this laptop is on now (lan.lanAddresses: private,
+// not a virtual machine's or a VPN's).
+const networksHere = () => [...new Set(lan.lanAddresses().filter((a) => a.preferred).map(networkOf).filter(Boolean))];
+function savedNetworks() {
+  try { const v = JSON.parse(getMeta('networks') || '[]'); return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []; } catch (_) { return []; }
+}
+function rememberNetworks() {
+  const here = networksHere();
+  if (here.length) setMeta('networks', JSON.stringify([...new Set([...here, ...savedNetworks()])].slice(0, MAX_NETWORKS)));
+}
+// None remembered (it was first hosted on no network of that kind): any.
+function onClinicWifi() {
+  const saved = savedNetworks();
+  return !saved.length || networksHere().some((n) => saved.includes(n));
+}
+function stopWatch() {
+  if (state.watch) { clearInterval(state.watch); state.watch = null; }
+  state.paused = false;
+}
+
 /* ---------------- Start, stop, erase ---------------- */
 
 function plainListenError(e, port) {
@@ -390,7 +467,7 @@ function plainListenError(e, port) {
 // Overridable for tests only, like lan.defaults: the harness hosts on
 // 127.0.0.1, takes any free port the first time, and announces to its own
 // listeners instead of broadcasting.
-const defaults = { bindHost: '0.0.0.0', firstPort: lan.DEFAULT_PORT, beaconPort: lan.BEACON_PORT, announce: null, shareAddress: '' };
+const defaults = { bindHost: '0.0.0.0', firstPort: lan.DEFAULT_PORT, beaconPort: lan.BEACON_PORT, announce: null, shareAddress: '', networkCheckMs: 5000 };
 
 // Start hosting, on every network this laptop is on. A clinic network keeps
 // the port it was given the first time (47800 when free).
@@ -407,12 +484,13 @@ async function start({ name, port, bindHost = defaults.bindHost, beaconPort = de
   // Limits set here rather than left to Node's defaults, which change
   // between versions: a connection that never finishes its handshake or its
   // headers is let go, and a request has five minutes — a full 100 MB push
-  // over a slow Wi-Fi fits.
+  // over a slow Wi-Fi fits. How many connections, by address: see
+  // limitConnections.
   const server = https.createServer({
     key: getMeta('private_key'), cert: getMeta('cert'), minVersion: 'TLSv1.2',
-    handshakeTimeout: 20000, headersTimeout: 30000, requestTimeout: 300000,
+    handshakeTimeout: HANDSHAKE_MS, headersTimeout: 30000, requestTimeout: 300000,
   }, (req, res) => { onRequest(req, res, worker, env); });
-  server.maxConnections = MAX_CONNECTIONS;
+  limitConnections(server);
   const want = port != null ? port : (id.port || defaults.firstPort);
   let bound;
   try {
@@ -428,8 +506,10 @@ async function start({ name, port, bindHost = defaults.bindHost, beaconPort = de
   state.server = server;
   state.port = bound;
   state.error = '';
+  stopWatch();
   setMeta('port', bound);
   setMeta('hosting', '1');
+  rememberNetworks();
   startBeacon({ beaconPort, announce, version });
   return status();
 }
@@ -437,6 +517,7 @@ async function start({ name, port, bindHost = defaults.bindHost, beaconPort = de
 // keepHosting: the app is quitting, not the administrator stopping — so the
 // next start of the app hosts again by itself (see resume).
 async function stop({ keepHosting = false } = {}) {
+  stopWatch();
   stopBeacon();
   const server = state.server;
   state.server = null;
@@ -452,12 +533,31 @@ async function stop({ keepHosting = false } = {}) {
 }
 
 // Hosting survives a restart: if this laptop was hosting when the app
-// closed (or the laptop went to sleep and was restarted), it hosts again.
+// closed (or the laptop went to sleep and was restarted), it hosts again —
+// on the clinic's Wi-Fi (see onClinicWifi). Anywhere else it is paused, and
+// starts by itself once the laptop is back there. onStarted(status): called
+// whenever it does start, now or later, so the caller can point this
+// laptop's own sync at the port it got.
 async function resume(opts = {}) {
   if (!state.dir || !fs.existsSync(hubFile())) return null;
   open();
   if (getMeta('hosting') !== '1') return null;
-  try { return await start(opts); } catch (e) { state.error = e.message; return null; }
+  if (!state.server && !onClinicWifi()) { waitForClinicWifi(opts); return null; }
+  let st;
+  try { st = await start(opts); } catch (e) { state.error = e.message; return null; }
+  if (opts.onStarted) { try { opts.onStarted(st); } catch (_) { /* the caller's own problem */ } }
+  return st;
+}
+function waitForClinicWifi(opts) {
+  stopWatch();
+  state.paused = true;
+  state.watch = setInterval(() => {
+    if (state.server || !state.sqlite) { stopWatch(); return; }
+    if (!onClinicWifi()) return;
+    stopWatch();
+    resume(opts).catch((e) => { state.error = (e && e.message) || String(e); });
+  }, defaults.networkCheckMs);
+  if (state.watch.unref) state.watch.unref();
 }
 
 // The clinic network's data and identity, gone. The laptops keep their own
@@ -465,6 +565,7 @@ async function resume(opts = {}) {
 // hosted here afterwards is a new one, with a new certificate and key.
 async function erase() {
   if (state.server) throw new Error('Stop hosting first.');
+  stopWatch();
   closeFile();
   if (state.dir) for (const suffix of ['', '-wal', '-shm']) fs.rmSync(hubFile() + suffix, { force: true });
   return status();
@@ -474,6 +575,7 @@ async function erase() {
 // a promise here), and the hosting flag left as it was, so the next start of
 // the app hosts again.
 function shutdown() {
+  stopWatch();
   stopBeacon();
   const server = state.server;
   state.server = null;
@@ -562,12 +664,15 @@ function status() {
     name: id.name, port, hostId: id.hostId, pin: id.pin, pinShown: lan.showPin(id.pin),
     addresses: lan.lanAddresses().map((a) => ({ address: a.address, iface: a.iface, preferred: a.preferred, url: port ? `https://${a.address}:${port}` : '' })),
     laptops, error: state.error, beaconError: state.beaconError, computer: os.hostname(),
+    // Waiting for the clinic's Wi-Fi (see resume): the networks it hosts on,
+    // and the ones this laptop is on now.
+    paused: !state.server && state.paused, networks: savedNetworks(), networksHere: networksHere(),
   };
 }
 
 module.exports = {
   HUB_FILE, defaults, init, open, identity, start, stop, resume, erase, shutdown,
-  status, shareUrl, ownTarget, ownHostId, runningHostId,
-  makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS,
+  status, shareUrl, ownTarget, ownHostId, runningHostId, networkOf,
+  makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS, PER_ADDRESS, HANDSHAKE_MS,
   firewallScript, firewallCommand, allowThroughFirewall, FIREWALL_RULE,
 };

@@ -137,11 +137,12 @@ function buildMenu() {
 // hosting when the app closed — or when the laptop went to sleep, or off —
 // hosts again as it opens. Its port can change if another program took it
 // meanwhile; this laptop's own connection follows it there, and the other
-// laptops find it again by its beacon.
+// laptops find it again by its beacon. Opened away from the clinic's Wi-Fi
+// it waits until it is back there (hub.resume), and follows then.
 async function resumeHosting() {
+  const follow = (st) => { if (st && st.running) { const t = hub.ownTarget(); cloud.repointLan(t.url, t.lan.pin, t.lan.name); } };
   try {
-    const st = await hub.resume({ version: app.getVersion(), selfDevice: db.ensureDeviceId() });
-    if (st && st.running) { const t = hub.ownTarget(); cloud.repointLan(t.url, t.lan.pin, t.lan.name); }
+    await hub.resume({ version: app.getVersion(), selfDevice: db.ensureDeviceId(), onStarted: follow });
   } catch (_) { /* the Cloud tab says why it is not hosting */ }
 }
 

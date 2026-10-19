@@ -198,13 +198,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // every address the real host was heard at (cloud.refind), and could not
 // follow it to a new port. So a beacon with the same id and another
 // fingerprint is an entry of its own, listed as what it is.
+//
+// And a look-alike can copy the whole beacon, fingerprint start included,
+// and name any number of ports where it never finishes a handshake. So an
+// entry keeps a few ports per address and a few addresses, the most
+// recently heard first (urls): a host announces one port per address, and a
+// look-alike on an address of its own takes at most four places, so it
+// cannot push the host's out. cloud.refind tries them all together.
+const SCAN_PORTS_PER_ADDRESS = 4;
+const SCAN_URLS = 16;
 async function scan({ ms = 2500, port = defaults.beaconPort, queryPort = defaults.queryPort, targets = defaults.targets } = {}) {
   const found = new Map();
   const add = (b) => {
     const k = b.hostId + '|' + b.fp;
     const had = found.get(k);
     if (!had) { found.set(k, { ...b, urls: [b.url] }); return; }
-    if (!had.urls.includes(b.url)) had.urls.push(b.url);
+    const urls = [b.url, ...had.urls.filter((u) => u !== b.url)];
+    const atAddress = urls.filter((u) => hostPort(u).host === b.address);
+    const drop = new Set(atAddress.slice(SCAN_PORTS_PER_ADDRESS));
+    had.urls = urls.filter((u) => !drop.has(u)).slice(0, SCAN_URLS);
   };
   const stop = listen(add, { port });
   const q = dgram.createSocket('udp4');
@@ -291,6 +303,36 @@ async function peerPin(url, timeoutMs = 4000) {
   const p = presentedPin(sock);
   sock.destroy();
   return p;
+}
+
+// The first of `items` for which fn(item) resolves: { item, value }. Several
+// at once, in order — the addresses a host was heard at are tried together,
+// not one after another: a look-alike naming ports where it never finishes a
+// handshake made a joined laptop wait out each one in turn (4 seconds a
+// port) before it reached the host's. Rejects with the first item's error
+// when none resolves, or with null when there is nothing to try.
+function firstOf(items, fn, { concurrency = 8 } = {}) {
+  const list = [...items];
+  return new Promise((resolve, reject) => {
+    if (!list.length) { reject(null); return; }
+    const errors = new Array(list.length);
+    let next = 0, failed = 0, done = false;
+    const launch = () => {
+      if (done || next >= list.length) return;
+      const i = next++;
+      Promise.resolve().then(() => fn(list[i])).then((value) => {
+        if (done) return;
+        done = true; resolve({ item: list[i], value });
+      }, (e) => {
+        errors[i] = { e };
+        failed += 1;
+        if (done) return;
+        if (failed === list.length) { done = true; reject(errors[0].e); return; }
+        launch();
+      });
+    };
+    for (let k = 0; k < Math.max(1, concurrency); k++) launch();
+  });
 }
 
 /* ---------------- Joining without a code ---------------- */
@@ -426,7 +468,7 @@ module.exports = {
   APP_ID, DEFAULT_PORT, BEACON_PORT, BEACON_MS, FP_PREFIX, defaults,
   normPin, isPin, showPin,
   beaconMessage, readBeacon, isQuery, QUERY,
-  lanAddresses, broadcastTargets, hostBroadcastTargets, listen, scan,
-  request, peerPin, helloProof, learnPin,
+  lanAddresses, broadcastTargets, hostBroadcastTargets, listen, scan, SCAN_PORTS_PER_ADDRESS, SCAN_URLS,
+  request, peerPin, firstOf, helloProof, learnPin,
   classify, explain, diagnose, MESSAGES,
 };

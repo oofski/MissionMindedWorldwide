@@ -10180,6 +10180,64 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
           ans.close();
           return {entries,moved,tried,url:db.getSyncMeta().url,diag:{code:d.code,movedTo:d.movedTo||''}};`);
       });
+
+      /* a look-alike copying the whole beacon, naming ports that never finish a handshake */
+      await sectionL('flood', async () => {
+        const H7 = laptopL('H7'), F7 = laptopL('F7');
+        const h7 = await H7.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Flood'});
+          const t=hub.ownTarget();return {ok:r.ok,port:hub.status().port,pin:t.lan.pin,hostId:t.lan.hostId,key:t.key};`);
+        L.rFlood = await F7.run(`const net=require('net'),dgram=require('dgram');const H=${JSON.stringify(h7)};
+          const freeU=()=>new Promise((r)=>{const s=dgram.createSocket('udp4');s.bind(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p));});});
+          const listenP=await freeU(),quiet=await freeU();
+          Object.assign(lan.defaults,{beaconPort:listenP,queryPort:quiet,targets:['127.0.0.1']});
+          // Six ports at the look-alike's own address that take a connection and never answer.
+          const held=[],stalls=[];
+          for(let i=0;i<6;i++){const s=net.createServer((c)=>{c.on('error',()=>{});held.push(c);});await new Promise((r)=>s.listen(0,'127.0.0.2',r));stalls.push(s);}
+          const fake=dgram.createSocket('udp4');await new Promise((r)=>fake.bind(0,'127.0.0.2',r));
+          const real=dgram.createSocket('udp4');await new Promise((r)=>real.bind(0,'127.0.0.1',r));
+          const beacon=(port)=>lan.beaconMessage({name:'Flood',port,hostId:H.hostId,pin:H.pin});
+          // Heard before the host and after it, again and again.
+          const burst=()=>{for(const s of stalls)fake.send(beacon(s.address().port),listenP,'127.0.0.1',()=>{});
+            real.send(beacon(H.port),listenP,'127.0.0.1',()=>{});
+            for(const s of stalls)fake.send(beacon(s.address().port),listenP,'127.0.0.1',()=>{});};
+          const tick=setInterval(burst,200);burst();
+          const want='https://127.0.0.1:'+H.port;
+          const hosts=await lan.scan({ms:800});
+          const entries=hosts.filter((x)=>x.hostId===H.hostId).map((x)=>x.urls);
+          // Joined to that host, at an address it no longer has.
+          db.setSyncMeta({url:'https://127.0.0.1:1',key:H.key,lanPin:H.pin,lanHost:H.hostId,lanName:'Flood',mode:'online'});
+          let t0=Date.now();const moved=await cloud.refind();const refindMs=Date.now()-t0;
+          // "Test the clinic network" from the old address.
+          db.setSyncMeta({url:'https://127.0.0.1:1'});
+          t0=Date.now();let test;
+          try{const r=await cloud.testConnection('https://127.0.0.1:1',H.key,{lan:{pin:H.pin,hostId:H.hostId,name:'Flood'}});test={ok:r.ok,url:r.url};}catch(e){test={error:e.message};}
+          const testMs=Date.now()-t0;
+          clearInterval(tick);fake.close();real.close();for(const c of held)c.destroy();for(const s of stalls)s.close();
+          return {host:H.ok,want,entries,moved,refindMs,test,testMs,saved:db.getSyncMeta().url};`);
+      });
+
+      /* the host whose server did not come back at a start, moved off its own clinic network */
+      await sectionL('down', async () => {
+        const X = await inetSrvL('internet-key-4');
+        const A8 = laptopL('A8'), B8 = laptopL('B8'), C8 = laptopL('C8');
+        // Hosting, then a start of the app at which its server did not come back (its port taken, say): hosting still on, nothing running.
+        const downL = `hub.shutdown();hub.init(dir);const s=hub.status();return {running:s.running,hosting:s.hosting===true,isHost:cloud.status().isHost};`;
+        await A8.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Down'});return r.ok&&(await settle()).ok;`);
+        L.rDownA = await A8.run(downL);
+        L.rDownCfg = await A8.run(`const c=await call('cloud:config',{url:${JSON.stringify(X.url)},key:'internet-key-4',online:true});const sy=await settle();
+          const hosting=hub.status().hosting===true;hub.shutdown();hub.init(dir);const st=await hub.resume({version:'0.0.17'});
+          return {ok:c.ok,synced:sy.ok,kind:cloud.status().kind,hosting,resumed:!!(st&&st.running)};`);
+        await B8.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Other down'});return r.ok&&(await settle()).ok;`);
+        const cB8 = await codeOfL(B8);
+        await C8.run(`await call('auth:login',{username:'admin',password:'admin'});const r=await call('hub:start',{name:'Down two'});return r.ok&&(await settle()).ok;`);
+        L.rDownC = await C8.run(downL);
+        L.rDownJoin = await C8.run(`await call('auth:logout');
+          const q=await call('cloud:join',${JSON.stringify({ url: cB8.url, key: cB8.key, lan: cB8.lan })});
+          const m=await call('cloud:join',${JSON.stringify({ url: cB8.url, key: cB8.key, lan: cB8.lan, move: true })});
+          const hosting=hub.status().hosting===true;hub.shutdown();hub.init(dir);const st=await hub.resume({version:'0.0.17'});
+          return {asked:q.ok?{moveTo:q.data.moveTo||'',stopsHosting:q.data.stopsHosting===true}:{error:q.error},moved:m.ok?true:m.error,
+            kind:cloud.status().kind,on:cloud.status().lanName,hosting,resumed:!!(st&&st.running)};`);
+      });
     } catch (e) {
       crashL = String((e && e.stack) || e);
     } finally {
@@ -10283,6 +10341,18 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       `Join a clinic (sign-in), already joined: a fresh code with the host's new address — where beacons do not get through — is kept, and the laptop syncs there (${JSON.stringify(L.rRejoin)})`);
     log(!!L.rHostJoin && /Other/.test(L.rHostJoin.moveTo) && L.rHostJoin.stopsHosting === true && L.rHostJoin.running === true,
       `Join a clinic (sign-in), on the host: joining another clinic network asks first and says it stops hosting — and nothing stops until it is confirmed (${JSON.stringify(L.rHostJoin)})`);
+    log(!!L.rFlood && L.rFlood.host === true && L.rFlood.moved === L.rFlood.want && L.rFlood.refindMs < 6000 && L.rFlood.saved === L.rFlood.want
+      && !!L.rFlood.test && L.rFlood.test.ok === true && L.rFlood.test.url === L.rFlood.want && L.rFlood.testMs < 9000
+      && Array.isArray(L.rFlood.entries) && L.rFlood.entries.length === 1 && L.rFlood.entries[0].includes(L.rFlood.want)
+      && L.rFlood.entries[0].filter((u) => u.startsWith('https://127.0.0.2:')).length === lanL.SCAN_PORTS_PER_ADDRESS,
+      `clinic network: a look-alike copying the host's whole beacon and naming ports where it never finishes a handshake does not hold a laptop back — it is kept to ${lanL.SCAN_PORTS_PER_ADDRESS} of them, the addresses are tried together, and the laptop follows the host, by itself and with "Test the clinic network", in seconds (${JSON.stringify(L.rFlood)})`);
+    log(!!L.rDownA && L.rDownA.running === false && L.rDownA.hosting === true && L.rDownA.isHost === true
+      && !!L.rDownCfg && L.rDownCfg.ok === true && L.rDownCfg.synced === true && L.rDownCfg.kind === 'internet' && L.rDownCfg.hosting === false && L.rDownCfg.resumed === false,
+      `clinic network: a host whose server did not come back at a start, moved to the internet server, stops hosting too — it does not host again at the next start while it syncs elsewhere (${JSON.stringify({ down: L.rDownA, moved: L.rDownCfg })})`);
+    log(!!L.rDownC && L.rDownC.running === false && L.rDownC.hosting === true && !!L.rDownJoin && !!L.rDownJoin.asked && /Other down/.test(L.rDownJoin.asked.moveTo || '')
+      && L.rDownJoin.asked.stopsHosting === true && L.rDownJoin.moved === true && L.rDownJoin.kind === 'lan' && L.rDownJoin.on === 'Other down'
+      && L.rDownJoin.hosting === false && L.rDownJoin.resumed === false,
+      `Join a clinic (sign-in), on a host whose server is not up: the question says it stops hosting, and joining stops it — it does not host again at the next start (${JSON.stringify(L.rDownJoin)})`);
     log(!!L.rName && L.rName.join === true && L.rName.first === true && L.rName.later === true && Array.isArray(L.rNameHost) && L.rNameHost.includes('Ноутбук-регистрация'),
       `clinic network: a laptop whose computer name is in Cyrillic joins and syncs, and the host lists it by that name (${JSON.stringify({ name: L.rName, host: L.rNameHost })})`);
 
@@ -10298,6 +10368,12 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         const st = await hubL.start({ name: 'Review', port: 0, bindHost: '127.0.0.1', beaconPort: await freeUdpL(), announce: [] });
         const id = hubL.identity();
         const base = 'https://127.0.0.1:' + st.port;
+        // A connection from another address that never starts TLS: when is it let go?
+        const slowR = { at: Date.now(), closedAfter: -1 };
+        const slowSockR = netL.connect({ port: st.port, host: '127.0.0.1', localAddress: '127.0.0.4' });
+        slowSockR.on('error', () => { /* reported by close */ });
+        slowSockR.on('close', () => { slowR.closedAfter = Date.now() - slowR.at; });
+        sockR.push(slowSockR);
         // Opens a connection, sends the headers of a request whose body is
         // `claimed` bytes and then only `sent` of them, and reports what the
         // host does within `ms`: answers (its first line), closes, or waits.
@@ -10341,6 +10417,41 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         R.plain = await lanL.request(plainUrl + '/health', { pin: id.pin, timeoutMs: 3000 }).then(() => 'answered', (e) => lanL.classify(e));
         const dPlain = await lanL.diagnose({ url: plainUrl, key: id.key, pin: id.pin, hostId: id.hostId, listenMs: 300, timeoutMs: 2000, scanOpts: { port: await freeUdpL(), queryPort: await freeUdpL(), targets: ['127.0.0.1'] } });
         R.plainDiag = { code: dPlain.code, message: dPlain.message };
+        // Anyone on the Wi-Fi, without the key, holding connections open that
+        // never start TLS: 64 from one address, each opened again the moment
+        // it is let go. Meanwhile the host's own pull (127.0.0.1) and a
+        // laptop's at another address, both with the key.
+        let attackingR = true;
+        const heldR = new Set();
+        const attackR = () => {
+          if (!attackingR) return;
+          const s = netL.connect({ port: st.port, host: '127.0.0.1', localAddress: '127.0.0.2' });
+          s.on('connect', () => { s.openedAt = Date.now(); heldR.add(s); });
+          s.on('error', () => { /* reported by close */ });
+          s.on('close', () => { heldR.delete(s); setTimeout(attackR, 20); });
+        };
+        for (let i = 0; i < 64; i++) attackR();
+        await new Promise((r) => setTimeout(r, 600));
+        const pullFromR = (localAddress) => new Promise((resolve) => {
+          const q = httpsL.request({ host: '127.0.0.1', port: st.port, localAddress, path: '/v1/pull?since=&limit=1', rejectUnauthorized: false, agent: false, timeout: 4000,
+            headers: { authorization: 'Bearer ' + id.key } }, (s) => { s.resume(); s.on('end', () => resolve(s.statusCode)); });
+          q.on('timeout', () => { q.destroy(); resolve('timeout'); });
+          q.on('error', (e) => resolve(e.code || e.message));
+          q.end();
+        });
+        R.lock = { self: [], other: [] };
+        for (let i = 0; i < 3; i++) {
+          R.lock.self.push(await pinned('/v1/pull?since=&limit=1', { timeoutMs: 4000, headers: { authorization: 'Bearer ' + id.key } }).then((r) => r.status, (e) => lanL.classify(e) + ':' + (e.code || '')));
+          R.lock.other.push(await pullFromR('127.0.0.3'));
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        // How many of the 64 the host kept: the ones still open well after they connected.
+        R.lock.kept = [...heldR].filter((s) => Date.now() - s.openedAt > 300).length;
+        attackingR = false;
+        for (const s of heldR) s.destroy();
+        // The silent connection, by now.
+        while (slowR.closedAfter < 0 && Date.now() - slowR.at < 8000) await new Promise((r) => setTimeout(r, 100));
+        R.slow = slowR.closedAfter;
       } catch (e) {
         R.crash = String((e && e.stack) || e).slice(0, 500);
       } finally {
@@ -10352,9 +10463,9 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       log(!R.crash && R.noKey === 'HTTP/1.1 401 Unauthorized' && R.noKeyHealth === 'closed' && R.withKey === 'waited' && R.wrongKeyBig === 401,
         `clinic network host: a request without the clinic key is answered 401 before its body is read — the host does not wait for a 50 MB body it would have kept in memory; a body sent anywhere else without the key is cut off past 64 KB; one with the key is read as before; a wrong key still hears "refused" whole (${JSON.stringify({ crash: R.crash, noKey: R.noKey, health: R.noKeyHealth, withKey: R.withKey, wrong: R.wrongKeyBig })})`);
       const srcHubR = readSrcL('../src/main/hub.js');
-      log(/server\.maxConnections = MAX_CONNECTIONS/.test(srcHubR) && /headersTimeout: \d+/.test(srcHubR) && /requestTimeout: \d+/.test(srcHubR) && /handshakeTimeout: \d+/.test(srcHubR)
-        && hubL.MAX_CONNECTIONS > 0 && hubL.MAX_CONNECTIONS <= 128,
-        'clinic network host: it takes a limited number of connections at once, and lets go of one that never finishes its handshake, its headers or its request');
+      log(!!R.lock && R.lock.self.every((x) => x === 200) && R.lock.other.every((x) => x === 200) && R.lock.kept <= hubL.PER_ADDRESS
+        && R.slow > 0 && R.slow <= 6500 && /headersTimeout: \d+/.test(srcHubR) && /requestTimeout: \d+/.test(srcHubR) && !/server\.maxConnections/.test(srcHubR),
+        `clinic network host: anyone on the Wi-Fi holding connections open without the key cannot stop the laptops syncing — 64 from one address, reopened as soon as they are let go, keep at most ${hubL.PER_ADDRESS}; the host's own pull and a laptop's at another address still sync; a connection that never starts TLS is let go within seconds (${JSON.stringify({ lock: R.lock, slowMs: R.slow })})`);
       log(Array.isArray(R.spoofed) && R.spoofed.length === 0 && R.capped === hubL.MAX_LAPTOPS && R.named === true,
         `clinic network host: only a laptop with the clinic key is listed as connected — made-up ones sent without it are not — and the list keeps at most ${hubL.MAX_LAPTOPS}, the most recent (${JSON.stringify({ spoofed: R.spoofed, capped: R.capped })})`);
       log(!!R.tooBig && R.tooBig.status === 413 && /too large to send at once/.test(R.tooBigSaid) && R.after === 200,
@@ -10388,6 +10499,78 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         && hubL.computerName('%E0%A4%A') === '%E0%A4%A' && hubL.computerName(encodeURIComponent('A\u0007B')) === 'AB')
         && /'x-mmw-computer': encodeURIComponent\(/.test(readSrcL('../src/main/cloud.js')),
         'clinic network: a laptop\'s computer name travels percent-encoded and the host reads it back — any language, nothing that is not text');
+    }
+
+    /* ---- the host opened away from the clinic's Wi-Fi ---- */
+    {
+      const N = {};
+      const osN = require('os');
+      const realNiN = osN.networkInterfaces;
+      const nicN = (address, netmask) => ({ 'Wi-Fi': [{ family: 'IPv4', address, netmask, internal: false }] });
+      // The clinic's router, the same router handing out another address, a
+      // hotel, an iPhone's hotspot, and no network yet.
+      const NETS_N = { clinic: nicN('192.168.1.23', '255.255.255.0'), clinicLater: nicN('192.168.1.57', '255.255.255.0'),
+        hotel: nicN('10.12.0.57', '255.255.0.0'), phone: nicN('172.20.10.4', '255.255.255.240'), none: {} };
+      let netN = 'clinic';
+      const defaultsN = hubL.defaults ? { ...hubL.defaults } : null;
+      const dirN = fs.mkdtempSync(path.join(os.tmpdir(), 'mmwhubn-'));
+      const optsN = async (extra = {}) => ({ bindHost: '127.0.0.1', beaconPort: await freeUdpL(), announce: [], version: '0.0.17', ...extra });
+      const waitN = async (fn, ms = 3000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 50)); } return !!fn(); };
+      const pauseN = (ms) => new Promise((r) => setTimeout(r, ms));
+      const restartN = () => { hubL.shutdown(); hubL.init(dirN); };
+      try {
+        osN.networkInterfaces = () => NETS_N[netN];
+        if (hubL.defaults) hubL.defaults.networkCheckMs = 100;
+        hubL.init(dirN);
+        await hubL.start({ name: 'Trip', port: 0, ...(await optsN()) });
+        N.networks = hubL.status().networks;
+        // The app opened at a hotel, then the laptop on a phone's hotspot, then on no network.
+        restartN(); netN = 'hotel';
+        let started = 0;
+        const r1 = await hubL.resume(await optsN({ onStarted: () => { started += 1; } }));
+        const s1 = hubL.status();
+        N.hotel = { resumed: !!r1, running: s1.running, paused: s1.paused === true, hosting: s1.hosting === true, here: s1.networksHere };
+        netN = 'phone'; await pauseN(400);
+        N.phone = { running: hubL.status().running, paused: hubL.status().paused === true };
+        netN = 'none'; await pauseN(300);
+        N.none = { running: hubL.status().running };
+        // Back on the clinic's Wi-Fi, with another address from its router: it hosts by itself.
+        netN = 'clinicLater';
+        N.back = { running: await waitN(() => hubL.status().running), started, paused: hubL.status().paused === true };
+        // Host here anyway, at the hotel: hosts, and that network counts from then on.
+        restartN(); netN = 'hotel';
+        await hubL.resume(await optsN());
+        N.pausedAgain = hubL.status().paused === true;
+        await hubL.start(await optsN());
+        N.anyway = { running: hubL.status().running, paused: hubL.status().paused === true, networks: hubL.status().networks };
+        restartN();
+        N.hotelNow = !!(await hubL.resume(await optsN()));
+        // Stop hosting while paused: it does not start later by itself.
+        restartN(); netN = 'phone';
+        await hubL.resume(await optsN());
+        N.stopPaused = hubL.status().paused === true;
+        await hubL.stop();
+        netN = 'clinic'; await pauseN(400);
+        N.afterStop = { running: hubL.status().running, hosting: hubL.status().hosting === true, paused: hubL.status().paused === true };
+        N.range = chkL(() => hubL.networkOf({ address: '172.20.10.4', netmask: '255.255.255.240' }) === '172.20.10.0/28'
+          && hubL.networkOf({ address: '10.12.0.57', netmask: '255.255.0.0' }) === '10.12.0.0/16');
+      } catch (e) {
+        N.crash = String((e && e.stack) || e).slice(0, 500);
+      } finally {
+        osN.networkInterfaces = realNiN;
+        if (defaultsN) Object.assign(hubL.defaults, defaultsN);
+        try { hubL.shutdown(); } catch (_) { /* closed */ }
+        fs.rmSync(dirN, { recursive: true, force: true });
+      }
+      log(!N.crash && JSON.stringify(N.networks) === JSON.stringify(['192.168.1.0/24']) && N.range === true
+        && !!N.hotel && N.hotel.resumed === false && N.hotel.running === false && N.hotel.paused === true && N.hotel.hosting === true
+        && JSON.stringify(N.hotel.here) === JSON.stringify(['10.12.0.0/16']) && !!N.phone && N.phone.running === false && N.phone.paused === true
+        && !!N.none && N.none.running === false && !!N.back && N.back.running === true && N.back.started === 1 && N.back.paused === false,
+        `clinic network host: opened away from the Wi-Fi it hosted on — a hotel, a phone's hotspot, no network yet — it does not host there, says it is paused, and hosts by itself once back on the clinic's Wi-Fi, whatever address the router gives it (${JSON.stringify(N).slice(0, 700)})`);
+      log(!N.crash && N.pausedAgain === true && !!N.anyway && N.anyway.running === true && N.anyway.paused === false
+        && JSON.stringify(N.anyway.networks) === JSON.stringify(['10.12.0.0/16', '192.168.1.0/24']) && N.hotelNow === true
+        && N.stopPaused === true && !!N.afterStop && N.afterStop.running === false && N.afterStop.hosting === false && N.afterStop.paused === false,
+        `clinic network host: Host here anyway hosts on the network it is on and counts it from then on; Stop hosting while paused stops it for good (${JSON.stringify({ anyway: N.anyway, hotelNow: N.hotelNow, afterStop: N.afterStop })})`);
     }
 
     /* ---- the guide, for the moves ---- */
@@ -10479,7 +10662,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         'Windows Defender Firewall has blocked some features of this app', 'Host address', 'Clinic network name',
         'is not this clinic\'s host', 'its firewall is blocking the connection', 'No clinic network host answered', 'Mission Minded is not hosting there',
         'Online pre-registration is not available on the clinic network', 'could not show it holds this clinic key, so the key was not sent to it',
-        'but it is not a Mission Minded clinic network host'];
+        'but it is not a Mission Minded clinic network host', 'Not on the clinic Wi-Fi: hosting paused', 'Host here anyway'];
       const appL = ['../src/renderer/js/views/admin.js', '../src/renderer/js/views/setup.js', '../src/main/lan.js', '../src/main/hub.js', '../src/main/cloud.js'].map(readSrcL).join('\n');
       const missDocs = QUOTED_L.filter((q) => !flatL.includes(q));
       const missApp = QUOTED_L.filter((q) => !appL.includes(q));
@@ -10645,6 +10828,19 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       log(!!macCard && /accept incoming network connections, press Allow/.test(macCard.textContent) && !/Windows Defender/.test(macCard.textContent)
         && !$all('button', macCard).some((b) => b.textContent.trim() === 'Allow through the firewall'),
         'Cloud tab, hosting on a Mac: allow incoming connections when macOS asks — no Windows helper');
+      pg.remove();
+      // Opened away from the clinic's Wi-Fi: paused there.
+      hsL = { ...hubRunning, running: false, paused: true, laptops: [], networks: ['192.168.1.0/24'], networksHere: ['10.12.0.0/16'] };
+      pg = await cloudPage();
+      const pausedCardL = cardL(pg, /This laptop hosts the clinic network/);
+      const pausedTxtL = pausedCardL ? pausedCardL.textContent : '';
+      callsL.length = 0;
+      pressL(pausedCardL, 'Host here anyway');
+      await settleL();
+      log(!!pausedCardL && /Paused/.test((pausedCardL.querySelector('.pill') || {}).textContent || '') && /Not on the clinic Wi-Fi: hosting paused/.test(pausedTxtL)
+        && /hosts again by itself as soon as it is back on the clinic's Wi-Fi/.test(pausedTxtL) && /192\.168\.1\.0\/24/.test(pausedTxtL) && /10\.12\.0\.0\/16/.test(pausedTxtL)
+        && JSON.stringify(callsL) === JSON.stringify([['hubStart', 'Lowell clinic network', false]]),
+        'Cloud tab, hosting: opened away from the clinic\'s Wi-Fi, the host card says hosting is paused there and comes back by itself on the clinic\'s Wi-Fi — and Host here anyway hosts where it is');
       pg.remove();
 
       // The host, moved elsewhere from here: the question says it stops hosting.

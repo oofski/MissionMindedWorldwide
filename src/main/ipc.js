@@ -355,11 +355,13 @@ function register(getMainWindow) {
     // included. So the first press only answers with the question (moveTo),
     // and the laptop moves on the confirmed one (move).
     if (!currentUser && !same && !move && elsewhere) {
-      // stopsHosting: this laptop hosts the clinic network it is on, and
-      // moving stops that (leaveOwnHub) — said in the question.
-      const ownId = hub.runningHostId();
+      // stopsHosting: this laptop hosts the clinic network it is on — its
+      // server up or not at the moment — and moving stops that (leaveOwnHub),
+      // said in the question.
+      const ownId = hub.ownHostId();
+      const h = ownId && saved.lanHost === ownId ? hub.status() : null;
       return { moveTo: target ? networkLabel(target.name, joinUrl) : new URL(cloud.normalizeUrl(url)).host,
-        stopsHosting: !!ownId && saved.lanHost === ownId };
+        stopsHosting: !!h && (h.running || h.hosting) };
     }
     if (!same) {
       cloud.applyConfig({ url: joinUrl, key, online: true, ...(target ? { lan: target } : {}) });
@@ -401,11 +403,19 @@ function register(getMainWindow) {
   // never reached them nor theirs it — the clinic split in two without a
   // word — and it hosted again at every start. They now see the host is not
   // hosting, as when it is switched off, and join the next one.
+  //
+  // Whether or not its server is up at the moment: one that did not start
+  // when the app opened (its port taken, say) still had hosting on, and
+  // hosted again at the next start while this laptop synced elsewhere — the
+  // same split, a day later. So it is this laptop's own clinic network by its
+  // hub file's id, and stopping it turns hosting off either way.
   async function leaveOwnHub(before) {
-    const ownId = hub.runningHostId();
+    const ownId = hub.ownHostId();
     if (!ownId || !before || !before.configured || before.lanHost !== ownId) return false;
     const now = db.getSyncMeta();
     if (now.configured && now.lanPin === before.lanPin) return false;
+    const was = hub.status();
+    if (!was.running && !was.hosting) return false;
     await hub.stop();
     db.audit(currentUser, 'hub.stop', 'settings', null, 'Clinic network stopped: this laptop moved to another server');
     return true;

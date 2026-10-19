@@ -215,12 +215,14 @@ async function testClinicNetwork(url, key, t) {
   // Something else on the port the host had counts as the host not
   // answering there, so where it is now is looked for as well.
   const notAnswering = (code) => code === 'timeout' || code === 'not_found' || code === 'not_hosting' || code === 'not_mmw';
-  // Every address the host was heard at, in turn, until one holds up — a
-  // look-alike can answer first (see lan.diagnose).
+  // Every address the host was heard at, several at once, until one holds
+  // up — a look-alike can answer first, and stall (see lan.diagnose and
+  // lan.firstOf). Nothing that carries the key goes to any of them here.
   const firstThat = async (urls, fn) => {
-    let firstErr = null;
-    for (const u of urls) { try { return { url: u, value: await fn(u) }; } catch (e) { if (!firstErr) firstErr = e; } }
-    throw refuse(firstErr || { pinMismatch: true }, urls[0]);
+    try {
+      const r = await lan.firstOf(urls, fn);
+      return { url: r.item, value: r.value };
+    } catch (e) { throw refuse(e || { pinMismatch: true }, urls[0]); }
   };
   let at = base;
   if (!pin) {
@@ -477,15 +479,18 @@ async function refind({ scan = lan.scan } = {}) {
   // Every address heard for this host with the start of its fingerprint: a
   // look-alike announcing its id with another fingerprint is an entry of its
   // own (lan.scan), and one copying the start of it is weeded out here by
-  // the handshake.
-  const urls = [...new Set(hosts.filter((h) => h.hostId === m.lanHost && m.lanPin.startsWith(h.fp)).flatMap((h) => h.urls))];
-  for (const url of urls) {
-    if (url === trimUrl(m.url)) continue;
-    let presented = '';
-    try { presented = await lan.peerPin(url); } catch { continue; }
-    if (presented === m.lanPin && repointLan(url, m.lanPin)) return url;
-  }
-  return '';
+  // the handshake — all of them together (lan.firstOf), so a look-alike's
+  // ports that never finish one cost their timeout once, not each in turn.
+  const urls = [...new Set(hosts.filter((h) => h.hostId === m.lanHost && m.lanPin.startsWith(h.fp)).flatMap((h) => h.urls))]
+    .filter((url) => url !== trimUrl(m.url));
+  let found;
+  try {
+    found = await lan.firstOf(urls, async (url) => {
+      if (await lan.peerPin(url) !== m.lanPin) throw new Error('Not the host.');
+      return url;
+    });
+  } catch { return ''; }
+  return repointLan(found.item, m.lanPin) ? found.item : '';
 }
 
 // The same clinic network host, at another address: saved without the move

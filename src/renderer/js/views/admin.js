@@ -1152,7 +1152,8 @@ export function renderAdmin(ctx, params = {}) {
       const pill = h.running
         ? (h.error ? el('span', { class: 'pill pill--amber' }, [icon('alert', { size: 12 }), 'Problem'])
           : el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Hosting']))
-        : el('span', { class: 'pill pill--neutral' }, ['Not hosting']);
+        : h.paused ? el('span', { class: 'pill pill--amber' }, [icon('alert', { size: 12 }), 'Paused'])
+          : el('span', { class: 'pill pill--neutral' }, ['Not hosting']);
       const reach = (h.addresses || []).filter((a) => a.url);
       const kv = (label, val, extra = {}) => el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, [label]), el('span', { class: 'kv-val', ...extra }, [val])]);
       const laptops = h.laptops || [];
@@ -1187,17 +1188,23 @@ export function renderAdmin(ctx, params = {}) {
         class: 'btn btn--primary',
         onClick: async () => {
           againBtn.disabled = true;
-          try { await api.hubStart(h.name); toast('This laptop is hosting the clinic network again.', 'success'); paint(); }
+          try { await api.hubStart(h.name); toast(h.paused ? 'This laptop is hosting the clinic network on this network.' : 'This laptop is hosting the clinic network again.', 'success'); paint(); }
           catch (e) { toast(e.message, 'error'); }
           finally { againBtn.disabled = false; }
         },
-      }, [icon('refresh', { size: 16 }), 'Host again']);
+      }, [icon('refresh', { size: 16 }), h.paused ? 'Host here anyway' : 'Host again']);
       return el('div', { class: 'card lan-hosting' }, [
         el('div', { class: 'card-head-row' }, [
           el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'This laptop hosts the clinic network']),
           pill,
         ]),
         h.error ? el('div', { class: 'banner banner--alert' }, [icon('alert', { size: 14 }), el('span', {}, [h.error])]) : null,
+        // Opened away from the clinic's Wi-Fi (hub.resume): it waits there
+        // rather than announce the clinic network to a hotel's or a café's.
+        h.paused ? el('div', { class: 'banner banner--warn lan-paused' }, [icon('alert', { size: 14 }), el('span', {}, [
+          'Not on the clinic Wi-Fi: hosting paused. This laptop is on another network than the one it hosted the clinic network on, so it does not announce the clinic network here. It hosts again by itself as soon as it is back on the clinic\'s Wi-Fi. If this is the clinic\'s Wi-Fi — a new router, say — press Host here anyway.',
+          (h.networks || []).length ? ` (Clinic Wi-Fi: ${(h.networks || []).join(', ')}. This laptop is on: ${(h.networksHere || []).length ? h.networksHere.join(', ') : 'no network'}.)` : '',
+        ])]) : null,
         h.running && !onOwn ? el('div', { class: 'banner banner--warn lan-not-own' }, [icon('alert', { size: 14 }), el('span', {}, [
           `This laptop hosts the clinic network but does not sync with it — it is ${st.configured ? `connected to ${whereNow()}` : 'not connected to any server'}. Its own records do not reach the other laptops, nor theirs this one. Sync it with the clinic network, or stop hosting.`,
         ])]) : null,
