@@ -810,6 +810,12 @@ export function renderAdmin(ctx, params = {}) {
           st.lastOk ? ` Last synced ${new Date(st.lastOk).toLocaleTimeString()}.` : '',
         ]),
         st.lastError ? el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [st.lastError]) : null,
+        // A paused laptop collects nothing, so its changes are dated when it
+        // is resumed and beat what other laptops changed meanwhile, later
+        // changes included. Said here, where the pause is undone.
+        st.online ? null : el('p', { class: 'muted small cloud-paused-note', style: 'margin:0 0 var(--space-3);' }, [
+          'While sync is paused, changes made here count as made when you resume, so they replace other laptops\' changes to the same records made in the meantime. Resume as soon as the connection is back.',
+        ]),
         el('div', { class: 'action-row' }, [toggle, syncNowBtn, disconnectBtn]),
         el('div', { class: 'subtle small', style: 'margin-top:var(--space-3);' }, [`Device ID: ${st.deviceId || '—'}`]),
       ]));

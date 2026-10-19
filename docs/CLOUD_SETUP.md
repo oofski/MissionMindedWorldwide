@@ -146,6 +146,20 @@ out on — brings everything on it into the clinic when it connects:
    Reset this computer**; it returns to first-run setup, and from there **Join
    a clinic already set up** connects it with nothing of its own.
 
+   The event every laptop starts with, **Mission Minded Clinic**, is also one
+   event on all of them, like `admin`. If it was renamed, re-dated, given a
+   city list or **Set active** on this laptop, this laptop's copy — name,
+   dates, city list and Set active together — replaces the clinic's on every
+   laptop. Left untouched here, it changes nothing. So set the clinic's event
+   up on one laptop only, or check it under **Events** once this laptop is
+   connected.
+
+   The same goes for a laptop that was connected to **another server** first
+   — a test server, say. Pointing it at the clinic's server (or connecting it
+   again after **Disconnect**) sends everything on it to that server too, and
+   brings the clinic's records down. What it had sent to the old server stays
+   on that server.
+
 ### On a laptop you can sign in to as an administrator
 1. Sign in as an administrator and open **Cloud** (the Admin part of the
    sidebar). A laptop that is not connected yet lists these same three steps.
@@ -190,9 +204,15 @@ laptop** press **Show connection code**, then **Copy code**. It starts with
   next sync. New patients are filed under the active event.
 - **Try it:** check in a test patient on one laptop; within a few seconds it is
   on another laptop's dashboard.
-- **No internet for a while?** Keep working. Each laptop keeps everything
-  locally and catches up by itself when the connection returns. If two laptops
-  change the same record while apart, the later change is kept.
+- **No internet for a while?** Keep working, and leave sync on. Each laptop
+  keeps everything locally and catches up by itself when the connection
+  returns. With sync left on, if two laptops change the same record while
+  apart, the later change is kept.
+- **Paused sync is different.** A laptop whose sync was paused (**Pause sync
+  (no internet)**) dates its changes when it is resumed, so they win over
+  changes other laptops made in the meantime, even later ones. Resume it as
+  soon as the connection is back, and don't change the same patient on two
+  laptops while one of them is paused.
 
 ---
 
@@ -229,12 +249,13 @@ desk confirms each person's arrival when they walk in.
 | "…did not answer in time." | Very slow wifi, or a hotspot that wants you to sign in first | Open any website in the browser to clear the hotspot's sign-in page, then try again |
 | "That address did not return a Mission Minded sync server." | The address points somewhere else, or the Worker still has Cloudflare's sample code | Copy the address from the Worker's page again; if `/health` does not show `mmw-sync`, redo Part A step 3 |
 | "The server has no database connected." | The D1 binding is missing or not named `DB` | Part A step 4 — the variable name must be exactly `DB` — then Deploy |
-| **Cloud** shows **Sync paused — running locally** | Someone pressed **Pause sync (no internet)** | Press **Resume sync**. The laptop sends and receives everything it missed |
+| **Cloud** shows **Sync paused — running locally** | Someone pressed **Pause sync (no internet)** | Press **Resume sync**. The laptop sends and receives everything it missed. What was changed on it while paused counts as changed at the moment you resume, so it replaces other laptops' changes to the same records made meanwhile — resume as soon as you can |
 | **Cloud** shows **Reconnecting…** and a reason | The connection dropped during the clinic | Keep working. It retries every few seconds and catches up when the connection is back |
 | "That connection code was made by a different version of the app." | The two laptops run different versions | Update both to the same version, then copy the code again |
 | "That connection code is incomplete or damaged." | Part of the code was lost while copying | Use **Copy code** on the connected laptop and paste the whole thing |
 | "That is a server address, not a connection code." | The address was pasted in the code box | Type it in the address box, with the clinic key |
 | Join: "This computer already has its own administrator password…" | The laptop's administrator password was changed, so Join is closed | Sign in as that administrator and connect under **Admin → Cloud** |
+| Join: "This computer is already connected to a clinic server, so there is nothing to join." | The laptop is connected already — often after a first **Connect and sync** that found no accounts, once they arrived by themselves | Sign in with your own account. To move the laptop to a different server, sign in as an administrator and use **Admin → Cloud** |
 | Join: "Connected, but no staff accounts came down yet." | Nothing but the shipped `admin` / `admin` is on this laptop after the download: the first laptop has not sent its accounts to the server yet (it is not connected, or not online) | Sign in on the first laptop and check its **Cloud** tab says **Online**. This laptop stays connected and picks the accounts up by itself; press **Connect and sync** again a minute later. If the clinic really has no account but `admin` / `admin` yet, go back and sign in with that |
 | "Use the https:// address Cloudflare gives you." | The address was typed with `http://` | Copy the address from the Worker's page — it starts with `https://` |
 | "That connection code names a plain http:// server…" | The laptop the code came from was connected to an `http://` address | On that laptop, connect to the `https://` address under **Admin → Cloud**, then copy the code again |
@@ -311,4 +332,5 @@ catch up after the reset, and the pre-registration link says it is not valid.
 time of writing $5 a month for the account, including 25 billion rows read and
 50 million rows written a month, far more than a clinic uses. Either way, close
 the app (or press **Pause sync (no internet)**) on laptops that are not in use:
-a laptop left open overnight keeps asking for news.
+a laptop left open overnight keeps asking for news. Press **Resume sync** before
+anyone works on a paused laptop again (see [Then](#then)).

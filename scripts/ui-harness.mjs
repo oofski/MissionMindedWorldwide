@@ -4266,6 +4266,7 @@ async function main() {
       'The server has no database connected.', 'That connection code was made by a different version of the app.',
       'That connection code is incomplete or damaged.', 'That is a server address, not a connection code.',
       'This computer already has its own administrator password', 'Connected, but no staff accounts came down yet.',
+      'This computer is already connected to a clinic server, so there is nothing to join.',
       'Use the https:// address Cloudflare gives you.', 'That connection code names a plain http:// server', 'Reset this computer', 'Backup & Export'];
     // Line wrapping is the guide's own business, so it is read as running text.
     const docsFlat = docs.replace(/\s+/g, ' ');
@@ -4287,6 +4288,22 @@ async function main() {
       && /stops working/.test(usedK) && /goes to every laptop/.test(usedK) && /test patients/.test(usedK) && /Reset this computer/.test(usedK)
       && /same username/.test(usedK),
       'cloud guide: Part B says what connecting an already-used laptop does first — one shared admin account whose password replaces the others\' (so set the same one), everything on it going to every laptop, and how to start clean');
+    // Probed below (pOnTrial / aFromP): moving a laptop from one server to
+    // another sends everything on it to the new one.
+    log(/another server/.test(usedK) && /Disconnect/.test(usedK) && /sends everything on it to that server too/.test(usedK.replace(/\s+/g, ' ')),
+      'cloud guide: Part B says a laptop moved from another server (a trial one, or after Disconnect) sends everything on it to the clinic\'s server too');
+    // The shipped event is one shared row like admin: untouched it now loses
+    // (convergeSeedEvent, probed below), but an edited copy is an edit.
+    log(/\*\*Mission Minded Clinic\*\*, is also one event on all of them/.test(usedK.replace(/\s+/g, ' '))
+      && /replaces the clinic's on every laptop/.test(usedK.replace(/\s+/g, ' ')) && /Left untouched here, it changes nothing/.test(usedK.replace(/\s+/g, ' ')),
+      'cloud guide: Part B says the shipped event is one event on every laptop — an edited copy on a used laptop replaces the clinic\'s, an untouched one changes nothing');
+    // Last-write-wins holds only while sync runs: a paused laptop stamps its
+    // changes when it is resumed, so they beat later ones made elsewhere.
+    log(!/If two laptops change the same record while apart, the later change is kept/.test(docsFlat)
+      && /With sync left on, if two laptops change the same record while apart, the later change is kept/.test(docsFlat)
+      && /dates its changes when it is resumed/.test(docsFlat) && /counts as changed at the moment you resume/.test(docsFlat)
+      && /Press \*\*Resume sync\*\* before anyone works on a paused laptop again/.test(docsFlat),
+      'cloud guide: "the later change is kept" is said only of laptops with sync left on — a paused laptop\'s changes win when it is resumed, said in Then, Troubleshooting and Cost');
     const costK = docs.slice(docs.indexOf('## Cost'));
     log(/5,000,000 rows read/.test(costK) && /100,000 rows written/.test(costK) && /100,000 requests/.test(costK) && /00:00 UTC/.test(costK)
       && /pre-registration link says it is not valid/.test(costK) && !/ten laptops/i.test(costK) && !/free plan is enough for a small clinic/i.test(costK),
@@ -4428,7 +4445,18 @@ async function main() {
       await settleK();
       log(!!shownK && !$all('.modal-overlay').some((o) => o.textContent.includes(codeShown) || $all('input', o).some((i) => i.value === codeShown))
         && !admA.innerHTML.includes(codeShown), 'connection code: Done takes it off the screen again');
+      log(!admA.querySelector('.cloud-paused-note'), 'Cloud tab, online: no paused-sync note');
       admA.remove();
+
+      // Paused: the note says what resuming does to what was changed meanwhile.
+      stK = { ...baseStK, enabled: false, mode: 'offline', online: false, url: A_URL, hasKey: true, configured: true };
+      const admP = renderAdmin(ctxK, { section: 'cloud' }); document.body.append(admP);
+      await settleK();
+      const pausedNoteK = admP.querySelector('.cloud-paused-note');
+      log(!!pausedNoteK && /count as made when you resume/.test(pausedNoteK.textContent) && /replace other laptops' changes/.test(pausedNoteK.textContent)
+        && $all('button', admP).some((b) => b.textContent.trim() === 'Resume sync'),
+        'Cloud tab, paused: beside Resume sync it says changes made while paused count as made at resume, and replace other laptops\' changes');
+      admP.remove();
 
       // Laptop B: not connected.
       stK = { ...baseStK };
@@ -4534,6 +4562,20 @@ async function main() {
       log(closedOk && navK.includes('login'),
         'Join a clinic: on a computer with its own administrator password it says so on opening — sign in and use Admin → Cloud, and what a used laptop brings — with Back to sign in, not a form refused at the end');
       jv.remove();
+      // Already connected (the usual way here after a first Join found no
+      // accounts and they came by themselves): nothing to join, sign in.
+      setupStateK = { needsSetup: false, defaultAdmin: null, connected: true };
+      jv = joinViewK();
+      await settleK();
+      navK.length = 0;
+      const connTxtK = jv.textContent;
+      const connOk = /already connected to a clinic server, so there is nothing to join/.test(connTxtK) && /Sign in with your own account/.test(connTxtK)
+        && !/already has its own administrator password/.test(connTxtK) && !fieldInK(jv, /^Connection code/)
+        && !$all('button', jv).some((b) => b.textContent.trim() === 'Connect and sync');
+      clickIfK(jv, 'Back to sign in');
+      log(connOk && navK.includes('login'),
+        'Join a clinic: on a computer already connected it says there is nothing to join and to sign in — not "connect it under Admin → Cloud", which is done');
+      jv.remove();
       setupStateK = { needsSetup: true, defaultAdmin: null };
       jv = joinViewK();
       await settleK();
@@ -4571,8 +4613,12 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
       return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
   const DB=mkDB();
   const SERVERS={'mmw-sync.clinic.workers.dev':{CLINIC_KEY:'right horse battery 42',DB},'nodb.clinic.workers.dev':{CLINIC_KEY:'k'},
-    'empty.clinic.workers.dev':{CLINIC_KEY:'k2',DB:mkDB()}};
+    'empty.clinic.workers.dev':{CLINIC_KEY:'k2',DB:mkDB()},'trial.clinic.workers.dev':{CLINIC_KEY:'k3',DB:mkDB()}};
+  // hold: a host whose requests wait until release() — a sync cycle caught on
+  // the network while the laptop is pointed somewhere else.
+  let hold=null;
   globalThis.fetch=async(url,init)=>{const u=new URL(url);
+    if(hold&&hold.host===u.host)await hold.wait;
     if(u.host==='not-mmw.example')return new Response('<html>a parked domain</html>',{status:200,headers:{'content-type':'text/html'}});
     const env=SERVERS[u.host];if(!env)throw new TypeError('fetch failed');
     return worker.fetch(new Request(url,init),env,{});};
@@ -4607,6 +4653,13 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   out.blankKeyOther=err(await call('cloud:test',{url:'nodb.clinic.workers.dev',key:''}));
   db.createUser(adminA,{username:'ana.reyes',full_name:'Ana Reyes',role:'registration',password:'ana-pass-1'});
   for(const r of ROLES)db.createUser(adminA,{username:'k_'+r,full_name:'K '+r,role:r,password:'pw-'+r});
+  // The director names the shipped event, dates it, gives it the city list and
+  // presses Set active: what every laptop that joins later must leave alone.
+  {const ev=db.getActiveEvent();
+   db.updateEvent(adminA,ev.id,{name:'Lowell Nov 2026',location:'Lowell, OR',start_date:'2026-11-14',end_date:'2026-11-15',cities:['Lowell','Dexter']});
+   db.setActiveEvent(adminA,ev.id);}
+  const evOf=()=>{const e=db.getActiveEvent()||{};return {uid:e.uid,name:e.name,location:e.location,start:e.start_date,cities:e.cities,sel:e.selected_at};};
+  out.evA=evOf();
   db.updateUser(adminA,adminA.id,{password:'clinic-admin-pw'});
   out.roleCode={};out.roleJoin={};
   for(const r of ROLES){await call('auth:login',{username:'k_'+r,password:'pw-'+r});
@@ -4635,8 +4688,13 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   out.bAna=!!db.login('ana.reyes','ana-pass-1');
   out.bAdminClinic=!!db.login('admin','clinic-admin-pw');
   out.bAdminDefaultDead=!db.login('admin','admin');
-  out.joinClosed=err(await call('cloud:join',{url:rd.url,key:rd.key}));
+  out.evB=evOf();
+  out.joinClosed=err(await call('cloud:join',{url:'https://empty.clinic.workers.dev',key:'k2'}));
   out.bUnchanged=db.getSyncMeta().url===URL_A;
+  {const auditsBefore=db.listAudit(200).filter((a)=>a.action==='cloud.join').length;
+   const again=await call('cloud:join',{url:rd.url,key:rd.key});
+   out.joinAgain=again.ok?{accounts:again.data.accounts,sync:!!(again.data.sync&&again.data.sync.ok)}:{error:again.error};
+   out.joinAgainChangedNothing=db.getSyncMeta().url===URL_A&&db.listAudit(200).filter((a)=>a.action==='cloud.join').length===auditsBefore;}
   await call('auth:login',{username:'admin',password:'clinic-admin-pw'});
   out.joinAsAdmin=(await call('cloud:join',{url:rd.url,key:rd.key})).ok===true;
   await settle();
@@ -4647,6 +4705,26 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   const jc=await call('cloud:join',{url:'https://empty.clinic.workers.dev',key:'k2'});
   out.joinEmpty=jc.ok?{sync:!!(jc.data.sync&&jc.data.sync.ok),needsSetup:jc.data.needsSetup,accounts:jc.data.accounts}:{error:jc.error};
   await settle();db.close();
+  // ...and that clinic's first laptop (its own admin password, a member of
+  // staff) connects only now, as Join's message asks. C's own sync brings the
+  // accounts, the clinic's admin password with them, which closes Join to
+  // repointing; pressing Connect and sync again, as told, must still answer.
+  const dirE=fs.mkdtempSync(path.join(os.tmpdir(),'mmwjoinE-'));db.init(dirE);
+  await call('auth:login',{username:'admin',password:'admin'});
+  {const e0=ipc.getCurrentUser();db.updateUser(e0,e0.id,{password:'empty-admin-pw'});
+   db.createUser(e0,{username:'eva.ruiz',full_name:'Eva Ruiz',role:'triage',password:'eva-pass-1'});}
+  await call('cloud:test',{url:'https://empty.clinic.workers.dev',key:'k2'});
+  await call('cloud:config',{url:'https://empty.clinic.workers.dev',key:'k2',online:true});
+  await settle();await call('auth:logout');db.close();
+  db.init(dirC);await settle();
+  out.cTimer={eva:!!db.login('eva.ruiz','eva-pass-1'),closed:!db.defaultAdminActive()};
+  const jc2=await call('cloud:join',{url:'https://empty.clinic.workers.dev',key:'k2'});
+  out.joinEmptyAgain=jc2.ok?{accounts:jc2.data.accounts}:{error:jc2.error};
+  const ns=await call('auth:needsSetup');
+  out.cNeedsSetup=ns.ok?ns.data:{error:ns.error};
+  out.cRepointClosed=err(await call('cloud:join',{url:URL_A,key:KEY}));
+  out.cStill=db.getSyncMeta().url==='https://empty.clinic.workers.dev';
+  cloud.stop();db.close();
 
   /* laptop D: used on its own first (its own admin password, a test patient),
      then connected from Admin -> Cloud, as the guide's Part B box describes */
@@ -4660,11 +4738,53 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   await settle();
   out.lastAdminD={own:!!db.login('admin','laptop-d-pw'),clinic:!!db.login('admin','clinic-admin-pw')};
   await call('auth:logout');db.close();
+
+  /* laptop P: tried out on a trial server first (its own test patients, synced
+     there), then joined to the clinic's server — while a sync cycle to the
+     trial server is still waiting on the network */
+  const dirP=fs.mkdtempSync(path.join(os.tmpdir(),'mmwjoinP-'));db.init(dirP);
+  await call('auth:login',{username:'admin',password:'admin'});
+  {const p0=ipc.getCurrentUser();for(const n of ['TrialOne','TrialTwo','TrialThree'])db.createPatient(p0,{first_name:'Pat',last_name:n});}
+  await call('cloud:test',{url:'https://trial.clinic.workers.dev',key:'k3'});
+  await call('cloud:config',{url:'https://trial.clinic.workers.dev',key:'k3',online:true});
+  await settle();
+  out.pOnTrial={cursor:db.getSyncMeta().cursor,clean:!db.collectSyncRows(400).rows.some((r)=>r.entity==='patient')};
+  db.createPatient(ipc.getCurrentUser(),{first_name:'Pat',last_name:'TrialLate'});
+  await call('auth:logout');
+  let release;hold={host:'trial.clinic.workers.dev',wait:new Promise((r)=>{release=r;})};
+  const caught=cloud.syncOnce();
+  const iv=setInterval(()=>{if(db.getSyncMeta().url===URL_A){clearInterval(iv);release();}},2);
+  const jp=await call('cloud:join',{url:URL_A,key:KEY});
+  clearInterval(iv);release();await caught;hold=null;
+  out.pJoin=jp.ok?{sync:!!(jp.data.sync&&jp.data.sync.ok),accounts:jp.data.accounts}:{error:jp.error};
+  await settle();
+  out.pGot={ana:!!db.login('ana.reyes','ana-pass-1'),event:evOf()};
+  cloud.stop();db.close();
+
   db.init(dirA);await settle();
   out.lastAdminA={d:!!db.login('admin','laptop-d-pw'),own:!!db.login('admin','clinic-admin-pw'),
     dPatient:JSON.stringify(db.listPatients({eventId:'all'})).includes('OnlyOnD')};
+  {const names=db.listPatients({eventId:'all'}).map((x)=>x.last_name);
+   out.aFromP={trial:['TrialOne','TrialTwo','TrialThree'].every((n)=>names.includes(n)),late:names.includes('TrialLate')};}
+  out.evAAfter=evOf();
   db.close();
-  for(const d of [dirA,dirB,dirC,dirD])fs.rmSync(d,{recursive:true,force:true});
+
+  /* laptop O: an install from before this fix — the shipped event as v0.0.15
+     left it (no stamp, never collected) — beside two that were edited */
+  const Sqlite=require('better-sqlite3');
+  const dirO=fs.mkdtempSync(path.join(os.tmpdir(),'mmwjoinO-'));
+  const stampAfterUpgrade=(edit)=>{
+    const f=path.join(dirO,'mission-minded.db');fs.rmSync(dirO,{recursive:true,force:true});
+    db.init(dirO);db.close();
+    const h=new Sqlite(f);h.prepare("UPDATE events SET updated_at=NULL, content_rev=NULL, synced_rev=NULL WHERE uid='00000000-0000-4000-8000-000000000001'").run();
+    if(edit)h.prepare("UPDATE events SET "+edit+" WHERE uid='00000000-0000-4000-8000-000000000001'").run();h.close();
+    db.init(dirO);const e=db.getActiveEvent();const r=db.collectSyncRows(400).rows.find((x)=>x.entity==='event');db.close();
+    return {seeded:String(e.updated_at||''),pushed:String((r&&r.updated_at)||'')};};
+  out.oFresh=(()=>{db.init(dirO);const e=db.getActiveEvent();db.close();return String(e.updated_at||'');})();
+  out.oOld=stampAfterUpgrade('');
+  out.oRenamed=stampAfterUpgrade("name='Lowell Nov 2026'");
+  out.oRedated=stampAfterUpgrade("start_date='2000-01-02', end_date='2000-01-02'");
+  for(const d of [dirA,dirB,dirC,dirD,dirE,dirP,dirO])fs.rmSync(d,{recursive:true,force:true});
   done(out);
 })().catch((e)=>done({crash:String((e&&e.stack)||e)}));
 `;
@@ -4708,6 +4828,25 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
     log(/https:\/\/ address Cloudflare gives you/.test(P.plainHttp || '') && /https:\/\/ address Cloudflare gives you/.test(P.plainHttpCfg || '')
       && P.plainHttpNotSaved === true && /Could not reach localhost:8787/.test(P.loopbackHttp || ''),
       'cloud (real IPC): a plain http:// address is refused by the test and by saving, so the key never goes out unprotected — except to this computer itself (wrangler dev)');
+    log(!!P.joinAgain && P.joinAgain.accounts > 0 && P.joinAgain.sync === true && P.joinAgainChangedNothing === true,
+      'Join a clinic (real IPC): pressed again for the server and key the laptop already has, it is not refused although the clinic\'s administrator password is here — it repoints nothing, saves and audits nothing, and reports the accounts');
+    log(!!P.cTimer && P.cTimer.eva === true && P.cTimer.closed === true && !!P.joinEmptyAgain && P.joinEmptyAgain.accounts > 0
+      && !!P.cNeedsSetup && P.cNeedsSetup.connected === true && P.cNeedsSetup.defaultAdmin === null
+      && /already has its own administrator password/.test(P.cRepointClosed || '') && P.cStill === true,
+      `Join a clinic (real IPC): "no staff accounts came down yet", then the first laptop connects and the accounts arrive by themselves — the second Connect and sync reports ${P.joinEmptyAgain && P.joinEmptyAgain.accounts} accounts instead of refusing, the sign-in screen hears the laptop is connected, and pointing it at another server is still refused`);
+    const sameEvK = (e) => !!e && !!P.evA && e.name === 'Lowell Nov 2026' && e.location === 'Lowell, OR' && e.start === '2026-11-14'
+      && /Dexter/.test(e.cities || '') && e.cities === P.evA.cities && !!e.sel && e.sel === P.evA.sel;
+    log(sameEvK(P.evA) && sameEvK(P.evB) && sameEvK(P.pGot && P.pGot.event) && sameEvK(P.evAAfter),
+      'cloud (real IPC): the clinic\'s event — named, dated, its city list and Set active — survives three new laptops connecting: each one gets it, and none sends the shipped "Mission Minded Clinic" back over it');
+    log(/^0000-01-01T/.test(P.oFresh || '') && !!P.oOld && /^0000-01-01T/.test(P.oOld.seeded) && P.oOld.pushed === P.oOld.seeded
+      && !!P.oRenamed && P.oRenamed.seeded === '' && /^2\d{3}-/.test(P.oRenamed.pushed)
+      && !!P.oRedated && P.oRedated.seeded === '' && /^2\d{3}-/.test(P.oRedated.pushed),
+      'cloud: the shipped event is dated ancient on a new install, and on an older install nobody touched, so it loses to any edit; an older install whose event was renamed, or only re-dated, keeps the stamp of that edit');
+    log(!!P.pOnTrial && P.pOnTrial.clean === true && !!P.pJoin && P.pJoin.sync === true && !!P.pGot && P.pGot.ana === true
+      && !!P.aFromP && P.aFromP.trial === true,
+      'cloud (real IPC): a laptop tried on a trial server and then joined to the clinic\'s exchanges everything both ways — the records it had already sent to the trial server reach the clinic, and the clinic\'s accounts reach it');
+    log(!!P.aFromP && P.aFromP.late === true,
+      'cloud (real IPC): a sync to the old server still on the network as the laptop moves marks nothing as sent — that record reaches the clinic\'s server too');
     log(P.dConnect === true && !!P.lastAdminD && P.lastAdminD.own === true && P.lastAdminD.clinic === false
       && !!P.lastAdminA && P.lastAdminA.d === true && P.lastAdminA.own === false && P.lastAdminA.dPatient === true,
       'cloud (real IPC): what the guide warns of is so — a laptop used on its own first brings its test patient to the clinic, and its admin password replaces the clinic\'s on every laptop');

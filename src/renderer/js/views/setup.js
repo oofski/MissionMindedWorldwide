@@ -172,9 +172,24 @@ export function renderSetup(ctx, params = {}) {
     // applies, rather than letting someone paste a code and type a key only to
     // be told at the end. If the question fails, the form stays; the handler
     // still refuses.
+    //
+    // Already connected, it is closed for a different reason: there is nothing
+    // to join. That is the usual way here after a first Join that found no
+    // accounts — the laptop's own sync then brought them, the clinic's
+    // administrator password with them — and "connect it under Admin → Cloud"
+    // told someone whose staff could already sign in to do what was done.
     const form = el('div', { class: 'auth-form' });
     api.needsSetup().then((r) => {
       if (!r || r.needsSetup || r.defaultAdmin) return;
+      if (r.connected) {
+        form.replaceChildren(
+          el('h2', { class: 'auth-title' }, ['Join a clinic']),
+          el('div', { class: 'update-status' }, [icon('info', { size: 16 }), el('span', {}, ['This computer is already connected to a clinic server, so there is nothing to join. Sign in with your own account.'])]),
+          el('p', { class: 'auth-sub' }, ['To connect it to a different server, sign in as an administrator and use Admin → Cloud.']),
+          backBtn(),
+        );
+        return;
+      }
       form.replaceChildren(
         el('h2', { class: 'auth-title' }, ['Join a clinic']),
         el('div', { class: 'login-error', style: 'display:block' }, ['This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.']),

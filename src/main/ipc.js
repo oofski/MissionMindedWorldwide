@@ -189,6 +189,9 @@ function register(getMainWindow) {
   handle('auth:needsSetup', () => ({
     needsSetup: db.needsSetup(),
     defaultAdmin: db.defaultAdminActive() ? { username: db.DEFAULT_ADMIN_USERNAME, password: db.DEFAULT_ADMIN_PASSWORD } : null,
+    // Whether a server is saved, never which: Join a clinic, on the sign-in
+    // screen, tells "already connected" apart from "closed" (setup.js).
+    connected: db.getSyncMeta().configured,
   }));
   handle('auth:setupAdmin', (payload) => {
     const user = db.createFirstAdmin(payload || {});
@@ -261,15 +264,29 @@ function register(getMainWindow) {
   // Cloud. Same test first as typing the address there, then the first full
   // sync is waited for, because the next step is signing in with an account
   // that only exists here once it has synced down.
+  //
+  // Pressed again for the server and key this laptop already has — what Join
+  // tells someone to do when no accounts had come down yet — it repoints
+  // nothing, so it is not refused even though the clinic's own administrator
+  // password has arrived meanwhile (that arrival is what closed the computer,
+  // and it used to answer "connect it under Admin → Cloud" on a laptop already
+  // connected, whose staff could already sign in). It changes nothing either —
+  // not even a paused laptop's pause, which is the administrator's — and only
+  // waits for a sync and says what is here now.
   handle('cloud:join', async ({ url, key } = {}) => {
     if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
-    if (!currentUser && !db.needsSetup() && !db.defaultAdminActive()) {
+    const saved = db.getSyncMeta();
+    const already = saved.configured && !!String(url || '').trim()
+      && cloud.normalizeUrl(url) === cloud.normalizeUrl(saved.url) && String(key || '') === saved.key;
+    if (!currentUser && !already && !db.needsSetup() && !db.defaultAdminActive()) {
       throw new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
     }
     if (!String(key || '').trim()) throw new Error('Enter the clinic key as well as the address.');
     const health = await cloud.testConnection(url, key);
-    cloud.applyConfig({ url, key, online: true });
-    db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));
+    if (!already) {
+      cloud.applyConfig({ url, key, online: true });
+      db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + cloud.normalizeUrl(url));
+    }
     const sync = await cloud.syncSettled();
     return { ...health, sync, needsSetup: db.needsSetup(), accounts: ownAccounts() };
   });

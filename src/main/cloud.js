@@ -147,11 +147,18 @@ function connectionCode() {
   return { code: encodeConnectionCode(m.url, m.key), url: trimUrl(m.url) };
 }
 
+// Whether `base` is still the server this laptop is connected to. A cycle can
+// be waiting on the network when an administrator saves a different server (or
+// disconnects); what that cycle then hears from the old one — rows it accepted,
+// rows and a cursor it handed back — is about the old server, and recording it
+// would mark rows as sent that the new one never got (see applyConfig).
+const stillOn = (base) => trimUrl(db.getSyncMeta().url) === base;
+
 async function pushOnce(base, key, deviceId) {
   const { rows, mark } = db.collectSyncRows(PULL_LIMIT);
   if (!rows.length) return 0;
   const r = await httpJson('POST', base + '/v1/push', key, { device_id: deviceId, rows });
-  if (r && r.ok) { db.markSynced(mark); db.setSyncMeta({ lastPush: new Date().toISOString() }); }
+  if (r && r.ok && stillOn(base)) { db.markSynced(mark); db.setSyncMeta({ lastPush: new Date().toISOString() }); }
   return rows.length;
 }
 
@@ -169,6 +176,7 @@ async function pullOnce(base, key) {
   if (cursor && !isSeqCursor(cursor)) {
     let health = null;
     try { health = await httpJson('GET', base + '/health', null); } catch { /* offline / older server */ }
+    if (!stillOn(base)) return { pulled: 0, applied: 0, deleted: 0 };
     if (health && health.seq === true) { cursor = ''; db.setSyncMeta({ cursor }); }
   }
   let pulled = 0, applied = 0, removed = 0, guard = 0;
@@ -185,6 +193,7 @@ async function pullOnce(base, key) {
     if (guard++ > 500) break;
     const qs = `?since=${encodeURIComponent(cursor)}&limit=${PULL_LIMIT}`;
     const r = await httpJson('GET', base + '/v1/pull' + qs, key);
+    if (!stillOn(base)) return { pulled, applied, deleted: removed };
     const rows = (r && r.rows) || [];
     const batch = carry.length ? carry.concat(rows) : rows;
     if (batch.length) {
@@ -230,12 +239,14 @@ async function cycle(meta) {
   try {
     const pushed = await pushOnce(base, meta.key, deviceId);
     const { pulled, applied, deleted } = await pullOnce(base, meta.key);
+    if (!stillOn(base)) return { ok: false, superseded: true };
     db.setSyncMeta({ lastOk: new Date().toISOString(), lastError: '' });
     lastResult = { pushed, pulled, applied, deleted };
     if (applied > 0) notifyRenderer();
     return { ok: true, pushed, pulled, applied, deleted };
   } catch (e) {
     const msg = explain(e, base);
+    if (!stillOn(base)) return { ok: false, superseded: true };
     db.setSyncMeta({ lastError: msg });
     return { ok: false, error: msg };
   }
@@ -274,10 +285,11 @@ function applyConfig({ url, key, enabled, mode, online }) {
   const patch = {};
   if (url !== undefined && isPlainHttp(trimUrl(url))) throw new Error(PLAIN_HTTP);
   if (url !== undefined) patch.url = trimUrl(url);
+  const newServer = url !== undefined && trimUrl(url) !== trimUrl(db.getSyncMeta().url);
   // A key must travel with a server change. Letting a new URL inherit the
   // stored key is how a clinic could end up pointing at its own server while
   // still authenticating with somebody else's credential.
-  if (url !== undefined && trimUrl(url) !== trimUrl(db.getSyncMeta().url) && !key) {
+  if (newServer && !key) {
     throw new Error('Enter the clinic key for this server as well as its address.');
   }
   if (key !== undefined) patch.key = key;
@@ -286,6 +298,14 @@ function applyConfig({ url, key, enabled, mode, online }) {
   else if (online !== undefined) patch.mode = online ? 'online' : 'offline';
   else if (enabled !== undefined) patch.mode = enabled ? 'online' : 'offline';
   db.ensureDeviceId();
+  // A different server — or any server after a Disconnect, which leaves no
+  // address saved — starts from nothing on both sides. The old server's
+  // cursor skipped every row the new one numbered below it, and the rows
+  // already sent to the old one stayed marked as sent, so nothing went to the
+  // new one: a laptop moved from a test server to the clinic's exchanged
+  // nothing while Join reported success. Everything here goes, each row with
+  // its own stamp, and everything there comes back.
+  if (newServer) { db.resetSyncCursor(); db.markAllUnsent(); }
   db.setSyncMeta(patch);
   restartTimer();
   return status();
