@@ -231,6 +231,13 @@ async function pullOnce(base, key) {
       applied += res.applied; removed += (res.deleted || 0); pulled += rows.length;
       carry = res.deferredRows || [];
     }
+    // What is still waiting for its parent is saved with every page, BEFORE
+    // that page's cursor. Saved only after the last page, a pull cut short by
+    // the network — the next page timing out — kept the cursor past every row
+    // deferred so far and lost the rows: patients and staff arriving ahead of
+    // an event edited after they were added, on a laptop joining the clinic,
+    // until someone pressed Re-sync everything.
+    db.setSyncPending(carry.concat(held));
     // Accept "0" as a real cursor value (a counter can legitimately be 0).
     const pageCursor = (r && r.cursor != null && r.cursor !== '') ? String(r.cursor) : cursor;
     if (pageCursor !== cursor) { cursor = pageCursor; db.setSyncMeta({ cursor }); }
@@ -316,7 +323,8 @@ function applyConfig({ url, key, enabled, mode, online }) {
   const patch = {};
   if (url !== undefined && isPlainHttp(trimUrl(url))) throw new Error(PLAIN_HTTP);
   if (url !== undefined) patch.url = trimUrl(url);
-  const newServer = url !== undefined && trimUrl(url) !== trimUrl(db.getSyncMeta().url);
+  const prior = trimUrl(db.getSyncMeta().url);
+  const newServer = url !== undefined && trimUrl(url) !== prior;
   // A key must travel with a server change. Letting a new URL inherit the
   // stored key is how a clinic could end up pointing at its own server while
   // still authenticating with somebody else's credential.
@@ -339,8 +347,14 @@ function applyConfig({ url, key, enabled, mode, online }) {
   // its own stamp, and everything there comes back — but not the deletions
   // this laptop only heard from the old server (see db.markAllUnsent). The
   // accounts here now are noted, so Join can tell which came from the server.
-  if (newServer) { db.resetSyncCursor(); db.markAllUnsent(); db.noteAccountsHere(); }
+  // Reconnected after a Disconnect to the server it was last on, nothing there
+  // is another server's: its own deletions of the shared admin and event go as
+  // they would have had it stayed connected (see db.markAllUnsent).
+  const sameServer = newServer && !prior && trimUrl(url) === trimUrl(db.getSetting('cloud_last_url'));
+  if (newServer) { db.resetSyncCursor(); db.markAllUnsent({ sameServer }); db.noteAccountsHere(); }
   db.setSyncMeta(patch);
+  // The address alone, kept through a Disconnect (never the key).
+  if (patch.url) db.setSetting('cloud_last_url', patch.url);
   restartTimer();
   return status();
 }

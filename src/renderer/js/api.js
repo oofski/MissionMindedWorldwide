@@ -129,7 +129,8 @@ export const api = {
   // v0.0.16: the server address + clinic key as one code (administrators
   // only), and the sign-in screen's Join a clinic (test, save, first sync).
   cloudConnectionCode: () => call('cloudConnectionCode'),
-  cloudJoin: (url, key) => call('cloudJoin', { url, key }),
+  // move: the person confirmed moving a laptop already connected elsewhere.
+  cloudJoin: (url, key, move) => call('cloudJoin', { url, key, ...(move ? { move: true } : {}) }),
   resetAllData: () => call('dataReset'),
   onCloudChanged: (cb) => window.api.onCloudChanged(cb),
 

@@ -10,7 +10,7 @@
 //           at the same clinic cloud; the staff accounts sync down and everyone
 //           signs in with the account they already have.
 
-import { el, toast, withBusy } from '../dom.js';
+import { el, toast, modal, withBusy } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
@@ -116,9 +116,14 @@ export function renderSetup(ctx, params = {}) {
       error.style.display = 'none';
       // A pasted code fills the two boxes below — so the person sees which
       // server it names — and is then connected exactly as if they had typed.
+      // Used once, and a damaged one is let go too: left in its box, it went on
+      // replacing whatever was typed below, and a damaged code blocked the
+      // typed address and key ("incomplete or damaged") until someone noticed
+      // the box and cleared it.
       if (code.value.trim()) {
         let read;
-        try { read = readConnectionCode(code.value); } catch (e) { return fail(e.message); }
+        try { read = readConnectionCode(code.value); } catch (e) { code.value = ''; return fail(e.message); }
+        code.value = '';
         url.value = read.url;
         key.value = read.key;
       }
@@ -127,7 +132,26 @@ export function renderSetup(ctx, params = {}) {
       try {
         await withBusy(joinBtn, async () => {
         say('Checking the clinic address, then downloading the clinic…');
-        const r = await api.cloudJoin(url.value.trim(), key.value);
+        let r = await api.cloudJoin(url.value.trim(), key.value);
+        // Already connected to another server: the question Admin → Cloud
+        // asks before a move, asked here too (main moves nothing until then).
+        if (r.moveTo) {
+          const to = r.moveTo;
+          const ok = await modal({
+            title: 'Move this laptop to a different server?',
+            body: el('div', {}, [
+              el('p', { style: 'margin:0 0 var(--space-3);' }, [
+                `This laptop is already connected to another clinic server. Joining ${to} sends every record on this laptop to ${to} — patients, staff accounts and events, the ones from the other server included — and they stay there.`,
+              ]),
+              el('p', { style: 'margin:0;' }, [
+                'If this laptop is going to a different clinic, cancel, sign in as an administrator, back it up, and erase it with Backup & Export → Reset this computer before connecting it.',
+              ]),
+            ]),
+            confirmText: `Send everything to ${to}`, cancelText: 'Cancel', danger: true,
+          });
+          if (!ok) { status.style.display = 'none'; return; }
+          r = await api.cloudJoin(url.value.trim(), key.value, true);
+        }
 
         // Accounts replicate with everything else, so once the pull lands this
         // machine has the clinic's real staff list and setup is finished.
@@ -178,6 +202,8 @@ export function renderSetup(ctx, params = {}) {
     // accounts — the laptop's own sync then brought them, the clinic's
     // administrator password with them — and "connect it under Admin → Cloud"
     // told someone whose staff could already sign in to do what was done.
+    // (With admin / admin still working, the form stays, for Join's "press
+    // Connect and sync again"; a different server is asked about first.)
     const form = el('div', { class: 'auth-form' });
     api.needsSetup().then((r) => {
       if (!r || r.needsSetup || r.defaultAdmin) return;

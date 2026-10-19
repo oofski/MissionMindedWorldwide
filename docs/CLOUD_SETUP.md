@@ -177,8 +177,15 @@ out on — brings everything on it into the clinic when it connects:
    on that server. Deletions it only heard about from the old server are not
    passed on, and neither is a deletion of the shared `admin` account or of
    **Mission Minded Clinic** made before the move, so a trial cannot delete
-   the clinic's. On a laptop that is already connected, **Save server** with
-   a different address asks first, naming the new server.
+   the clinic's. This laptop's own deletion of `admin` still keeps the shipped
+   `admin` / `admin` off it — a new laptop's untouched `admin` / `admin` is
+   refused here, while the clinic's `admin` with its changed password still
+   arrives — and if it was deleted before this laptop was ever connected,
+   that deletion is sent once the server turns out to hold only the shipped
+   `admin` / `admin`, so it is gone from every laptop. Connected again after
+   **Disconnect** to the same server, a laptop passes on its deletions as if
+   it had stayed connected. On a laptop that is already connected, **Save
+   server** with a different address asks first, naming the new server.
 
 ### On a laptop you can sign in to as an administrator
 1. Sign in as an administrator and open **Cloud** (the Admin part of the

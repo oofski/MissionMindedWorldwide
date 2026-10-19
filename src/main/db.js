@@ -467,6 +467,7 @@ function resetClinicData() {
       for (const k of ['active_event_id',
                        'cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
                        'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before',
+                       'cloud_last_url',
                        'xray_import_dir', 'xray_folder_locked', 'xray_clear_after_import']) {
         db.prepare('DELETE FROM settings WHERE key = ?').run(k);
       }
@@ -635,6 +636,17 @@ const DEFAULT_ADMIN_UID = '00000000-0000-4000-8000-000000000002';
 // asking for it to be changed rather than letting it quietly become permanent.
 const DEFAULT_ADMIN_USERNAME = 'admin';
 const DEFAULT_ADMIN_PASSWORD = 'admin';
+// The stamp every untouched seed carries (convergeSeedAdmin, convergeSeedEvent).
+const ANCIENT_STAMP = '0000-01-01T00:00:00.000Z';
+// A copy of the shared admin that is still admin / admin exactly as a fresh
+// laptop seeds it: ancient-stamped, on the shipped password. Never anybody's
+// own account — the clinic's administrator under the shared uid has a real
+// stamp from the moment its password was changed.
+function isShippedAdminCopy(uid, stamp, data) {
+  const d = data || {};
+  return uid === DEFAULT_ADMIN_UID && String(stamp || '').startsWith(ANCIENT_STAMP)
+    && !!d.salt && !!d.hash && verifyPassword(DEFAULT_ADMIN_PASSWORD, String(d.salt), String(d.hash));
+}
 
 /**
  * Guarantee the bootstrap administrator exists, ONCE, on a machine that was
@@ -1121,6 +1133,23 @@ function clearEventStaff(actor, eventId) {
 function updateUser(actor, id, { full_name, role, active, password }) {
   const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   if (!row) throw new Error('User not found.');
+  // Refused like deleting: an administrator turning off her own account, or
+  // taking the administrator role from it, and anyone doing either to the last
+  // administrator who can sign in. Since a session ends the moment its account
+  // is turned off or its role changes (ipc.js liveSession), the next click
+  // signed her out with nobody left who could turn her back on — and on a
+  // laptop that never connects, no way back in at all.
+  const demoting = role != null && row.role === 'admin' && role !== 'admin';
+  const disabling = active != null && !active && !!row.active;
+  if (demoting || disabling) {
+    if (actor && actor.id === row.id) {
+      throw new Error(disabling ? 'You cannot turn off your own account.' : 'You cannot take the administrator role from your own account.');
+    }
+    if (row.role === 'admin' && row.active
+        && db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n <= 1) {
+      throw new Error(disabling ? 'Cannot turn off the last administrator.' : 'Cannot take the administrator role from the last administrator.');
+    }
+  }
   const fields = [];
   const vals = [];
   if (full_name != null) { fields.push('full_name = ?'); vals.push(full_name); }
@@ -1257,6 +1286,8 @@ function listEvents() {
     ...e,
     active: !!e.active,
     patient_count: db.prepare('SELECT COUNT(*) AS n FROM patients WHERE event_id = ?').get(e.id).n,
+    // Deleting the event deletes these too (deleteEvent), so its confirm says so.
+    staff_count: db.prepare("SELECT COUNT(*) AS n FROM users WHERE event_id = ? AND role != 'admin'").get(e.id).n,
     prereg_url: (base && e.uid) ? `${base}/checkin/${e.uid}` : null,
   }));
 }
@@ -1356,16 +1387,30 @@ function deleteEvent(actor, id, { force } = {}) {
   // connects. Once this copy has been sent or received, deleting it is
   // deleting the clinic's event, and goes everywhere as before.
   const placeholder = e.uid === DEFAULT_EVENT_UID && e.synced_rev == null;
+  // The event's staff accounts go with it, as Start fresh removes them. A staff
+  // account belongs to its one event; left behind, it pointed at an event that
+  // no longer exists, so the Staff tab listed it nowhere while it still signed
+  // in — and every laptop it synced to took it as having NO event, the scope of
+  // an administrator. Two deleted events' "ana" then clashed there (one of the
+  // two refused for good), and a laptop joining afterwards merged them into one
+  // account. Administrators are global and stay.
+  const staff = db.prepare("SELECT * FROM users WHERE event_id = ? AND role != 'admin'").all(id)
+    .filter((r) => !(actor && actor.id === r.id));
   const tx = db.transaction(() => {
     for (const p of db.prepare('SELECT id FROM patients WHERE event_id = ?').all(id)) tombstonePatient(p.id);
+    detachUserRefs(staff.map((r) => r.id));
+    for (const r of staff) {
+      recordTombstone(r.uid, 'user', e.uid);
+      db.prepare('DELETE FROM users WHERE id = ?').run(r.id);
+    }
     if (!placeholder) recordTombstone(e.uid, 'event', null);
     db.prepare('DELETE FROM patients WHERE event_id = ?').run(id);
     db.prepare('DELETE FROM events WHERE id = ?').run(id);
   });
   tx();
   if (Number(getSetting('active_event_id')) === id) resolveActiveEvent();
-  audit(actor, 'delete', 'event', id, `${e.name} (+${count} patients)`);
-  return { deleted: true, patients: count };
+  audit(actor, 'delete', 'event', id, `${e.name} (+${count} patients, ${staff.length} staff)`);
+  return { deleted: true, patients: count, staff: staff.length };
 }
 
 // Recompute which event this laptop is on, keeping it in step with every other
@@ -1927,12 +1972,21 @@ function patientHistory(patientId) {
 // Record that a row was deleted, so the deletion reaches the cloud and every
 // other station instead of the record simply being pulled back. Every delete
 // path must call this — a DELETE without one is a local-only illusion.
+// An account's deletion is recorded as carried out (tombstones.carried_out),
+// because it only ever is: deleteUser, Start fresh and deleteEvent record it in
+// the transaction that deletes the account. collectSyncRows used to infer that
+// from the stamp ending in this laptop's device id, and the device id goes with
+// a Disconnect and from every backup — so a deletion of an administrator still
+// waiting to go then went without it, and every laptop she had signed in on
+// held it back as an old laptop's refused delete, and she kept signing in there.
 function recordTombstone(uid, entity, eventUid) {
   if (!uid) return;
+  const done = entity === 'user' ? 1 : null;
   db.prepare(
-    `INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at)
-     VALUES (?,?,?,?,NULL,?) ON CONFLICT(uid) DO UPDATE SET synced_rev = NULL, updated_at = excluded.updated_at`
-  ).run(uid, entity, eventUid || null, stampNow(), now());
+    `INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at, carried_out)
+     VALUES (?,?,?,?,NULL,?,?) ON CONFLICT(uid) DO UPDATE SET synced_rev = NULL, updated_at = excluded.updated_at,
+       carried_out = excluded.carried_out`
+  ).run(uid, entity, eventUid || null, stampNow(), now(), done);
 }
 
 function tombstonePatient(id) {
@@ -3549,7 +3603,7 @@ function listAudit(limit = 200) {
 // laptop put back from one is connected again under Admin → Cloud. The device
 // id goes too, so two laptops can never stamp changes as the same device.
 const BACKUP_DROPS = ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending', 'cloud_device_id',
-  'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before'];
+  'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before', 'cloud_last_url'];
 async function backupTo(destPath) {
   // better-sqlite3 online backup -> single consistent .db file
   const r = await db.backup(destPath);
@@ -4660,13 +4714,16 @@ function collectSyncRows(max = 400) {
   // and carries out one that says it was. From here it is true: deleteUser and
   // Start fresh record the deletion in the same transaction as the delete, and
   // a stray left by an older version is retired at start
-  // (reviveRefusedUserDeletions). Made here = stamped by this laptop; one that
-  // came from elsewhere, sent again after a change of server, goes as it came
-  // (tombstones.carried_out).
+  // (reviveRefusedUserDeletions). recordTombstone notes it on the deletion
+  // (tombstones.carried_out). One recorded before that, by an older version,
+  // has no note, and counts when this laptop stamped it — as this used to
+  // decide for all of them, until a Disconnect or a backup gave the laptop a
+  // new device id and its own deletions went without it.
   const ownStamp = '@' + (getSetting('cloud_device_id') || '0');
   for (const tomb of db.prepare('SELECT * FROM tombstones WHERE synced_rev IS NULL').all()) {
     if (rows.length >= max) break;
-    const done = tomb.entity === 'user' && (!!tomb.carried_out || String(tomb.updated_at || '').endsWith(ownStamp));
+    const done = tomb.entity === 'user' && (!!tomb.carried_out
+      || (tomb.carried_out == null && String(tomb.updated_at || '').endsWith(ownStamp)));
     rows.push({
       entity: tomb.entity, uid: tomb.uid,
       event_uid: tomb.event_uid || null, patient_uid: null,
@@ -4746,7 +4803,7 @@ function applyRemoteRows(remoteRows) {
           // nobody who can manage it. Held back instead, like a deletion whose
           // children are still to come: once another administrator is here,
           // the retry goes through.
-          const acct = db.prepare('SELECT role, active FROM users WHERE id = ?').get(hit.id);
+          const acct = db.prepare('SELECT role, active, salt, hash FROM users WHERE id = ?').get(hit.id);
           if (acct.role === 'admin' && acct.active
               && db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").get().n <= 1) {
             deferred++; deferredRows.push(env); return;
@@ -4772,7 +4829,18 @@ function applyRemoteRows(remoteRows) {
           // the only refusal an older version sent one for is its own
           // "FOREIGN KEY constraint failed" on a Delete the administrator meant,
           // and its Start fresh sent nothing unless it went through.
-          if (acct.role !== 'admin' || (env.data && env.data.carried_out)) detachUserRefs([hit.id]);
+          // Nor the shipped admin / admin while it is still on the shipped
+          // password here (and, by the hold-back above, not the last
+          // administrator): that is what every director is asked to delete, and
+          // one who did it on an older laptop sent no marker, so a laptop set up
+          // by signing in as admin / admin — which writes a sign-in to the audit
+          // log — held that deletion back for good and kept the known password
+          // working, its hint on the sign-in screen. Even one such a laptop
+          // refused is safe to carry out: it takes nothing but a password the
+          // sign-in screen prints, and that laptop, once updated, sends the
+          // account back (reviveRefusedUserDeletions).
+          const shipped = env.uid === DEFAULT_ADMIN_UID && verifyPassword(DEFAULT_ADMIN_PASSWORD, acct.salt, acct.hash);
+          if (acct.role !== 'admin' || (env.data && env.data.carried_out) || shipped) detachUserRefs([hit.id]);
         }
         try { db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(hit.id); deleted++; }
         catch (e) {
@@ -4806,8 +4874,23 @@ function applyRemoteRows(remoteRows) {
     // than the deletion itself. A copy that IS newer means the record was
     // deliberately brought back (a restore, or an edit after the delete), so the
     // tombstone is retired and the row applies normally.
-    const tomb = db.prepare('SELECT updated_at FROM tombstones WHERE uid = ?').get(env.uid);
-    if (tomb) {
+    //
+    // This laptop's deletion of the shared admin, kept from before a change of
+    // server ('local', 'held' — see markAllUnsent), was about another server's
+    // copy, or its own: it refuses only admin / admin as a fresh laptop sends
+    // it, and gives way to any other copy, which is the clinic's own
+    // administrator on this server. One that never reached any server ('held')
+    // goes once this server is seen to hold that untouched copy: deleting it
+    // there takes nothing but the shipped password, and is what keeps it gone
+    // on the laptop that sent it and every laptop joining later.
+    const tomb = db.prepare('SELECT updated_at, synced_rev FROM tombstones WHERE uid = ?').get(env.uid);
+    if (tomb && (tomb.synced_rev === 'local' || tomb.synced_rev === 'held')) {
+      if (isShippedAdminCopy(env.uid, env.updated_at, env.data)) {
+        if (tomb.synced_rev === 'held') db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE uid = ?').run(env.uid);
+        skipped++; return;
+      }
+      db.prepare('DELETE FROM tombstones WHERE uid = ?').run(env.uid);
+    } else if (tomb) {
       if (!(env.updated_at && String(env.updated_at) > String(tomb.updated_at))) { skipped++; return; }
       db.prepare('DELETE FROM tombstones WHERE uid = ?').run(env.uid);
     }
@@ -4847,6 +4930,19 @@ function applyRemoteRows(remoteRows) {
       parentCol = 'event_id';
       if (env.event_uid) { parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
       else parentId = null;
+      const staffCopy = !!env.data && env.data.role !== 'admin';
+      // A staff account that arrives with no event, for one this laptop has on
+      // an event, keeps its event here. Nothing moves a staff account off its
+      // event (only becoming an administrator does); what sends one without is
+      // a laptop where its event was deleted from under it, before deleteEvent
+      // took the event's staff with it — it has no uid for the event any more.
+      // Taken as sent, the account had an administrator's scope here, and two
+      // events' "ana" clashed on it: the second was refused for good, so
+      // turning her off never reached this laptop.
+      if (existing && staffCopy && parentId == null) {
+        const here = db.prepare('SELECT event_id FROM users WHERE id = ?').get(existing.id);
+        if (here && here.event_id != null) parentId = here.event_id;
+      }
       // Username guard: if a DIFFERENT local row already owns this username ON THE
       // SAME EVENT (every device seeds its own 'admin'; two admins could also
       // create the same username offline), adopt that row's identity instead of a
@@ -4855,10 +4951,18 @@ function applyRemoteRows(remoteRows) {
       // v0.0.16 "ana" for the Oct 18 clinic and "ana" for the Oct 25 one are two
       // accounts, and adopting by username alone merged them into one on every
       // laptop. parentId is the event the row arrived for (NULL for an admin).
+      // And an administrator only for an administrator, staff for staff. A
+      // staff account with no event (an old unscoped one, or one whose event
+      // was deleted where it came from) adopts only an account made here and
+      // never exchanged — the old unscoped account this guard was for — never
+      // one that came from the server under its own uid: with no event to tell
+      // them apart, that was another event's "ana", and the two became one.
       if (!existing) {
         const uname = env.data && env.data.username;
         const dupe = uname
-          ? db.prepare('SELECT id FROM users WHERE username = ? AND IFNULL(event_id, 0) = IFNULL(?, 0)').get(uname, parentId)
+          ? db.prepare(`SELECT id FROM users WHERE username = ? AND IFNULL(event_id, 0) = IFNULL(?, 0)
+                        AND (role = 'admin') = ?${staffCopy && parentId == null ? ' AND synced_rev IS NULL' : ''}`)
+            .get(uname, parentId, staffCopy ? 0 : 1)
           : null;
         if (dupe) { db.prepare('UPDATE users SET uid = ? WHERE id = ?').run(env.uid, dupe.id); return applyOne(env); }
       }
@@ -5014,6 +5118,8 @@ function setSyncMeta(patch) {
  * cursor and forces a full re-read from whatever server is configured next.
  */
 function disconnectCloud() {
+  // cloud_last_url stays: which server this laptop was last on (see
+  // cloud.applyConfig), the address only, never the key.
   for (const k of ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
                    'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error']) {
     db.prepare('DELETE FROM settings WHERE key = ?').run(k);
@@ -5050,14 +5156,31 @@ function resetSyncCursor() {
 // never deleted by a move at all, whoever deleted them: their tombstone was
 // about the old server's copy (or this laptop's own placeholder before it had
 // a server), and the new server's copy is what this laptop should now get.
-function markAllUnsent() {
+//
+// But this laptop's own deletion of the shared admin is not forgotten either.
+// Forgotten, it took admin / admin back as soon as any fresh laptop joined the
+// new server and sent its seed — and a laptop's FIRST connection counts as a
+// move, so a director who deleted admin / admin before connecting got it back
+// on every laptop, his own included. It is kept, unsent ('local'; 'held' when
+// it never reached any server, which goes once the new server is seen to hold
+// only the shipped admin / admin — see applyRemoteRows), against the shipped
+// copy alone.
+//
+// sameServer: reconnecting, after a Disconnect, to the server this laptop was
+// on. Nothing there is another server's, so the deletions go as they would
+// have had it stayed connected.
+function markAllUnsent({ sameServer = false } = {}) {
   db.transaction(() => {
     for (const table of Object.values(ENTITY_TABLE)) {
       db.prepare(`UPDATE ${table} SET synced_rev = NULL WHERE synced_rev IS NOT NULL`).run();
     }
-    db.prepare('DELETE FROM tombstones WHERE uid IN (?, ?)').run(DEFAULT_EVENT_UID, DEFAULT_ADMIN_UID);
+    if (!sameServer) {
+      db.prepare('DELETE FROM tombstones WHERE uid = ?').run(DEFAULT_EVENT_UID);
+      db.prepare(`UPDATE tombstones SET synced_rev = CASE WHEN synced_rev IS NULL OR synced_rev = 'held' THEN 'held' ELSE 'local' END
+                  WHERE uid = ? AND IFNULL(synced_rev, '') != 'received'`).run(DEFAULT_ADMIN_UID);
+    }
     db.prepare("DELETE FROM tombstones WHERE synced_rev = 'received'").run();
-    db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE synced_rev IS NOT NULL').run();
+    db.prepare("UPDATE tombstones SET synced_rev = NULL WHERE synced_rev IS NOT NULL AND synced_rev NOT IN ('local', 'held')").run();
   })();
   return { ok: true };
 }
