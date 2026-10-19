@@ -32,6 +32,7 @@ function init(userDataDir) {
 
   migrate();
   seed();
+  classifyReceivedTombstones();
   return dbPath;
 }
 
@@ -455,7 +456,7 @@ function resetClinicData() {
       // nothing: with cloud_mode absent the old code read that as "online".
       for (const k of ['active_event_id',
                        'cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
-                       'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error',
+                       'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before',
                        'xray_import_dir', 'xray_folder_locked', 'xray_clear_after_import']) {
         db.prepare('DELETE FROM settings WHERE key = ?').run(k);
       }
@@ -1110,9 +1111,19 @@ function deleteEvent(actor, id, { force } = {}) {
   // destructive action NOT gated behind an export, so silently discarding the
   // clinic's figures with it is the worst possible default.
   if (count > 0) captureEventSummary(actor, id);
+  // The shipped event is ONE row on every laptop (DEFAULT_EVENT_UID). Deleting
+  // this laptop's copy before it was ever exchanged with a server is tidying up
+  // the placeholder, not deleting the clinic's event — yet its tombstone named
+  // the clinic's event, and the shipped copy is dated ancient (so it loses to
+  // any deletion), so connecting this laptop deleted the clinic's event on the
+  // server, and every laptop that joined after skipped its patients and staff.
+  // Not recorded, the clinic's event simply arrives here when this laptop
+  // connects. Once this copy has been sent or received, deleting it is
+  // deleting the clinic's event, and goes everywhere as before.
+  const placeholder = e.uid === DEFAULT_EVENT_UID && e.synced_rev == null;
   const tx = db.transaction(() => {
     for (const p of db.prepare('SELECT id FROM patients WHERE event_id = ?').all(id)) tombstonePatient(p.id);
-    recordTombstone(e.uid, 'event', null);
+    if (!placeholder) recordTombstone(e.uid, 'event', null);
     db.prepare('DELETE FROM patients WHERE event_id = ?').run(id);
     db.prepare('DELETE FROM events WHERE id = ?').run(id);
   });
@@ -3296,9 +3307,40 @@ function listAudit(limit = 200) {
 /*  Backup / export                                                    */
 /* ------------------------------------------------------------------ */
 
-function backupTo(destPath) {
+// What a backup leaves out: the connection to the sync server. The clinic key
+// is shown only to an administrator who asks (and audited), yet every backup
+// on a USB stick or hard drive carried it in plain text, with the address
+// beside it. A backup is the clinic's records, as Disconnect leaves them; a
+// laptop put back from one is connected again under Admin → Cloud. The device
+// id goes too, so two laptops can never stamp changes as the same device.
+const BACKUP_DROPS = ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending', 'cloud_device_id',
+  'cloud_last_push', 'cloud_last_ok', 'cloud_last_error', 'cloud_accounts_before'];
+async function backupTo(destPath) {
   // better-sqlite3 online backup -> single consistent .db file
-  return db.backup(destPath);
+  const r = await db.backup(destPath);
+  const copy = new Database(destPath);
+  try {
+    // One self-contained file, with no -wal beside it on the drive.
+    copy.pragma('journal_mode = MEMORY');
+    // The settings table is rebuilt rather than those rows deleted: a deleted
+    // row's bytes stay in its page as free space, and so do those of every
+    // earlier value of the key (a key changed, or another server's). With
+    // secure_delete, the dropped table's pages are zeroed as they are freed.
+    copy.pragma('secure_delete = ON');
+    const ddl = copy.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get();
+    copy.transaction(() => {
+      const kept = copy.prepare('SELECT key, value FROM settings').all().filter((s) => !BACKUP_DROPS.includes(s.key));
+      copy.exec('DROP TABLE settings');
+      copy.exec(ddl.sql);
+      const put = copy.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+      for (const s of kept) put.run(s.key, s.key === 'cloud_mode' ? 'offline' : s.value);
+      // Written, never left out: an absent cloud_mode is not read as offline.
+      if (!kept.some((s) => s.key === 'cloud_mode')) put.run('cloud_mode', 'offline');
+    })();
+  } finally {
+    copy.close();
+  }
+  return r;
 }
 
 /* ---------------- Clinic bundle: export, restore, purge ----------------- */
@@ -4439,9 +4481,12 @@ function applyRemoteRows(remoteRows) {
       // Remember the deletion locally too. Without this the record is gone now
       // but any station still holding an old copy re-creates it on the next
       // sync — the patient reappears and the deletion looks like it never took.
-      // Marked 'sent' because this tombstone came FROM the cloud.
+      // Marked 'received', not NULL, because this tombstone came FROM the
+      // cloud and so is never pushed back to it. Not 'sent' either: that is
+      // this laptop's own deletion once the server has it, and on a move to
+      // another server only those are passed on (see markAllUnsent).
       db.prepare(`INSERT INTO tombstones (uid, entity, event_uid, updated_at, synced_rev, created_at)
-                  VALUES (?,?,?,?,'sent',?)
+                  VALUES (?,?,?,?,'received',?)
                   ON CONFLICT(uid) DO UPDATE SET updated_at = excluded.updated_at`)
         .run(env.uid, entity, env.event_uid || null, env.updated_at || stampNow(), now());
       return;
@@ -4674,14 +4719,79 @@ function resetSyncCursor() {
 // so the clinic's other laptops never saw it while this one did. content_rev is
 // kept, so each row goes with the stamp of its own last change and loses to
 // anything newer the new server already holds. Used by cloud.applyConfig().
+//
+// Deletions are not all this laptop's to pass on. One it HEARD from the old
+// server ('received') is that server's business: re-sent, it deleted the
+// record on the new server too, and a server's deletions are sticky. A trial
+// server's director deleting the shipped event and admin / admin (both shared
+// uids, so they ARE the clinic's event and the clinic's admin on its own
+// server) deleted the clinic's event and administrator, and every laptop that
+// joined afterwards skipped each patient and event staff account filed under
+// it. Kept here, it would still hide the new server's copy from this laptop.
+// So those are forgotten, and only this laptop's own deletions ('sent', or
+// never sent) go to the new server. The shared event and the shared admin are
+// never deleted by a move at all, whoever deleted them: their tombstone was
+// about the old server's copy (or this laptop's own placeholder before it had
+// a server), and the new server's copy is what this laptop should now get.
 function markAllUnsent() {
   db.transaction(() => {
     for (const table of Object.values(ENTITY_TABLE)) {
       db.prepare(`UPDATE ${table} SET synced_rev = NULL WHERE synced_rev IS NOT NULL`).run();
     }
+    db.prepare('DELETE FROM tombstones WHERE uid IN (?, ?)').run(DEFAULT_EVENT_UID, DEFAULT_ADMIN_UID);
+    db.prepare("DELETE FROM tombstones WHERE synced_rev = 'received'").run();
     db.prepare('UPDATE tombstones SET synced_rev = NULL WHERE synced_rev IS NOT NULL').run();
   })();
   return { ok: true };
+}
+
+// Join's question — did the clinic arrive? — is answered by the accounts that
+// came from the server. Counting every account here but admin / admin also
+// counted the ones this laptop made itself, so a used laptop joining a server
+// nobody had sent anything to was told "Clinic downloaded". So the accounts
+// here as this laptop is pointed at a server are noted (each row and its
+// stamp), and only an active account that is not one of them, as it was then,
+// and whose current version was not stamped by this laptop, came down.
+// A laptop connected before this note existed is judged by the stamp alone.
+function noteAccountsHere() {
+  const rows = db.prepare('SELECT id, updated_at FROM users').all();
+  setSetting('cloud_accounts_before', JSON.stringify(rows.map((u) => [u.id, u.updated_at || ''])));
+}
+function accountsFromServer() {
+  const before = new Map(safeJson(getSetting('cloud_accounts_before'), []));
+  const dev = getSetting('cloud_device_id') || '';
+  // Stamped here: never collected (no stamp, or a plain time), stamped by this
+  // device ('@id', or '~id' when re-sent just above another's), or stamped
+  // before this laptop had a device id at all ('@0', '~0' — the shipped admin's
+  // ancient seed stamp among them).
+  const stampedHere = (s) => !s || !s.includes('@') || s.endsWith('@0') || s.endsWith('~0')
+    || (!!dev && (s.endsWith('@' + dev) || s.endsWith('~' + dev)));
+  const shipped = defaultAdminActive();
+  return db.prepare('SELECT id, username, role, updated_at FROM users WHERE active = 1').all().filter((u) => {
+    const stamp = String(u.updated_at || '');
+    if (shipped && u.role === 'admin' && u.username === DEFAULT_ADMIN_USERNAME) return false;
+    if (before.has(u.id) && before.get(u.id) === stamp) return false;
+    return !stampedHere(stamp);
+  }).length;
+}
+
+// Before v0.0.16 a deletion heard from the server was marked 'sent', like this
+// laptop's own once pushed, so the two cannot be told apart by the mark. They
+// can by the stamp: this laptop stamps its own deletions with its device id.
+// Once, every older 'sent' deletion not stamped by this laptop is counted as
+// heard. Erring that way only means a move to another server does not pass
+// such a deletion on — never that it deletes something there.
+function classifyReceivedTombstones() {
+  if (getSetting('tombstones_received_v1') === 'done') return;
+  const dev = getSetting('cloud_device_id') || '';
+  db.transaction(() => {
+    for (const t of db.prepare("SELECT uid, updated_at FROM tombstones WHERE synced_rev = 'sent'").all()) {
+      if (!dev || !String(t.updated_at || '').endsWith('@' + dev)) {
+        db.prepare("UPDATE tombstones SET synced_rev = 'received' WHERE uid = ?").run(t.uid);
+      }
+    }
+    setSetting('tombstones_received_v1', 'done');
+  })();
 }
 
 function ensureDeviceId() {
@@ -4736,7 +4846,7 @@ module.exports = {
   getSetting, setSetting, disconnectCloud, resetClinicData,
   // v1.1.0 cloud sync
   collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
-  getSyncPending, setSyncPending, resetSyncCursor, markAllUnsent,
+  getSyncPending, setSyncPending, resetSyncCursor, markAllUnsent, noteAccountsHere, accountsFromServer,
   // Read-only; lets the harness rebuild a database exactly as v0.0.14 left it.
   SYNC_COLS_BEFORE_V0_0_15,
 };

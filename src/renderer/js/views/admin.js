@@ -700,6 +700,16 @@ export function renderAdmin(ctx, params = {}) {
       placeholder: st.hasKey ? 'Leave blank to keep the saved key' : 'Clinic key',
     });
 
+    // The origin main saves for an address (cloud.js trimUrl): https:// added
+    // when no scheme was typed, and any path dropped.
+    const originOf = (u) => {
+      let s = String(u || '').trim();
+      if (!s) return '';
+      if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+      try { return new URL(s).origin; } catch (_) { return s.replace(/\/+$/, ''); }
+    };
+    const hostOf = (u) => { try { return new URL(originOf(u)).host; } catch (_) { return String(u || ''); } };
+
     // One way to connect, however the address and key arrive — typed, or read
     // from a pasted code — so a code is held to exactly the test typing is.
     async function connect(url, key, btn) {
@@ -708,6 +718,26 @@ export function renderAdmin(ctx, params = {}) {
       btn.disabled = true;
       try {
         await api.cloudTest(url, key);
+        // Saving a different server sends every record here to it — the
+        // previous clinic's patients included — the moment it is saved. The
+        // "Already used this laptop?" warning is only on the screen of a
+        // laptop that is not connected, so a connected one asks here first.
+        if (st.configured && originOf(url) !== originOf(st.url)) {
+          const from = hostOf(st.url), to = hostOf(url);
+          const ok = await modal({
+            title: 'Move this laptop to a different server?',
+            body: el('div', {}, [
+              el('p', { style: 'margin:0 0 var(--space-3);' }, [
+                `This laptop is connected to ${from}. Saving ${to} sends every record on this laptop to ${to} — patients, staff accounts and events, the ones from ${from} included — and they stay there.`,
+              ]),
+              el('p', { style: 'margin:0;' }, [
+                'If this laptop is going to a different clinic, cancel, back it up, and erase it with Backup & Export → Reset this computer before connecting it.',
+              ]),
+            ]),
+            confirmText: `Send everything to ${to}`, cancelText: 'Cancel', danger: true,
+          });
+          if (!ok) return;
+        }
         await api.cloudConfig({ url, key: key ? key : undefined, online: true });
         toast('Connected.', 'success');
         paint();
