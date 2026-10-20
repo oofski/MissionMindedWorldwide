@@ -85,10 +85,12 @@ export function renderTypedSignature(name, { width = 600, height = 180, method =
  *
  * Returns { node, getMethod(), getDataUrl(), isEmpty() }.
  */
-export function SignatureField({ getName = () => '', onChange = () => {}, lang = null, label = null } = {}) {
+export function SignatureField({ getName = () => '', onChange = () => {}, lang = null, label = null, initial = null } = {}) {
   const L = (map) => map[lang || getLang()] || map.en;
-  let method = 'draw';
+  // `initial` ({ method, dataUrl }) puts back a signature already given.
+  let method = initial && ['draw', 'type', 'generate'].includes(initial.method) ? initial.method : 'draw';
   const pad = SignaturePad({ onChange });
+  if (initial && method === 'draw' && initial.dataUrl) pad.load(initial.dataUrl);
 
   const METHODS = [
     { key: 'draw', ic: 'pen', label: L({ en: 'Draw it', es: 'Dibujarla' }) },
@@ -162,5 +164,7 @@ export function SignatureField({ getName = () => '', onChange = () => {}, lang =
     isEmpty: () => (method === 'draw' ? pad.isEmpty() : !String(getName() || '').trim()),
     getDataUrl: () => (method === 'draw' ? pad.getDataUrl() : renderTypedSignature(getName(), { method })),
     destroy: () => pad.destroy && pad.destroy(),
+    /** What to give `initial` to put this signature back. */
+    snapshot: () => ({ method, dataUrl: method === 'draw' ? pad.getDataUrl() : null }),
   };
 }

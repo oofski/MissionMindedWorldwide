@@ -706,7 +706,11 @@ function register(getMainWindow) {
   handle('patients:route', ({ patientId, route }) => db.routePatient(currentUser, patientId, route));
   handle('consent:setTeeth', ({ consentId, tooth_numbers }) => db.updateConsentTeeth(currentUser, consentId, tooth_numbers));
   handle('consent:add', ({ patientId, consent }) => db.addPatientConsent(currentUser, patientId, consent));
-  handle('patients:dismiss', (id) => db.dismissPatient(currentUser, id));
+  // { id, reason }: the reason is required when the visit is not finished.
+  // A bare id (an older renderer) is a check-out with no reason given.
+  handle('patients:dismiss', (arg) => (arg && typeof arg === 'object'
+    ? db.dismissPatient(currentUser, arg.id, { reason: arg.reason })
+    : db.dismissPatient(currentUser, arg)));
   handle('patients:move', ({ id, target }) => db.adminMovePatient(currentUser, id, target));
   handle('patients:audit', (id) => db.patientAudit(id));
 

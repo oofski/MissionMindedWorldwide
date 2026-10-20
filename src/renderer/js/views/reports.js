@@ -261,7 +261,7 @@ export function renderReports(ctx) {
       // ---- KPI cards ----
       el('div', { class: 'kpi-grid' }, [
         kpi('users', total, 'Patients seen', { accent: true }),
-        kpi('checkCircle', finished, 'Visits finished', { sub: total ? `${completePct}% of ${total} · ${checkedOut} checked out` : null }),
+        kpi('checkCircle', finished, 'Visits finished', { sub: total ? `${completePct}% of ${total} · ${checkedOut} checked out${sm.left_early ? ` · ${sm.left_early} left early` : ''}` : null }),
         kpi('xray', xraysTaken, 'X-rays taken'),
         kpi('upload', xrays, 'X-rays uploaded', { sub: withXray ? `${withXray} patient(s)` : null }),
         kpi('tooth', extractions, 'Extractions'),

@@ -46,6 +46,51 @@ export function selectField(label, options, { value = '', required = false } = {
   return { node, get: () => sel.value, set: (v) => { sel.value = v; }, input: sel };
 }
 
+// One answer from a short list, as a row of buttons: one tap each, where a
+// dropdown is two (open, then choose) and opens a native picker on a touch
+// screen. `options` is [{value,label}]; a '' option (the "—" of a dropdown) is
+// left out, since an untouched row is already unanswered. Picking dispatches
+// 'change' on `input` (the row), so callers listen exactly as on a <select>.
+// `allowClear`: tapping the chosen answer again takes it off, for a question
+// that may be left unanswered (the "—" a dropdown could be put back to).
+export function choiceRow(options, { value = '', onPick = null, allowClear = false } = {}) {
+  let current = value == null ? '' : String(value);
+  const row = el('div', { class: 'chip-row choice-row', role: 'radiogroup' });
+  const btns = options.filter((o) => o.value !== '').map((o) => {
+    const b = el('button', {
+      type: 'button', class: 'chip-btn choice-btn', role: 'radio', dataset: { value: o.value },
+      onClick: () => {
+        set(allowClear && current === o.value ? '' : o.value);
+        if (onPick) onPick(current);
+        row.dispatchEvent(new window.Event('change', { bubbles: true }));
+      },
+    }, [o.label]);
+    row.append(b);
+    return b;
+  });
+  function set(v) {
+    current = v == null ? '' : String(v);
+    btns.forEach((b) => {
+      const on = b.dataset.value === current;
+      b.classList.toggle('chip-btn--on', on);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  }
+  set(current);
+  return { node: row, get: () => current, set, input: row };
+}
+
+// choiceRow as a labelled field — the drop-in for selectField on a question
+// the patient answers with one tap.
+export function choiceField(label, options, { value = '', required = false } = {}) {
+  const row = choiceRow(options, { value });
+  const node = el('div', { class: 'field choice-field' }, [
+    el('span', { class: 'field-label' }, [label, required ? el('em', { class: 'req' }, [' *']) : null]),
+    row.node,
+  ]);
+  return { node, get: row.get, set: row.set, input: row.input };
+}
+
 // Multi-select chip grid from [{key,label,flag?}].
 //
 // `set()` repaints the chips as well as the selection, so a caller enforcing a

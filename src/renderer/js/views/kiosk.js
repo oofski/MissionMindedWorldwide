@@ -8,6 +8,7 @@ import { demographicsSection, medicalHistorySection, dentalHistorySection, event
 import { medicalDisplay } from '../medicalHistory.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
+import { printWristband } from '../components/wristband.js';
 
 export function renderKiosk(ctx) {
   // Where check-in returns to. Patient self-service is launched from the sign-in
@@ -29,10 +30,18 @@ export function renderKiosk(ctx) {
   let steps = [];
   let idx = 0;
   let current = null; // the step object built for the CURRENTLY displayed inputs
+  // What is on each consent step as the patient leaves it, by consent type, so
+  // returning to it — Back from Review to change an answer, then forward
+  // again — finds it as they left it: ticked, answered, signed. A step is
+  // rebuilt every time it is shown, and it used to come back blank.
+  const drafts = {};
 
   function computeSteps() {
     const list = [stepDemographics, stepMedical, stepDental, stepGeneralConsent];
     if (data.dental_history.may_need_extraction === 'yes') list.push(stepSurgeryConsent);
+    // No longer an extraction: the surgery consent is not submitted with a
+    // cleaning. Its draft stays, should the patient change their mind again.
+    else data.consents = data.consents.filter((c) => c.type !== 'oral_surgery');
     // No "who would you like to see?" step any more: the answer is already
     // implied by what the patient said they need on the dental step, and asking
     // twice let the two disagree — a patient could ask for a cleaning and then
@@ -84,6 +93,7 @@ export function renderKiosk(ctx) {
 
   function go(n) {
     stopSpeaking();
+    if (current && current.stash) current.stash();
     if (n > idx) {
       // Collect from the inputs currently on screen (not a fresh rebuild).
       const ok = current && current.collect ? current.collect() : true;
@@ -208,10 +218,12 @@ export function renderKiosk(ctx) {
 
   function stepGeneralConsent() {
     const minor = age() != null && age() < 18;
+    const was = drafts.general || {};
     const agree = el('input', { class: 'big-check', type: 'checkbox' });
-    const signer = textField(t('intake.signerName'), { value: '', required: true });
-    const rel = textField(t('intake.relationship'), { value: minor ? '' : '' });
-    const sigPad = SignatureField({ getName: () => signer.get() });
+    agree.checked = !!was.agree;
+    const signer = textField(t('intake.signerName'), { value: was.signer || '', required: true });
+    const rel = textField(t('intake.relationship'), { value: was.rel || '' });
+    const sigPad = SignatureField({ getName: () => signer.get(), initial: was.sig });
     // Typing the name is what Type and Generate render from, so the preview has
     // to follow the field rather than only refresh when the tab is switched.
     signer.input.addEventListener('input', () => sigPad.refresh());
@@ -234,9 +246,9 @@ export function renderKiosk(ctx) {
     /* The MMW consent carries an explicit YES/NO the patient must answer before
        signing — highlighted on the paper form. Ticking "I agree" is not the same
        answer, so it is asked separately and is required. */
-    let deemed = '';
+    let deemed = was.deemed || '';
     const deemedBtns = ['yes', 'no'].map((v) => el('button', {
-      type: 'button', class: 'chip-btn', 'aria-pressed': 'false',
+      type: 'button', class: 'chip-btn' + (v === deemed ? ' chip-btn--on' : ''), 'aria-pressed': String(v === deemed),
       onClick: () => {
         deemed = v;
         deemedRow.querySelectorAll('.chip-btn').forEach((b, i) => {
@@ -265,8 +277,9 @@ export function renderKiosk(ctx) {
     return {
       title: t('intake.s_consent'),
       node,
+      stash: () => { drafts.general = { agree: agree.checked, deemed, signer: signer.get(), rel: rel.get(), sig: sigPad.snapshot() }; },
       collect: () => {
-        if (!agree.checked) { toast(t('consent.agree'), 'error'); return false; }
+        if (!agree.checked) { toast(tickToContinue(), 'error'); return false; }
         if (!deemed) {
           toast(L(DEEMED_REQUIRED), 'error');
           return false;
@@ -289,9 +302,11 @@ export function renderKiosk(ctx) {
   }
 
   function stepSurgeryConsent() {
+    const was = drafts.oral_surgery || {};
     const agree = el('input', { class: 'big-check', type: 'checkbox' });
-    const signer = textField(t('intake.signerName'), { value: signerFromGeneral() });
-    const sigPad = SignatureField({ getName: () => signer.get() });
+    agree.checked = !!was.agree;
+    const signer = textField(t('intake.signerName'), { value: was.signer || signerFromGeneral() });
+    const sigPad = SignatureField({ getName: () => signer.get(), initial: was.sig });
     signer.input.addEventListener('input', () => sigPad.refresh());
 
     // F10: tooth numbers are NOT collected from the patient — the provider
@@ -314,6 +329,13 @@ export function renderKiosk(ctx) {
           consentSection({ title: t('consent.postOpTitle'), clauses: [t('consent.postOp')], extra: t('consent.emergency') }),
         ];
     const node = el('div', { class: 'consent-screen' }, [
+      // Why there is one more step than before: the step count goes up by one
+      // the moment an extraction is chosen, and nothing used to say why.
+      el('div', { class: 'banner banner--info' }, [icon('alert', { size: 16 }), ' ' + L({
+        en: 'You chose an extraction, so there is one more consent to read and sign: the Oral Surgery consent.',
+        es: 'Eligió una extracción, así que hay un consentimiento más que leer y firmar: el de Cirugía Oral.',
+        ru: 'Вы выбрали удаление, поэтому нужно прочитать и подписать ещё одно согласие — на хирургическое вмешательство.',
+      })]),
       ...surgerySections,
       el('div', { class: 'banner banner--info' }, [icon('flag', { size: 16 }), ' ' + toothNote]),
       el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]),
@@ -325,8 +347,9 @@ export function renderKiosk(ctx) {
     return {
       title: t('intake.s_surgery'),
       node,
+      stash: () => { drafts.oral_surgery = { agree: agree.checked, signer: signer.get(), sig: sigPad.snapshot() }; },
       collect: () => {
-        if (!agree.checked) { toast(t('consent.agree'), 'error'); return false; }
+        if (!agree.checked) { toast(tickToContinue(), 'error'); return false; }
         if (sigPad.isEmpty()) { toast(L(SIGN_REQUIRED), 'error'); return false; }
         upsertConsent('oral_surgery', {
           signer_name: signer.get() || signerFromGeneral(),
@@ -394,6 +417,13 @@ export function renderKiosk(ctx) {
 
   /* ---------------- helpers ---------------- */
 
+  // The refusal for an unticked "I agree": an instruction, where it used to
+  // repeat the box's own sentence and read like a statement.
+  function tickToContinue() {
+    return L({ en: 'Please tick “{a}” to continue.', es: 'Marque «{a}» para continuar.', ru: 'Отметьте «{a}», чтобы продолжить.' })
+      .replace('{a}', t('consent.agree'));
+  }
+
   function upsertConsent(type, fields) {
     const now = new Date().toISOString();
     const existing = data.consents.find((c) => c.type === type);
@@ -444,7 +474,14 @@ export function renderKiosk(ctx) {
       el('h1', {}, [t('intake.thanks')]),
       el('p', {}, [t('intake.thanksSub')]),
       el('div', { class: 'thanks-name' }, [`${patient.first_name} ${patient.last_name}`]),
+      patient.patient_code ? el('div', { class: 'thanks-code mono' }, [`${L({ en: 'Wristband ID', es: 'ID de pulsera', ru: 'Номер браслета' })}: ${patient.patient_code}`]) : null,
       el('div', { class: 'thanks-actions' }, [
+        // Staff running the check-in band the patient here; a patient on the
+        // self-service kiosk gets theirs at the front desk.
+        store.user && patient.patient_code
+          ? el('button', { class: 'btn btn--soft btn--lg', type: 'button', onClick: () => printWristband(patient) },
+            [icon('print', { size: 18 }), L({ en: 'Print wristband', es: 'Imprimir pulsera', ru: 'Печать браслета' })])
+          : null,
         usbBtn,
         el('button', { class: 'btn btn--primary btn--lg', onClick: backTo }, [t('intake.done')]),
       ]),

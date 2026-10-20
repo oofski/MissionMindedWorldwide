@@ -643,8 +643,9 @@ async function main() {
     /Azithromycin \/ Erythromycin \/ Clarithromycin/.test(fullForm.text) && /Osteoporosis \/ Bone Disease/.test(fullForm.text) && /Sleep Apnea/.test(fullForm.text) &&
     /Warfarin \(Coumadin\)/.test(fullForm.text) && /name="surgery_site" value="knee"/.test(fullForm.text) &&
     /Hold Harmless/.test(fullForm.text) && /Consent for Oral Surgery/.test(fullForm.text) && /id="gsig"/.test(fullForm.text));
-  check('the 25 conditions are each a dropdown with a namespaced id (kidney and liver are surgery sites too)',
-    (fullForm.text.match(/<select id="cond_[a-z_]+">/g) || []).length === 25 && !/id="kidney"|id="liver"/.test(fullForm.text));
+  check('the 25 conditions are each a row of one-tap answers with a namespaced id (kidney and liver are surgery sites too)',
+    (fullForm.text.match(/<div class="ynb" id="cond_[a-z_]+" role="radiogroup">/g) || []).length === 25 && !/<select id="cond_/.test(fullForm.text)
+    && !/id="kidney"|id="liver"/.test(fullForm.text));
   check('the retired conditions are no longer asked online',
     !/Rheumatic fever|Weight management program|Heart murmur/.test(fullForm.text));
   // The question wording must match the app's in-person check-in EXACTLY.
@@ -698,7 +699,7 @@ async function main() {
   // tap "No" makes their answer indistinguishable from the clinically loaded No
   // the dentist reads. This form has to accept the same, and only on that
   // question.
-  const selectBody = (id) => ((fullForm.text.match(new RegExp('<select id="' + id + '">([\\s\\S]*?)</select>')) || [])[1] || '');
+  const selectBody = (id) => ((fullForm.text.match(new RegExp('<div class="ynb" id="' + id + '" role="radiogroup">([\\s\\S]*?)</div>')) || [])[1] || '');
   check('the form offers "Not applicable" on the pregnancy row only',
     /value="na"/.test(selectBody('cond_pregnant')) && !/value="na"/.test(selectBody('cond_autoimmune')) &&
     !/value="na"/.test(selectBody('tobacco')) && /value="unsure"/.test(selectBody('cond_diabetes')));
@@ -745,7 +746,7 @@ async function main() {
     esForm.text.includes('Nunca') &&
     esForm.text.includes('Ciudad') && esForm.text.includes('Estado'));
   check('the Spanish form offers "No aplica" on the pregnancy question',
-    /value="na">No aplica/.test(esForm.text));
+    /value="na"><span>No aplica<\/span>/.test(esForm.text));
   check('the Spanish form carries the Spanish consent + agree text',
     esForm.text.includes('Consentimiento General para Tratamiento Dental') &&
     esForm.text.includes('He leído y entiendo lo anterior, y doy mi consentimiento.'));

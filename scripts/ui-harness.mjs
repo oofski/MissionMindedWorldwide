@@ -169,7 +169,9 @@ window.api = {
   consentSetTeeth: okWrap(({ consentId, tooth_numbers }) => db.updateConsentTeeth(currentUser, consentId, tooth_numbers), 'consentSetTeeth'),
   consentAdd: okWrap(({ patientId, consent }) => db.addPatientConsent(currentUser, patientId, consent), 'consentAdd'),
   patientsConfirmArrival: okWrap(({ id, route }) => db.confirmArrival(currentUser, id, { route }), 'patientsConfirmArrival'),
-  patientsDismiss: okWrap((id) => db.dismissPatient(currentUser, id), 'patientsDismiss'),
+  patientsDismiss: okWrap((arg) => (arg && typeof arg === 'object'
+    ? db.dismissPatient(currentUser, arg.id, { reason: arg.reason })
+    : db.dismissPatient(currentUser, arg)), 'patientsDismiss'),
   patientsMove: okWrap(({ id, target }) => db.adminMovePatient(currentUser, id, target), 'patientsMove'),
   patientsAudit: okWrap((id) => db.patientAudit(id), 'patientsAudit'),
   usbList: async () => ({ ok: true, data: [] }),
@@ -240,6 +242,38 @@ function drawSig(root = document) {
   const up = new window.Event('pointerup', { bubbles: true }); up.pointerId = 1; c.dispatchEvent(up);
   return true;
 }
+
+// The medical history's single-choice questions are rows of tap buttons
+// (forms.js choiceRow) since v0.0.19. answer() taps one; answered() reads it.
+// Each takes the row, a field or row containing it, or a plain <select>/<input>.
+function answerCtl(node) {
+  if (!node) return null;
+  if (node.matches && node.matches('.choice-row, select, input')) return node;
+  return node.querySelector('.choice-row') || node.querySelector('select') || node.querySelector('input');
+}
+function answer(node, v) {
+  const c = answerCtl(node);
+  if (!c) throw new Error('nothing to answer');
+  if (c.classList.contains('choice-row')) {
+    const b = c.querySelector(`.choice-btn[data-value="${v}"]`);
+    if (!b) throw new Error('no answer "' + v + '"');
+    b.click();
+  } else setInput(c, v);
+}
+function answered(node) {
+  const c = answerCtl(node);
+  if (!c) return '';
+  if (c.classList.contains('choice-row')) { const on = c.querySelector('.choice-btn.chip-btn--on'); return on ? on.dataset.value : ''; }
+  return c.value;
+}
+// A form field by its own label, whether a <label class="field"> or a
+// <div class="field"> (a tap row, a chip grid).
+const fieldByLabel = (root, label) => Array.from(root.querySelectorAll('.field'))
+  .find((l) => { const f = l.querySelector(':scope > .field-label'); return f && f.textContent.replace(/\s*\*\s*$/, '').trim() === label; });
+
+// A reason for checking out a patient whose visit is not finished (required
+// since v0.0.19); ignored for a finished visit.
+const LEFT_EARLY = { reason: 'Could not wait any longer' };
 
 const results = [];
 const log = (ok, msg) => { results.push([ok, msg]); console.log((ok ? 'PASS ' : 'FAIL ') + msg); };
@@ -325,11 +359,11 @@ async function main() {
   // question a dropdown, every list a set of chips, all of it required.
   log(/Medical|Historia/i.test($('.kiosk-step-label').textContent), 'on medical history step');
   const selIn = (re) => {
-    const lbl = $all('.kiosk-body label.field').find((l) => re.test(((l.querySelector('.field-label') || {}).textContent || '').trim()));
-    return lbl ? lbl.querySelector('select') : null;
+    const lbl = $all('.kiosk-body .field').find((l) => re.test(((l.querySelector(':scope > .field-label') || {}).textContent || '').trim()));
+    return lbl ? (lbl.querySelector(':scope > .choice-row') || lbl.querySelector('select')) : null;
   };
-  const setSel = (sel, v) => { sel.value = v; sel.dispatchEvent(new window.Event('change', { bubbles: true })); };
-  const condSel = (k) => $(`.kiosk-body .tri-row[data-key="${k}"] select`);
+  const setSel = (ctl, v) => answer(ctl, v);
+  const condSel = (k) => $(`.kiosk-body .tri-row[data-key="${k}"] .choice-row`);
   // A chip grid is found by its own label, because the allergy and medication
   // lists share keys (aspirin, other) and a bare data-key would hit the wrong one.
   const gridBy = (re) => $all('.kiosk-body .field').find((f) => {
@@ -343,21 +377,21 @@ async function main() {
   const refusedFor = async (name) => { clickText('Next'); await tick(); return stillMedical() && escRe(name).test(lastToast()); };
 
   const triRows = $all('.kiosk-body .tri-row');
-  log(triRows.length === 25 && triRows.every((r) => r.querySelector('select')),
-    'the 25 conditions are each a dropdown (' + triRows.length + ')');
+  log(triRows.length === 25 && triRows.every((r) => r.querySelector('.choice-row') && !r.querySelector('select')),
+    'v0.0.19: the 25 conditions are each a row of one-tap answers, not a dropdown (' + triRows.length + ')');
   log(triRows.map((r) => r.dataset.key).join(',') === 'high_bp,diabetes,heart_disease,heart_attack,stroke,high_cholesterol,asthma,copd,kidney,liver,thyroid,cancer,epilepsy,bleeding,blood_clot,anemia,arthritis,osteoporosis,ulcers,mental_health,sleep_apnea,tuberculosis,hiv,autoimmune,pregnant',
     'the conditions are asked in Dr. Trinh\'s order');
-  const optsOf = (sel) => Array.from(sel.options).map((o) => o.textContent).join('|');
-  log(optsOf(condSel('diabetes')) === '—|Yes|No|Unsure', 'each condition offers —, Yes, No, Unsure');
-  log(optsOf(condSel('pregnant')) === '—|Yes|No|Unsure|Not applicable',
+  const optsOf = (row) => $all('.choice-btn', row).map((o) => o.textContent).join('|');
+  log(optsOf(condSel('diabetes')) === 'Yes|No|Unsure' && !answered(condSel('diabetes')), 'each condition offers Yes, No, Unsure — none chosen to start');
+  log(optsOf(condSel('pregnant')) === 'Yes|No|Unsure|Not applicable',
     'only the pregnancy row adds Not applicable (a man or a child can answer it truthfully)');
   log(/Pregnancy \/ Possible Pregnancy/.test(triRows[24].textContent) && /Seizures \/ Epilepsy/.test(triRows[12].textContent),
     'the conditions carry Dr. Trinh\'s own wording');
   // v1.4.9: allergies / conditions / medications are required (labels marked *).
   log(/Medication allergies\s*\*/.test($('.kiosk-body').textContent), 'v1.4.9: allergies marked required (*)');
   const gateSel = selIn(/allergy or serious reaction/i);
-  log(!!gateSel && optsOf(gateSel) === '—|No known drug allergies (NKDA)|Yes|Unsure',
-    'the allergy question is a dropdown: NKDA, Yes or Unsure');
+  log(!!gateSel && optsOf(gateSel) === 'No known drug allergies (NKDA)|Yes|Unsure',
+    'the allergy question is one tap: NKDA, Yes or Unsure');
   const allergyGrid = gridBy(/^Medication allergies/);
   log(!!allergyGrid && allergyGrid.parentElement.style.display === 'none', 'the allergy checklist waits for a Yes');
   const allergyChipText = allergyGrid ? allergyGrid.textContent : '';
@@ -369,19 +403,24 @@ async function main() {
   log(!!medGrid && medGrid.querySelectorAll('.chip-select').length === 27 && !!chipOf(medGrid, 'warfarin') && !!chipOf(medGrid, 'none'),
     'medications are his 25 as chips, plus Other and No medications');
   log(!!selIn(/^Major surgery within the past 6 months/) && !!selIn(/^Do you smoke\?/) && !!selIn(/under a doctor/),
-    'major surgery, smoking and doctor\'s care are dropdowns');
+    'major surgery, smoking and doctor\'s care are one-tap Yes / No rows');
   log(!selIn(/Hospitalized/i) && !/Hospitalized in the last 2 years/.test($('.kiosk-body').textContent),
     'the hospitalization question is gone (major surgery replaces it)');
 
   // Refused one question at a time, in the order the form asks them, and each
   // refusal names the question it wants.
   log(await refusedFor('Are you currently under a doctor’s care?'), 'medical step refuses Next by name: under a doctor’s care');
+  // v0.0.19: and marks every unanswered question at once — doctor's care, the
+  // 25 conditions, medications, surgery, smoking, allergies — not one per Next.
+  log($all('.kiosk-body .is-missing').length === 30 && /and 29 more, marked in red/.test(lastToast())
+    && $all('.kiosk-body .tri-row.is-missing').length === 25,
+    'v0.0.19: a refused Next marks all 30 unanswered questions at once, and says how many');
   setSel(selIn(/under a doctor/), 'no');
+  log(!selIn(/under a doctor/).closest('.field').classList.contains('is-missing'), 'v0.0.19: answering a marked question clears its mark at once');
   log(await refusedFor('High Blood Pressure (Hypertension)'), 'medical step refuses Next by name: the first unanswered condition');
-  triRows.forEach((r) => setSel(r.querySelector('select'), 'no'));
+  triRows.filter((r) => r.dataset.key !== 'pregnant').forEach((r) => answer(r, 'no'));
   setSel(condSel('diabetes'), 'yes');
   setSel(condSel('bleeding'), 'unsure');
-  setSel(condSel('pregnant'), '');
   log(await refusedFor('Pregnancy / Possible Pregnancy'), 'medical step refuses Next by name: the pregnancy row');
   setSel(condSel('pregnant'), 'na');
   log(await refusedFor('Current medications'), 'medical step refuses Next by name: medications');
@@ -442,7 +481,7 @@ async function main() {
     'Does the toothache wake you up at night?', 'Any pain upon touching?', 'Do you clench or grind your teeth at night?',
     'Do you wake up with jaw pain?', 'Do you notice any lump or sores in your mouth?'];
   const dentSels = DENT_Q.map((q) => selIn(escRe(q)));
-  log(dentSels.every((x) => x && optsOf(x) === '—|Yes|No'), 'Step 3 asks Dr. Trinh\'s eight questions, each a Yes / No dropdown');
+  log(dentSels.every((x) => x && x.classList.contains('choice-row') && optsOf(x) === 'Yes|No'), 'Step 3 asks Dr. Trinh\'s eight questions, each a one-tap Yes / No');
   log(!/Do your gums bleed|braces or orthodontics|History of bleeding after a tooth/i.test($('.kiosk-body').textContent),
     'Step 3 no longer asks the six questions it replaced');
   for (let i = 0; i < DENT_Q.length; i++) {
@@ -1079,7 +1118,7 @@ async function main() {
     const ep = db.createPatient(currentUser, { first_name: 'Ed', last_name: 'Mailer', email: 'ed@example.com', demographics: {}, medical_history: {}, dental_history: {}, consents: [] });
     db.saveVitals(currentUser, ep.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
     db.routePatient(currentUser, ep.id, 'dentist');
-    db.dismissPatient(currentUser, ep.id);
+    db.dismissPatient(currentUser, ep.id, LEFT_EARLY);
     const rep18 = (await import('../src/renderer/js/views/reports.js')).renderReports(ctx18);
     document.body.append(rep18); await tick(); await tick();
     log(/Email visit summaries/.test(rep18.textContent) && /ed@example\.com/.test(rep18.textContent), 'v1.5.18: Reports lists checked-out patients who left an email, for follow-up');
@@ -1429,7 +1468,7 @@ async function main() {
     const outP = mkP('Out');
     db.saveVitals(currentUser, outP.id, { bp_systolic: '118', bp_diastolic: '76', heart_rate: '64' });
     db.routePatient(currentUser, outP.id, 'dentist');
-    db.dismissPatient(currentUser, outP.id);
+    db.dismissPatient(currentUser, outP.id, LEFT_EARLY);
     log(db.listPatients({}).find((p) => p.id === outP.id).status === 'dismissed', 'v1.5.24: (setup) patient is checked out');
     db.adminMovePatient(currentUser, outP.id, 'checkin');
     row = db.listPatients({}).find((p) => p.id === outP.id);
@@ -1700,7 +1739,7 @@ async function main() {
       });
       db.saveVitals(currentUser, p.id, { bp_systolic: '120', bp_diastolic: '78', heart_rate: '70' });
       db.routePatient(currentUser, p.id, 'hygienist');
-      if (finish) { db.saveTreatment(currentUser, p.id, { cleaning: { scaling: true } }, true); db.dismissPatient(currentUser, p.id); }
+      if (finish) { db.saveTreatment(currentUser, p.id, { cleaning: { scaling: true } }, true); db.dismissPatient(currentUser, p.id, LEFT_EARLY); }
       return p;
     };
     // 2 pre-reg (1 left), 2 on-site (1 left) -> 50% checked out overall.
@@ -1937,7 +1976,7 @@ async function main() {
       db.saveVitals(currentUser, p.id, { bp_systolic: '120', heart_rate: '70' });
       db.routePatient(currentUser, p.id, 'dentist');
       db.saveTreatment(currentUser, p.id, { extractions: [{ tooth: '30' }], provider_name: 'D' }, true);
-      db.dismissPatient(currentUser, p.id);
+      db.dismissPatient(currentUser, p.id, LEFT_EARLY);
       return p;
     };
     seed('Alpha', 'Sandy'); seed('Beta', 'Boring'); seed('Gamma', 'Sandy');
@@ -2027,7 +2066,7 @@ async function main() {
     const liveC = db.reportRollup(evC.id).summary;
     log(liveC.extractions === 1, 'v1.6.6: an "other" extraction with no tooth is not counted as a procedure');
     log(liveC.cleanings === 0, 'v1.6.6: cleaning notes alone do not count as a cleaning performed');
-    db.dismissPatient(currentUser, pc.id);
+    db.dismissPatient(currentUser, pc.id, LEFT_EARLY);
     const bundleC = db.exportClinicBundle(evC.id);
     db.purgeEventPatients(currentUser, evC.id);
     const keptC = db.listEventReports().find((r) => r.event_id === evC.id).summary;
@@ -2057,7 +2096,7 @@ async function main() {
       db.saveVitals(currentUser, p.id, { bp_systolic: '118', heart_rate: '68' });
       db.routePatient(currentUser, p.id, 'hygienist');
       db.saveTreatment(currentUser, p.id, { cleaning: { scaling: true }, provider_name: 'H' }, true);
-      db.dismissPatient(currentUser, p.id);
+      db.dismissPatient(currentUser, p.id, LEFT_EARLY);
     }
     db.deleteEvent(currentUser, evD.id, { force: true });
     const keptD = db.listEventReports().find((r) => r.event_id === evD.id);
@@ -2973,9 +3012,9 @@ async function main() {
 
     // ---- the shared builders: an old record opened for editing ----
     const medSec = medicalHistorySection(LEGACY_MH);
-    const rowSel = (sec, k) => sec.node.querySelector(`.tri-row[data-key="${k}"] select`);
-    log(rowSel(medSec, 'diabetes').value === 'yes' && rowSel(medSec, 'high_bp').value === '' && rowSel(medSec, 'heart_murmur').value === 'yes'
-      && rowSel(medSec, 'pain_mgmt').value === 'yes',
+    const rowSel = (sec, k) => sec.node.querySelector(`.tri-row[data-key="${k}"] .choice-row`);
+    log(answered(rowSel(medSec, 'diabetes')) === 'yes' && answered(rowSel(medSec, 'high_bp')) === '' && answered(rowSel(medSec, 'heart_murmur')) === 'yes'
+      && answered(rowSel(medSec, 'pain_mgmt')) === 'yes',
     'edit: an old record opens with its ticks as Yes, nothing unticked as No, and its retired conditions still on screen');
     log(!medSec.isDirty(), 'edit: opening a record changes nothing');
     const gridIn = (sec, re) => Array.from(sec.node.querySelectorAll('.field')).find((f) => Array.from(f.children).some((c) => c.classList.contains('field-label') && re.test(c.textContent)));
@@ -2984,9 +3023,9 @@ async function main() {
       'edit: an old record\'s retired allergies stay selected, so saving cannot drop them');
     log(medSec.collect() === false && /Required: High Blood Pressure \(Hypertension\)/.test($all('#toast-host .toast').pop().textContent),
       'edit: the questions an old record never answered are still asked before it can be saved');
-    INTAKE_25.forEach((k) => { const sel = rowSel(medSec, k); if (!sel.value) { sel.value = k === 'pregnant' ? 'na' : 'no'; } });
-    const selIn = (sec, re) => Array.from(sec.node.querySelectorAll('label.field')).find((l) => re.test(l.querySelector('.field-label').textContent)).querySelector('select');
-    [[/^Major surgery/, 'no'], [/^Do you smoke/, 'no'], [/under a doctor/, 'yes']].forEach(([re, v]) => { const x = selIn(medSec, re); x.value = v; x.dispatchEvent(new window.Event('change')); });
+    INTAKE_25.forEach((k) => { const sel = rowSel(medSec, k); if (!answered(sel)) answer(sel, k === 'pregnant' ? 'na' : 'no'); });
+    const selIn = (sec, re) => Array.from(sec.node.querySelectorAll('.field')).find((l) => { const f = l.querySelector(':scope > .field-label'); return f && re.test(f.textContent); });
+    [[/^Major surgery/, 'no'], [/^Do you smoke/, 'no'], [/under a doctor/, 'yes']].forEach(([re, v]) => answer(selIn(medSec, re), v));
     log(medSec.isDirty(), 'edit: a change is noticed');
     const savedMh = medSec.collect();
     log(!!savedMh && savedMh.history_version === 2 && savedMh.hospitalized === 'yes' && savedMh.pregnancy === 'na'
@@ -3000,7 +3039,7 @@ async function main() {
     const dSels = Array.from(dSec.node.querySelectorAll('select'));
     log(dSels[0].value === 'Dr. Prior' && dSels[0].options[dSels[0].selectedIndex].textContent === 'Dr. Prior (as recorded)' && !dSec.isDirty(),
       'edit: an old free-text last visit opens showing what it says, not a blank');
-    dSels.slice(1).forEach((x) => { if (!x.value) x.value = 'no'; });
+    dSec.node.querySelectorAll('.choice-row').forEach((r) => { if (!answered(r)) answer(r, 'no'); });
     const savedDh = dSec.collect();
     log(!!savedDh && savedDh.prior_dentist === 'Dr. Prior' && savedDh.gum_bleeding === 'yes' && savedDh.grinding === 'yes' && savedDh.visit_type === 'filling' && savedDh.pain_cold === 'no',
       'edit: saving Step 3 keeps the old answers, the recorded last visit and the visit type it was not asked to change');
@@ -3030,9 +3069,9 @@ async function main() {
     log(/Presión arterial alta \(hipertensión\)/.test(esT) && /¿Fuma\?/.test(esT) && /¿Cirugía mayor en los últimos 6 meses\?/.test(esT)
       && /Sin alergias conocidas a medicamentos \(NKDA\)/.test(esT) && /No estoy seguro\/a/.test(esT) && /No aplica/.test(esT) && /Warfarina \(Coumadin\)/.test(esT),
     'es: the medical step reads in Spanish, its answers included');
-    INTAKE_25.forEach((k) => { rowSel(esMed, k).value = k === 'pregnant' ? 'na' : 'no'; });
+    INTAKE_25.forEach((k) => answer(rowSel(esMed, k), k === 'pregnant' ? 'na' : 'no'));
     [[/^¿Está bajo el cuidado/, 'no'], [/^¿Cirugía mayor/, 'no'], [/^¿Fuma/, 'no'], [/^¿Tiene alergia/, 'nkda']]
-      .forEach(([re, v]) => { const x = selIn(esMed, re); x.value = v; x.dispatchEvent(new window.Event('change')); });
+      .forEach(([re, v]) => answer(selIn(esMed, re), v));
     gridIn(esMed, /^Medicamentos actuales/).querySelector('.chip-select[data-key="warfarin"]').click();
     const esSaved = esMed.collect();
     log(!!esSaved && esSaved.medications[0].name === 'Warfarin (Coumadin)' && same(esSaved.allergies, ['none']),
@@ -3051,9 +3090,8 @@ async function main() {
       Array.from(kes.querySelectorAll('.lang-card')).find((c) => /Español/.test(c.textContent)).click();
       for (let i = 0; i < 4; i++) await tick();
       const T = i18nV.t;
-      const fieldOf = (label) => Array.from(kes.querySelectorAll('.kiosk-body label.field'))
-        .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
-      const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+      const fieldOf = (label) => fieldByLabel(kes.querySelector('.kiosk-body'), label);
+      const put = (label, v) => answer(fieldOf(label), v);
       const nextStep = async () => { clickText(T('common.next'), kes); for (let i = 0; i < 3; i++) await tick(); };
       put(T('intake.firstName'), 'Lucía'); put(T('intake.lastName'), 'Espanola'); put(T('intake.dob'), '1980-01-01');
       put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
@@ -3061,12 +3099,12 @@ async function main() {
       put(T('intake.city'), citySelEs ? citySelEs.options[1].value : 'Sandy');
       put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
       await nextStep();
-      kes.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+      kes.querySelectorAll('.tri-row').forEach((r) => answer(r, r.dataset.key === 'pregnant' ? 'na' : 'no'));
       put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
       gridIn({ node: kes }, /^Medicamentos actuales/).querySelector('.chip-select[data-key="acetaminophen"]').click();
       await nextStep();
-      const esDental = Array.from(kes.querySelectorAll('.kiosk-body select'));
-      esDental.forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+      setInput(kes.querySelector('.kiosk-body select'), 'never');
+      kes.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
       kes.querySelectorAll('.kiosk-body .highlight-field button')[2].click();
       await nextStep();
       const esAgree = kes.querySelector('.big-check'); esAgree.checked = true; esAgree.dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -3124,7 +3162,13 @@ async function main() {
         w.fetch = async (_u, init) => { w.__posted = JSON.parse(init.body); return { json: async () => ({ ok: true }) }; };
       } });
     const fw = formDom.window, fd = fw.document;
-    const fset = (id, v) => { const e = fd.getElementById(id); e.value = v; e.dispatchEvent(new fw.Event('change', { bubbles: true })); };
+    // A tap row (radio group) is answered by its button, a field by its value.
+    const fset = (id, v) => {
+      const e = fd.getElementById(id);
+      const t = e.classList.contains('ynb') ? e.querySelector(`input[value="${v}"]`) : e;
+      if (t === e) e.value = v; else t.checked = true;
+      t.dispatchEvent(new fw.Event('change', { bubbles: true }));
+    };
     const ftick = (sel) => { const e = fd.querySelector(sel); e.checked = true; e.dispatchEvent(new fw.Event('change', { bubbles: true })); };
     const fsubmit = () => { fd.getElementById('err').textContent = ''; fd.getElementById('f').dispatchEvent(new fw.Event('submit', { cancelable: true })); return fd.getElementById('err').textContent; };
     fset('first_name', 'Olivia'); fset('last_name', 'Online'); fset('dob', '1991-01-01'); fset('gender', 'female');
@@ -3146,8 +3190,24 @@ async function main() {
     const firstRefusal = fsubmit();
     log(/every medical and dental history question: High Blood Pressure \(Hypertension\)/.test(firstRefusal),
       'online form (real page): a missing answer is refused naming the question, in the kiosk\'s order');
-    fd.querySelectorAll('#conditions select').forEach((x) => { x.value = 'no'; });
+    // v0.0.19: every unanswered one-tap question is marked at once, and counted.
+    const markedOnline = fd.querySelectorAll('.yn.miss').length;
+    // Doctor's care was answered above; the 25 conditions, surgery, smoking,
+    // the allergy question and the 8 dental questions were not.
+    log(!fd.querySelector('#conditions select') && fd.querySelectorAll('#conditions .ynb').length === 25
+      && fd.querySelectorAll('#cond_pregnant input').length === 4 && fd.querySelectorAll('#allergy_status input').length === 3
+      && !fd.querySelector('#under_treatment').closest('.yn').classList.contains('miss')
+      && markedOnline === 25 + 3 + 8 && /\(and 35 more, marked in red\)/.test(firstRefusal),
+      'online form (real page): the history questions are one-tap rows, and a refused submit marks all 36 unanswered at once');
     fset('cond_diabetes', 'yes'); fset('cond_pregnant', 'na');
+    const noneBtnO = fd.getElementById('condnone');
+    const noneTxtO = noneBtnO.textContent;
+    noneBtnO.click();
+    const condAnsO = Array.from(fd.querySelectorAll('#conditions .ynb')).map((g) => (g.querySelector('input:checked') || {}).value);
+    log(noneTxtO === 'No to all the rest' && noneBtnO.style.display === 'none' && condAnsO.filter((v) => v === 'no').length === 23
+      && fd.querySelector('#cond_diabetes input:checked').value === 'yes' && fd.querySelector('#cond_pregnant input:checked').value === 'na'
+      && !fd.querySelector('#conditions .yn.miss'),
+      'online form (real page): "No to all the rest" answers No to every condition left, keeps the answers given, and clears their marks');
     // "No medications" clears the ticks, and a tick clears it — as at the kiosk.
     const medOn = () => Array.from(fd.querySelectorAll('#medchips input:checked')).map((x) => x.name === 'med' ? x.value : x.id);
     const medLit = () => Array.from(fd.querySelectorAll('#medchips .chip.on input')).map((x) => x.name === 'med' ? x.value : x.id);
@@ -3169,7 +3229,7 @@ async function main() {
     'online form (real page): "Other" and the typed-allergy label read exactly as at the kiosk, in English and Spanish');
     fset('major_surgery', 'no'); fset('tobacco', 'no'); fset('allergy_status', 'yes'); ftick('input[name=allergy][value=penicillin]');
     fset('prior_dentist', 'never');
-    fd.querySelectorAll('select').forEach((x) => { if (st.DENTAL_QUESTIONS.some((q) => q.key === x.id)) x.value = 'no'; });
+    st.DENTAL_QUESTIONS.forEach((q) => fset(q.key, 'no'));
     ftick('#cagree'); fset('signer', 'Olivia Online');
     const pdE = new fw.Event('pointerdown', { bubbles: true }); pdE.clientX = 1; pdE.clientY = 1; fd.getElementById('gsig').dispatchEvent(pdE);
     log(fsubmit() === '' && !!fw.__posted && fw.__posted.form_version === 2, 'online form (real page): a complete form submits');
@@ -6864,7 +6924,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const dayP = mkC('Dee', 'Clinicday', { route: 'dentist' });
     db.saveTreatment(signInAdmin(), dayP.id, { fillings: [{ tooth: '3', surfaces: ['O'] }], provider_name: 'Dr Day', provider_signature: 'data:,s' }, 'lock');
     { const r = rawDb(); try { r.prepare("UPDATE treatments SET completed_at='2026-10-18T15:00:00.000Z', locked_at='2026-10-18T15:00:00.000Z' WHERE patient_id=?").run(dayP.id); } finally { r.close(); } }
-    db.dismissPatient(signInAdmin(), dayP.id);
+    db.dismissPatient(signInAdmin(), dayP.id, LEFT_EARLY);
     const clinicDay = () => (db.buildEventSummary(evC.id).days || []).find((x) => x.date === '2026-10-18') || {};
     const dayBefore = { ...clinicDay() };
     db.unlockRecord(signInAdmin(), dayP.id, 'Fix the note');
@@ -6879,7 +6939,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // A checked-out patient's record, amended.
     const outL = mkC('Otto', 'Leftalready', { route: 'dentist' });
     db.saveTreatment(signInAdmin(), outL.id, { provider_name: 'Dr O', provider_signature: 'data:,s' }, 'lock');
-    db.dismissPatient(signInAdmin(), outL.id);
+    db.dismissPatient(signInAdmin(), outL.id, LEFT_EARLY);
     await as('admin');
     await window.api.treatmentUnlock({ patientId: outL.id, reason: 'Add the note' });
     await as('doctor');
@@ -7346,7 +7406,6 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // Sent as changes only, the stored record never had allergy_status, so the
     // save was refused beside a "Yes" — and Unsure, the one answer that saved,
     // emptied the list and took the penicillin allergy off the dentist's flags.
-    const pickC = (sel, v) => { sel.value = v; sel.dispatchEvent(new window.Event('change', { bubbles: true })); };
     const laLegacy = {
       conditions: ['diabetes'], allergies: ['penicillin'], allergies_other: 'Latex gloves',
       medications: [{ name: 'Metformin', dose: '500 mg', reason: '' }], under_treatment: 'no', tobacco: 'no', pregnancy: 'no',
@@ -7355,10 +7414,10 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const emtLa = await viewC('emt.js', 'renderEmt', { id: laP.id });
     cardOf(emtLa.querySelector('details.patient-info'), 'medical_history').querySelector('.card-edit').click(); await settle();
     const edLa = $all('.section-editor').pop();
-    const fieldLa = (re) => $all('label.field', edLa).find((l) => re.test(l.textContent)).querySelector('select');
-    const gateLa = fieldLa(/allergy or serious reaction/i).value;
-    $all('.tri-row select', edLa).forEach((s) => { if (!s.value) pickC(s, 'no'); });
-    pickC(fieldLa(/Major surgery/i), 'no');
+    const fieldLa = (re) => answerCtl($all('.field', edLa).find((l) => { const f = l.querySelector(':scope > .field-label'); return f && re.test(f.textContent); }));
+    const gateLa = answered(fieldLa(/allergy or serious reaction/i));
+    $all('.tri-row', edLa).forEach((r) => { if (!answered(r)) answer(r, 'no'); });
+    answer(fieldLa(/Major surgery/i), 'no');
     btnIn(edLa, /^Save$/).click(); await settle();
     const laSaved = db.getPatient(laP.id);
     const laMh = laSaved.medical_history;
@@ -7373,8 +7432,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // layer makes anyway (the medication list, which it normalises itself).
     const secLa = IS.medicalHistorySection(laLegacy, { staff: true });
     const laStart = secLa.initial();
-    $all('.tri-row select', secLa.node).forEach((s) => { if (!s.value) pickC(s, 'no'); });
-    pickC($all('label.field', secLa.node).find((l) => /Major surgery/i.test(l.textContent)).querySelector('select'), 'no');
+    $all('.tri-row', secLa.node).forEach((r) => { if (!answered(r)) answer(r, 'no'); });
+    answer($all('.field', secLa.node).find((l) => { const f = l.querySelector(':scope > .field-label'); return f && /Major surgery/i.test(f.textContent); }), 'no');
     const laPatch = PH.medicalPatch(laLegacy, laStart, secLa.collect());
     log(!!laAudit && laAudit.user_name === 'C emt' && /allergy_status/.test(laAudit.detail) && /major_surgery/.test(laAudit.detail)
       && laPatch.allergy_status === 'yes' && JSON.stringify(laPatch.allergies) === '["penicillin","other"]' && laPatch.major_surgery === 'no'
@@ -7486,8 +7545,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const provPanel = prov.querySelector('details.patient-info');
     cardOf(provPanel, 'medical_history').querySelector('.card-edit').click(); await settle();
     const edP = $all('.section-editor').pop();
-    const gateP = $all('label.field', edP).find((l) => /allergy or serious reaction/i.test(l.textContent)).querySelector('select');
-    gateP.value = 'yes'; gateP.dispatchEvent(new window.Event('change', { bubbles: true }));
+    answer($all('.field', edP).find((l) => { const f = l.querySelector(':scope > .field-label'); return f && /allergy or serious reaction/i.test(f.textContent); }), 'yes');
     edP.querySelector('.chip-select[data-key="penicillin"]').click();
     btnIn(edP, /^Save$/).click(); await settle();
     const flagsBanner = $all('.banner', prov).map((b) => b.textContent).find((x) => /Medical flags/.test(x)) || '';
@@ -7729,7 +7787,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     db.saveVitals(emtF(), cl.id, { bp_systolic: '150', bp_diastolic: '95', heart_rate: '88' });
     db.saveTreatment(docF(), cl.id, { extractions: [{ tooth: '30', type: 'simple' }], provider_name: 'Dr Fixley', provider_signature: 'data:,cl', clinical_notes: 'Extracted #30' }, 'lock');
     const bkClSigned = JSON.parse(JSON.stringify(db.exportClinicBundle(evR.id)));
-    db.dismissPatient(signInAdmin(), cl.id);
+    db.dismissPatient(signInAdmin(), cl.id, LEFT_EARLY);
     db.updatePatient(signInAdmin(), cl.id, { phone: '5035559999' });
     const clOut = db.getPatient(cl.id);
     db.importClinicBundle(signInAdmin(), bkPreChart);
@@ -7859,10 +7917,10 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const shown = (doc, id) => doc.getElementById(id).style.display !== 'none';
     const litRight = (doc) => Array.from(doc.querySelectorAll('.chip input')).every((i) => i.closest('.chip').classList.contains('on') === i.checked);
     const back = openForm((doc) => {
-      doc.getElementById('allergy_status').value = 'yes';
+      doc.querySelector('#allergy_status input[value=yes]').checked = true;
       doc.querySelector('input[name=allergy][value=penicillin]').checked = true;
       doc.querySelector('input[name=allergy][value=other]').checked = true;
-      doc.getElementById('major_surgery').value = 'yes';
+      doc.querySelector('#major_surgery input[value=yes]').checked = true;
       doc.querySelector('input[name=surgery_site]').checked = true;
       doc.querySelector('input[name=med][value=other]').checked = true;
       doc.querySelector('input[name=visit][value=extraction_pain]').checked = true;
@@ -7961,9 +8019,11 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const settle = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
     const overlayNow = () => document.querySelector('.survey-overlay');
     const qNode = (key) => overlayNow().querySelector(`#q-${key}`);
+    // A one-answer question is a row of chips: tap one, or tap the chosen one
+    // again to clear it.
     const pickSel = (key, v) => {
-      const s = qNode(key).querySelector('select');
-      s.value = v; s.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const r = qNode(key).querySelector('.choice-row');
+      (v ? r.querySelector(`[data-value="${v}"]`) : r.querySelector('.chip-btn--on')).click();
     };
     const chipKeys = (key) => Array.from(qNode(key).querySelectorAll('.chip-select--on')).map((b) => b.dataset.key);
     const tapChip = (key, v) => qNode(key).querySelector(`[data-key="${v}"]`).click();
@@ -8010,15 +8070,16 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const singles = sx.QUESTIONS.filter((q) => q.type === 'single');
     const multis = sx.QUESTIONS.filter((q) => q.type === 'multi');
     log(singles.length === 31 && singles.every((q) => {
-      const s = qNode(q.key).querySelector('select');
-      return s && s.options[0].value === '' && s.options[0].textContent === '—' && s.options.length === q.options.length + 1;
-    }), 'survey: every one-answer question is a dropdown, blank ("—") until answered');
+      const r = qNode(q.key).querySelector('.choice-row');
+      return r && !qNode(q.key).querySelector('select') && r.querySelectorAll('.choice-btn').length === q.options.length
+        && (answered(r) === '' || ['household_size', 'income', 'food_insecurity'].includes(q.key));
+    }), 'v0.0.19 survey: every one-answer question is one tap — a chip per answer, none chosen until answered');
     log(multis.length === 3 && multis.every((q) => !qNode(q.key).querySelector('select')
       && qNode(q.key).querySelectorAll('.chip-select').length === q.options.length),
       'survey: every select-all-that-apply question is a set of chips');
     log(!ov.querySelector('input[type="text"], input:not([type]), textarea'),
       'survey: nothing is typed — every answer is a closed choice');
-    log(qNode('household_size').querySelector('select').value === '4' && qNode('income').querySelector('select').value === '0_15k'
+    log(answered(qNode('household_size')) === '4' && answered(qNode('income')) === '0_15k'
       && JSON.stringify(chipKeys('assistance')) === '["snap","wic"]',
       'survey (legacy): the answers given at registration are filled in on the check-out form');
     log(progressText() === '4 of 34 answered', 'survey (legacy): progress counts the filled-in answers, out of 34');
@@ -8032,11 +8093,11 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // Change one answer, take one off, and switch language mid-way.
     pickSel('rate_care', '5');
     pickSel('income', '');
-    log(progressText() === '4 of 34 answered', 'survey: a dropdown put back to "—" is unanswered again');
+    log(progressText() === '4 of 34 answered' && answered(qNode('income')) === '', 'survey: an answer tapped again is taken off, and unanswered again');
     const langBtn = Array.from(ov.querySelectorAll('.survey-head-actions button')).find((b) => /English/.test(b.textContent));
     langBtn.click();
     await settle();
-    log(ov.querySelector('h2').textContent === sx.SURVEY_TITLE.es && qNode('rate_care').querySelector('select').value === '5'
+    log(ov.querySelector('h2').textContent === sx.SURVEY_TITLE.es && answered(qNode('rate_care')) === '5'
       && /4 de 34 respondidas/.test(progressText()),
       'survey: switching to Spanish translates the title and keeps every answer');
     clickText('Terminar', ov);
@@ -8617,7 +8678,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       && /treatment is not done yet, so only the general advice will print/.test(coW.textContent) && !/After a tooth extraction/.test(coW.textContent),
       'check-out: a patient waiting for a chair shows only the general advice, and the desk is told the treatment is not done yet');
     coW.remove();
-    db.dismissPatient(currentUser, pW.id);
+    db.dismissPatient(currentUser, pW.id, LEFT_EARLY);
     const gW = db.getPatient(pW.id);
     log(gW.status === 'dismissed' && gW.triage.status === 'treatment_waiting' && ac.aftercareSections(gW, 'en').stage === 'not_treated'
       && !/After a tooth extraction/.test(plainA(pdfA.buildHtml(gW, 'summary'))) && !/After-care sheet for this visit/.test(plainA(pdfA.buildHtml(gW, 'progress'))),
@@ -8638,7 +8699,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       'check-out: for a patient still in treatment, the desk is told the list is what has been charted so far');
     coI.remove();
     db.saveTreatment(currentUser, pT2.id, chartW, 'complete');
-    db.dismissPatient(currentUser, pT2.id);
+    db.dismissPatient(currentUser, pT2.id, LEFT_EARLY);
     const doneT2 = db.getPatient(pT2.id);
     log(doneT2.status === 'dismissed' && same(ac.aftercareSections(doneT2, 'en').keys, ['extraction', 'extraction_surgical'])
       && /After-care sheet for this visit: After a tooth extraction/.test(plainA(pdfA.buildHtml(doneT2, 'progress'))),
@@ -8657,7 +8718,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const pRe = newPt('Rene', 'Reexamen', 'en');
     db.saveTreatment(currentUser, pRe.id, chartW, 'waiting');
     db.adminMovePatient(currentUser, pRe.id, 'dentist');
-    db.dismissPatient(currentUser, pRe.id);
+    db.dismissPatient(currentUser, pRe.id, LEFT_EARLY);
     const rRe = stageNow(pRe.id);
     log(rRe.g.status === 'dismissed' && rRe.g.triage.status === 'ready' && planOnly(rRe),
       'after-care: parked, sent back to Dental Triage and checked out by the desk — no extraction care on the summary, no after-care page, no sheet in the progress note');
@@ -8687,7 +8748,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // row as it stood is the care.
     const pDir = newPt('Eva', 'Directa', 'en');
     db.saveTreatment(currentUser, pDir.id, chartW, false);
-    db.dismissPatient(currentUser, pDir.id);
+    db.dismissPatient(currentUser, pDir.id, LEFT_EARLY);
     const rDir = stageNow(pDir.id);
     log(rDir.a.stage === 'treated' && same(rDir.a.keys, ['extraction', 'extraction_surgical'])
       && /After-care sheet for this visit: After a tooth extraction/.test(rDir.prog),
@@ -8702,7 +8763,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     db.routePatient(currentUser, pMail.id, 'dentist');
     db.saveTreatment(currentUser, pMail.id, chartW, 'waiting');
     db.adminMovePatient(currentUser, pMail.id, 'dentist');
-    db.dismissPatient(currentUser, pMail.id);
+    db.dismissPatient(currentUser, pMail.id, LEFT_EARLY);
     const mailed = [];
     const origGen = window.api.pdfGenerate, origExt = window.api.appOpenExternal;
     window.api.pdfGenerate = async () => ({ ok: true, data: { saved: true, path: '/tmp/x.pdf' } });
@@ -8925,7 +8986,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const pLeft = newPtF('Lena', 'dentist');
     db.saveTreatment(currentUser, pLeft.id, chartF, 'waiting');
     const sumWaiting = plainF(pdfF.buildHtml(db.getPatient(pLeft.id), 'summary'));
-    db.dismissPatient(currentUser, pLeft.id);
+    db.dismissPatient(currentUser, pLeft.id, LEFT_EARLY);
     const gLeft = db.getPatient(pLeft.id);
     const sumLeft = plainF(pdfF.buildHtml(gLeft, 'summary'));
     log(acF.careStage(gLeft) === 'not_treated'
@@ -8948,7 +9009,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     db.saveTreatment(currentUser, pCleo.id, chartF, 'waiting');
     db.saveTreatment(hygC, pCleo.id, { ...chartF, cleaning: { adult_prophy: true }, provider_name: 'Hy Cleaner' }, 'cleaning_waiting');
     const cleoWaiting = db.getPatient(pCleo.id).status;
-    db.dismissPatient(currentUser, pCleo.id);
+    db.dismissPatient(currentUser, pCleo.id, LEFT_EARLY);
     const gCleo = db.getPatient(pCleo.id);
     const sumCleo = plainF(pdfF.buildHtml(gCleo, 'summary'));
     const progCleo = plainF(pdfF.buildHtml(gCleo, 'progress'));
@@ -9110,7 +9171,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       const pG = newPtF(first, 'both');
       db.saveTreatment(currentUser, pG.id, chartF, 'waiting');
       let out = null;
-      const s = await staleClick(pG.id, () => { out = db.dismissPatient(currentUser, pG.id); }, label);
+      const s = await staleClick(pG.id, () => { out = db.dismissPatient(currentUser, pG.id, LEFT_EARLY); }, label);
       const g = db.getPatient(pG.id);
       log(s.clicked && g.status === 'dismissed' && !!g.dismissed_at && g.dismissed_at === out.dismissed_at
         && g.triage.status === out.triage.status && !g.treatment.completed_at && !g.treatment.cleaning.adult_prophy
@@ -9161,7 +9222,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // correction to their record an administrator unlocked still saves.
     const pOut = newPtF('Otto', 'hygienist');
     db.saveTreatment(hygC, pOut.id, { cleaning: { adult_prophy: true }, provider_name: 'Hy Cleaner' }, 'cleaning_complete');
-    db.dismissPatient(currentUser, pOut.id);
+    db.dismissPatient(currentUser, pOut.id, LEFT_EARLY);
     const outErrs = ['cleaning', 'cleaning_complete', 'cleaning_lock'].map((m) => {
       try { db.saveTreatment(hygC, pOut.id, { cleaning: { gross_debridement: true }, provider_name: 'Hy Cleaner', provider_signature: 'data:,x' }, m); return ''; } catch (e) { return e.message; }
     });
@@ -9265,9 +9326,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
         Array.from(k.querySelectorAll('.lang-card')).find((c) => card.test(c.textContent)).click();
         await settle(4);
         const T = i18nF.t;
-        const fieldOf = (label) => Array.from(k.querySelectorAll('.kiosk-body label.field'))
-          .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
-        const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+        const fieldOf = (label) => fieldByLabel(k.querySelector('.kiosk-body'), label);
+        const put = (label, v) => answer(fieldOf(label), v);
         const next = async () => { clickText(T('common.next'), k); await settle(3); };
         put(T('intake.firstName'), 'Consent'); put(T('intake.lastName'), last); put(T('intake.dob'), '1980-01-01');
         put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
@@ -9275,11 +9335,12 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
         put(T('intake.city'), citySel ? citySel.options[1].value : 'Sandy');
         put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
         await next();
-        k.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+        k.querySelectorAll('.tri-row').forEach((r) => answer(r, r.dataset.key === 'pregnant' ? 'na' : 'no'));
         put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
         k.querySelector('.chip-select[data-key="acetaminophen"]').click();
         await next();
-        Array.from(k.querySelectorAll('.kiosk-body select')).forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+        setInput(k.querySelector('.kiosk-body select'), 'never');
+        k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
         k.querySelectorAll('.kiosk-body .highlight-field button')[0].click(); // Extraction — in pain
         await next();
         const agreeG = k.querySelector('.big-check'); agreeG.checked = true; agreeG.dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -11057,9 +11118,8 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       Array.from(k.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click();
       await settle18(4);
       const T = i18n18.t;
-      const fieldOf = (label) => Array.from(k.querySelectorAll('.kiosk-body label.field'))
-        .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
-      const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+      const fieldOf = (label) => fieldByLabel(k.querySelector('.kiosk-body'), label);
+      const put = (label, v) => answer(fieldOf(label), v);
       const next = async () => { clickText(T('common.next'), k); await settle18(3); };
       const stepIs = (key) => k.querySelector('.kiosk-step-label').textContent.includes(T(key));
       put(T('intake.firstName'), 'Unsigned'); put(T('intake.lastName'), 'Kioskeighteen'); put(T('intake.dob'), '1980-01-01');
@@ -11068,11 +11128,12 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       put(T('intake.city'), citySel ? citySel.options[1].value : 'Sandy');
       put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
       await next();
-      k.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+      k.querySelectorAll('.tri-row').forEach((r) => answer(r, r.dataset.key === 'pregnant' ? 'na' : 'no'));
       put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
       k.querySelector('.chip-select[data-key="acetaminophen"]').click();
       await next();
-      Array.from(k.querySelectorAll('.kiosk-body select')).forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+      setInput(k.querySelector('.kiosk-body select'), 'never');
+      k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
       k.querySelectorAll('.kiosk-body .highlight-field button')[3].click(); // Dental cleaning
       await next();
       const onConsent = stepIs('intake.s_consent');
@@ -11217,6 +11278,378 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       $all('.modal-overlay').forEach((o) => o.remove());
       currentUser = signed18; store18.setUser(signed18);
       i18n18.setLang('en');
+    }
+  }
+
+  /* ===== v0.0.19 — the usability walk-through, items 3–9 =====
+     3 the desk could not print a wristband; 4 the medical history was 63 taps
+     of dropdowns, its gaps reported one Next at a time; 5 Back erased a signed
+     consent; 6 vitals took impossible numbers; 7 an extraction with no tooth
+     was dropped silently; 8 a patient still waiting for a chair checked out as
+     "complete"; 9 the exit survey was 31 dropdowns. */
+  {
+    const signed19 = currentUser;
+    const settle19 = async (n = 16) => { for (let i = 0; i < n; i++) await tick(); };
+    const store19 = (await import('../src/renderer/js/store.js')).store;
+    const i18n19 = await import('../src/renderer/js/i18n.js');
+    const ctxT19 = [];
+    const ctx19 = { navigate: () => {}, toast: (m) => ctxT19.push(m), store: store19, setDetail: () => {} };
+    const view19 = async (file, fn, params = {}) => {
+      const node = (await import(`../src/renderer/js/views/${file}`))[fn](ctx19, params);
+      document.body.append(node); await settle19(); return node;
+    };
+    const lastToast19 = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+    const btn19 = (root, re) => $all('button', root).find((b) => re.test(b.textContent.trim()));
+    const asRole19 = async (role) => {
+      const u = 'v19_' + role;
+      if (!db.listUsers().some((x) => x.username === u)) db.createUser(signInAdmin(), { username: u, full_name: 'V19 ' + role, role, password: 'x' });
+      await window.api.authLogin({ username: u, password: 'x' });
+      store19.setUser(currentUser);
+    };
+    const GEN19 = [{ type: 'general', signer_name: 'Pat', signature_png: 'data:image/png;base64,AAAA' }];
+    const mk19 = (first, last, extra = {}) => db.createPatient(signInAdmin(), {
+      first_name: first, last_name: last, dob: '1980-02-02', demographics: {}, medical_history: {},
+      dental_history: { visit_type: 'cleaning' }, consents: GEN19, ...extra,
+    });
+    const printed = [];
+    const printWas = window.print;
+    window.print = () => { const r = document.getElementById('print-root'); printed.push(r ? r.textContent : ''); };
+    try {
+      // ---- 3. Wristbands at the front desk ----
+      await asRole19('registration');
+      const wb = mk19('Wanda', 'Bandnineteen');
+      const av = await view19('arrivals.js', 'renderArrivals');
+      btn19(av, /^Registered at the desk/).click(); await settle19(2);
+      setInput(av.querySelector('input[type="search"]'), 'Bandnineteen'); await settle19(2);
+      const wRow = $all('.arrival-row', av).find((r) => /Bandnineteen, Wanda/.test(r.textContent));
+      btn19(wRow, /^Print wristband$/).click(); await settle19(6);
+      const code = db.getPatient(wb.id).patient_code;
+      log(printed.length === 1 && printed[0].includes(code) && /Wanda Bandnineteen/.test(printed[0]),
+        'v0.0.19 desk: every Arrivals row prints that patient\'s wristband (code and name on the band)');
+      btn19(wRow, /They’re here/).click(); await settle19(8);
+      const wDone = $all('.arrival-row', av).find((r) => /Bandnineteen, Wanda/.test(r.textContent));
+      log(!!db.getPatient(wb.id).arrived_at && !!wDone && !!btn19(wDone, /^Reprint wristband$/),
+        'v0.0.19 desk: a confirmed patient\'s row offers "Reprint wristband" for a torn or lost band');
+      btn19(wRow.querySelector('.arrival-who') || wDone, /View \/ edit/).click(); await settle19(6);
+      const info = $all('.patient-info-overlay').pop();
+      const before = printed.length;
+      if (info) btn19(info, /^Print wristband$/).click();
+      log(!!info && printed.length === before + 1 && printed[printed.length - 1].includes(code),
+        'v0.0.19: the View / edit panel prints the wristband too, wherever it is opened');
+      if (info) info.remove();
+      av.remove();
+      const thanks = async (staff) => {
+        currentUser = staff ? currentUser : null; store19.setUser(staff ? currentUser : null);
+        const k = (await import('../src/renderer/js/views/kiosk.js')).renderKiosk({ navigate: () => {} });
+        document.body.append(k); await settle19(4);
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click(); await settle19(4);
+        const T = i18n19.t;
+        const put = (label, v) => answer(fieldByLabel(k.querySelector('.kiosk-body'), label), v);
+        const next = async () => { clickText(T('common.next'), k); await settle19(3); };
+        const last = staff ? 'Thanksstaff' : 'Thanksself';
+        put(T('intake.firstName'), 'Kim'); put(T('intake.lastName'), last); put(T('intake.dob'), '1980-01-01');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        const cs = fieldByLabel(k.querySelector('.kiosk-body'), T('intake.city')).querySelector('select');
+        put(T('intake.city'), cs ? cs.options[1].value : 'Sandy');
+        put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        put(T('intake.underTreatment'), 'no');
+        btn19(k, /^I have none of these/).click();
+        k.querySelector('.chip-select[data-key="none"]').click();
+        put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        await next();
+        setInput(k.querySelector('.kiosk-body select'), 'never');
+        k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[3].click();
+        await next();
+        const ag = k.querySelector('.big-check'); ag.checked = true;
+        k.querySelector('.deemed-field .chip-btn').click();
+        put(T('intake.signerName'), 'Kim ' + last);
+        drawSig(k);
+        await next();
+        $all('.kiosk-nav button', k).pop().click(); await settle19(8);
+        const out = { text: k.textContent, print: !!btn19(k, /^Print wristband$/) };
+        if (out.print) btn19(k, /^Print wristband$/).click();
+        k.remove(); i18n19.setLang('en');
+        const pt = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === last);
+        out.code = pt ? db.getPatient(pt.id).patient_code : null;
+        return out;
+      };
+      await asRole19('registration');
+      const tStaff = await thanks(true);
+      const tSelf = await thanks(false);
+      log(tStaff.print && tStaff.text.includes('Wristband ID: ' + tStaff.code) && printed[printed.length - 1].includes(tStaff.code)
+        && !tSelf.print && tSelf.text.includes('Wristband ID: ' + tSelf.code),
+        'v0.0.19 kiosk: the thank-you screen shows the band ID, and a staff-run check-in prints the band there (self-service does not)');
+
+      // ---- 4. The medical history in a few taps, every gap marked at once ----
+      i18n19.setLang('en');
+      const IS19 = await import('../src/renderer/js/components/intakeSections.js');
+      const ms = IS19.medicalHistorySection({});
+      document.body.append(ms.node);
+      let taps = 0;
+      const tap = (b) => { taps++; b.click(); };
+      const fieldMs = (re) => $all('.field', ms.node).find((l) => { const f = l.querySelector(':scope > .field-label'); return f && re.test(f.textContent); });
+      const noneB = btn19(ms.node, /none of these/);
+      tap(fieldMs(/under a doctor/).querySelector('[data-value="no"]'));
+      tap(noneB);
+      tap(ms.node.querySelector('.chip-select[data-key="none"]'));
+      tap(fieldMs(/^Major surgery/).querySelector('[data-value="no"]'));
+      tap(fieldMs(/^Do you smoke/).querySelector('[data-value="no"]'));
+      tap(fieldMs(/allergy or serious reaction/).querySelector('[data-value="nkda"]'));
+      const healthy = ms.collect();
+      log(taps === 6 && !!healthy && Object.values(healthy.condition_answers).filter((v) => v === 'no').length === 25 && noneB.style.display === 'none',
+        'v0.0.19 medical: a healthy patient answers the whole medical history in 6 taps (it was about 63), every condition still asked and answered No');
+      ms.node.remove();
+      const ms2 = IS19.medicalHistorySection({});
+      document.body.append(ms2.node);
+      answer(ms2.node.querySelector('.tri-row[data-key="diabetes"]'), 'yes');
+      answer(ms2.node.querySelector('.tri-row[data-key="asthma"]'), 'unsure');
+      const restB = btn19(ms2.node, /No to all the rest/);
+      if (restB) restB.click();
+      const ans2 = Object.fromEntries($all('.tri-row', ms2.node).map((r) => [r.dataset.key, answered(r)]));
+      log(!!restB && ans2.diabetes === 'yes' && ans2.asthma === 'unsure' && Object.values(ans2).filter((v) => v === 'no').length === 23,
+        'v0.0.19 medical: once something is marked, "No to all the rest" answers only the conditions left, keeping Yes and Unsure');
+      ms2.node.remove();
+      const ds = IS19.dentalHistorySection({});
+      document.body.append(ds.node);
+      const dsOut = ds.collect();
+      log(dsOut === false && $all('.is-missing', ds.node).length === 9 && /and 8 more, marked in red/.test(lastToast19()),
+        'v0.0.19 dental: a refused Next marks all 9 unanswered dental questions at once');
+      ds.node.remove();
+
+      // ---- 5. Back from Review keeps the consent ----
+      currentUser = null; store19.setUser(null);
+      {
+        const k = (await import('../src/renderer/js/views/kiosk.js')).renderKiosk({ navigate: () => {} });
+        document.body.append(k); await settle19(4);
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click(); await settle19(4);
+        const T = i18n19.t;
+        const put = (label, v) => answer(fieldByLabel(k.querySelector('.kiosk-body'), label), v);
+        const next = async () => { clickText(T('common.next'), k); await settle19(3); };
+        const back = async () => { clickText(T('common.back'), k); await settle19(3); };
+        const stepLabel = () => k.querySelector('.kiosk-step-label').textContent;
+        put(T('intake.firstName'), 'Bea'); put(T('intake.lastName'), 'Backnineteen'); put(T('intake.dob'), '1980-01-01');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        const cs = fieldByLabel(k.querySelector('.kiosk-body'), T('intake.city')).querySelector('select');
+        put(T('intake.city'), cs ? cs.options[1].value : 'Sandy');
+        put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        put(T('intake.underTreatment'), 'no'); btn19(k, /^I have none of these/).click();
+        k.querySelector('.chip-select[data-key="none"]').click();
+        put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        await next();
+        setInput(k.querySelector('.kiosk-body select'), 'never');
+        k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[3].click(); // cleaning
+        await next();
+        const ag = k.querySelector('.big-check'); ag.checked = true;
+        $all('.deemed-field .chip-btn', k)[1].click(); // No
+        put(T('intake.signerName'), 'Bea Backnineteen');
+        put(T('intake.relationship'), 'Self');
+        drawSig(k);
+        await next();
+        const ofFive = /of 5/.test(stepLabel());
+        await back(); await back(); // Review → Consent → Dental
+        k.querySelectorAll('.kiosk-body .highlight-field button')[0].click(); // Extraction — in pain
+        await next();
+        const ag2 = k.querySelector('.big-check');
+        const kept = ag2.checked && answered(fieldByLabel(k.querySelector('.kiosk-body'), T('intake.signerName'))) === 'Bea Backnineteen'
+          && answered(fieldByLabel(k.querySelector('.kiosk-body'), T('intake.relationship'))) === 'Self'
+          && /chip-btn--on/.test($all('.deemed-field .chip-btn', k)[1].className);
+        await next();
+        const onSurgery = stepLabel().includes(T('intake.s_surgery')) && /of 6/.test(stepLabel());
+        const why = /You chose an extraction, so there is one more consent/.test(k.querySelector('.kiosk-body').textContent);
+        log(ofFive && kept && onSurgery && why,
+          'v0.0.19 kiosk: going Back from Review to change the visit keeps the consent ticked, answered and signed — and the extra Oral Surgery step says why it appeared');
+        // Leave it unsigned, go back and forward: the surgery step keeps its tick too.
+        k.querySelector('.big-check').checked = true;
+        await back(); await next();
+        const keptS = k.querySelector('.big-check').checked;
+        drawSig(k); await next();
+        await back(); await back(); await back(); // Review → Surgery → Consent → Dental
+        k.querySelectorAll('.kiosk-body .highlight-field button')[3].click(); // back to cleaning
+        await next(); await next();
+        const onReview = stepLabel().includes(T('intake.s_review')) && /of 5/.test(stepLabel());
+        $all('.kiosk-nav button', k).pop().click(); await settle19(8);
+        k.remove(); i18n19.setLang('en');
+        const bp = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === 'Backnineteen');
+        const bc = bp ? db.getPatient(bp.id).consents : [];
+        log(keptS && onReview && bc.length === 1 && bc[0].type === 'general' && bc[0].signature_method === 'draw' && /^data:image/.test(bc[0].signature_png)
+          && bc[0].deemed_consent === 'no' && bc[0].relationship === 'Self',
+          'v0.0.19 kiosk: changed back to a cleaning, the patient submits with the general consent they signed once, and no surgery consent');
+      }
+
+      // ---- 6. Vitals refuse impossible numbers ----
+      const VR = await import('../src/renderer/js/vitalsRange.js');
+      log(JSON.stringify(VR.VITAL_LIMITS) === JSON.stringify(db.VITAL_LIMITS),
+        'v0.0.19 vitals: the screen and the data layer hold the same possible ranges');
+      const vp19 = mk19('Vic', 'Vitalsnineteen');
+      const refusedV = (d) => { try { db.saveVitals(signInAdmin(), vp19.id, d); return ''; } catch (e) { return e.message; } };
+      const rv = [refusedV({ bp_systolic: '400', bp_diastolic: '80' }), refusedV({ heart_rate: '0' }), refusedV({ glucose: '2000' }),
+        refusedV({ respiration: '99' }), refusedV({ bp_systolic: '80', bp_diastolic: '120' }), refusedV({ bp_systolic: '120', bp_diastolic: '80', bp_rechecks: [{ bp_systolic: '500' }] })];
+      log(/^Systolic 400 is not a possible reading \(50–300\)/.test(rv[0]) && /^Pulse 0 is not a possible/.test(rv[1]) && /^Blood sugar 2000/.test(rv[2])
+        && /^Respiration 99/.test(rv[3]) && /not lower than systolic/.test(rv[4]) && /^Re-check #1: Systolic 500/.test(rv[5])
+        && (db.getPatient(vp19.id).triage || {}).bp_systolic == null,
+        'v0.0.19 vitals: systolic 400, pulse 0, sugar 2000, breathing 99, a diastolic above the systolic and an impossible re-check are each refused by name — nothing saved');
+      log(refusedV({ bp_systolic: '230', bp_diastolic: '120', heart_rate: '45', glucose: '450', respiration: '30' }) === ''
+        && db.getPatient(vp19.id).triage.bp_systolic === 230,
+        'v0.0.19 vitals: an unusual but possible reading can still be recorded');
+      await asRole19('emt');
+      const vp2 = mk19('Val', 'Screennineteen');
+      let ev = await view19('emt.js', 'renderEmt', { id: vp2.id });
+      const vin = (ph) => $all('.vitals-grid input', ev).find((i) => i.placeholder === ph);
+      const T = i18n19.t;
+      setInput(vin(T('intake.bpSys')), '400'); setInput(vin(T('intake.bpDia')), '80'); setInput(vin(T('intake.hr')), '0');
+      btn19(ev, /^Save vitals$/).click(); await settle19(6);
+      const vT = lastToast19();
+      log(/^Systolic 400 is not a possible reading/.test(vT) && /\(and 1 more\)/.test(vT) && !/Vitals recorded/.test($all('#toast-host .toast').map((x) => x.textContent).join('|'))
+        && vin(T('intake.bpSys')).classList.contains('input--invalid') && vin(T('intake.hr')).classList.contains('input--invalid')
+        && !$all('.modal-overlay').length && !(db.getPatient(vp2.id).triage || {}).vitals_at,
+        'v0.0.19 vitals screen: impossible numbers are refused by name and marked, with no "Vitals recorded" and nothing saved');
+      setInput(vin(T('intake.bpSys')), '232'); setInput(vin(T('intake.hr')), '72');
+      log(!vin(T('intake.bpSys')).classList.contains('input--invalid'), 'v0.0.19 vitals screen: correcting a marked number clears its mark');
+      btn19(ev, /^Save vitals$/).click(); await settle19(4);
+      let chk = $all('.modal-overlay').pop();
+      const chkTxt = chk ? chk.textContent : '';
+      if (chk) btn19(chk, /^Re-enter$/).click(); await settle19(4);
+      log(/Check these readings/.test(chkTxt) && /Systolic 232 is unusual/.test(chkTxt) && !(db.getPatient(vp2.id).triage || {}).vitals_at,
+        'v0.0.19 vitals screen: an unusual reading asks for a re-check first, and Re-enter saves nothing');
+      btn19(ev, /^Save vitals$/).click(); await settle19(4);
+      chk = $all('.modal-overlay').pop();
+      if (chk) btn19(chk, /Readings are correct/).click(); await settle19(8);
+      const btModal = $all('.modal-overlay').pop();
+      const btFirst = !!btModal && /Blood thinners\?/.test(btModal.textContent);
+      if (btModal) btn19(btModal, /^No$/).click(); await settle19(12);
+      log(db.getPatient(vp2.id).triage.bp_systolic === 232 && btFirst && db.getPatient(vp2.id).triage.blood_thinner === 'no',
+        'v0.0.19 vitals screen: confirmed, it saves — and the blood-thinner question is asked the first time');
+      ev.remove();
+      ev = await view19('emt.js', 'renderEmt', { id: vp2.id });
+      setInput(vin(T('intake.bpSys')), '150');
+      btn19(ev, /^Save vitals$/).click(); await settle19(12);
+      log(db.getPatient(vp2.id).triage.bp_systolic === 150 && !$all('.modal-overlay').some((o) => /Blood thinners\?/.test(o.textContent))
+        && !!btn19(document.body, /^Change$/),
+        'v0.0.19 vitals screen: a re-save does not ask about blood thinners again; "Change" beside the answer does');
+      $all('.modal-overlay').forEach((o) => o.remove());
+      $all('.view').forEach((v) => { if (v !== document.body) v.remove(); });
+
+      // ---- 7. An extraction with no tooth is not dropped ----
+      await asRole19('doctor');
+      const xp = mk19('Xena', 'Toothnineteen', { dental_history: { visit_type: 'extraction_pain' } });
+      db.saveVitals(signInAdmin(), xp.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(signInAdmin(), xp.id, 'dentist');
+      const pv = await view19('provider.js', 'renderProvider', { id: xp.id });
+      btn19(pv, /Add extraction/).click(); await settle19(2);
+      const extIn = () => pv.querySelector('.ext-row input');
+      btn19(pv, /^Move Patient to Treatment Waiting$/).click(); await settle19(8);
+      const xA = db.getPatient(xp.id);
+      log(/^Extraction 1: enter the tooth #/.test(lastToast19()) && extIn().classList.contains('input--invalid')
+        && xA.status !== 'treatment_waiting' && !((xA.treatment || {}).extractions || []).length,
+        'v0.0.19 chart: an extraction row with no tooth number stops the save, naming the row — nothing is moved or dropped');
+      setInput(extIn(), '30');
+      btn19(pv, /^Move Patient to Treatment Waiting$/).click(); await settle19(10);
+      const xB = db.getPatient(xp.id);
+      log(xB.status === 'treatment_waiting' && JSON.stringify(xB.treatment.extractions.map((x) => x.tooth)) === '["30"]',
+        'v0.0.19 chart: with the tooth entered it saves, and the extraction is on the record (its after-care with it)');
+      pv.remove();
+      const fp = mk19('Fin', 'Surfacenineteen', { dental_history: { visit_type: 'filling' } });
+      db.saveVitals(signInAdmin(), fp.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(signInAdmin(), fp.id, 'dentist');
+      const pf = await view19('provider.js', 'renderProvider', { id: fp.id });
+      pf.querySelector('.filling-row .surf-chip').click();
+      btn19(pf, /^Save progress$/).click(); await settle19(8);
+      log(/^Filling 1: enter the tooth #/.test(lastToast19()), 'v0.0.19 chart: a filling with surfaces marked but no tooth stops the save too');
+      pf.remove();
+
+      // ---- 8. Leaving before the visit is finished ----
+      const lp = mk19('Leo', 'Leavernineteen');
+      db.saveVitals(signInAdmin(), lp.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(signInAdmin(), lp.id, 'dentist');
+      db.saveTreatment(signInAdmin(), lp.id, { fillings: [{ tooth: '3', surfaces: ['O'] }] }, 'waiting');
+      let refusedL = '';
+      try { db.dismissPatient(signInAdmin(), lp.id); } catch (e) { refusedL = e.message; }
+      log(/visit is not finished\. Say why/.test(refusedL) && db.getPatient(lp.id).status === 'treatment_waiting',
+        'v0.0.19 check-out: a patient whose visit is not finished cannot be checked out without saying why');
+      db.saveExitSurvey(signInAdmin(), lp.id, { declined: true, stage: 'exit' });
+      await asRole19('checkout');
+      let co = await view19('checkout.js', 'renderCheckout', { id: lp.id });
+      const coTxt = co.textContent;
+      log(/Not finished: still waiting for a treatment chair — not treated yet/.test(coTxt) && !/Visit still in progress — you can still check/.test(coTxt),
+        'v0.0.19 check-out: the record says plainly that the patient is still waiting for a chair, not treated yet');
+      btn19(co, /^Verify & dismiss patient$/).click(); await settle19(6);
+      const le = document.querySelector('.leave-early-overlay');
+      const leTxt = le ? le.textContent : '';
+      log(!!le && /is leaving before the visit is finished/.test(leTxt) && !/treatment and notes are complete/.test(leTxt),
+        'v0.0.19 check-out: the confirmation says the patient is leaving before the visit is finished — never that the treatment is complete');
+      btn19(le, /Check out — leaving early/).click(); await settle19(4);
+      log(document.body.contains(le) && /^Required: why the patient is leaving/.test(lastToast19()) && db.getPatient(lp.id).status !== 'dismissed',
+        'v0.0.19 check-out: the reason is required — the dialog stays open and nobody is checked out');
+      btn19(le, /^Could not wait any longer$/).click();
+      btn19(le, /Check out — leaving early/).click(); await settle19(10);
+      const lA = db.getPatient(lp.id);
+      log(!document.body.contains(le) && lA.status === 'dismissed' && lA.left_early_reason === 'Could not wait any longer'
+        && db.patientAudit(lp.id).some((a) => a.action === 'dismiss' && /left before the visit was finished: Could not wait/.test(a.detail)),
+        'v0.0.19 check-out: checked out with the reason kept on the record and in its audit trail');
+      const coQ = $all('.view').pop();
+      co.remove();
+      const coQueue = await view19('checkout.js', 'renderCheckout');
+      const doneRowL = $all('tr', coQueue).find((r) => /Leavernineteen, Leo/.test(r.textContent));
+      log(!!doneRowL && /Left early/.test(doneRowL.textContent), 'v0.0.19 check-out: the checked-out list says "Left early", not "Left"');
+      coQueue.remove();
+      void coQ;
+      const sync19 = db.collectSyncRows(5000).rows.find((r) => r.entity === 'patient' && r.data && r.data.last_name === 'Leavernineteen');
+      log(!!sync19 && sync19.data.left_early_reason === 'Could not wait any longer', 'v0.0.19: the left-early reason travels to every station');
+      // A finished visit checks out as before, with no reason asked.
+      const fin = mk19('Fay', 'Finishednineteen');
+      db.saveVitals(signInAdmin(), fin.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(signInAdmin(), fin.id, 'hygienist');
+      db.saveTreatment(signInAdmin(), fin.id, { cleaning: { adult_prophy: true } }, 'complete');
+      db.dismissPatient(signInAdmin(), fin.id);
+      const sumL = db.buildEventSummary();
+      const finA = db.getPatient(fin.id);
+      log(finA.status === 'dismissed' && !finA.left_early_reason && sumL.left_early >= 1
+        && sumL.visits_completed === db.listPatients({}).filter((x) => ['completed', 'dismissed'].includes(x.status) && !x.left_early_reason).length,
+        'v0.0.19: a finished visit checks out as before; the clinic\'s totals count the left-early visit as left early, not finished');
+      await asRole19('admin');
+      currentUser = signInAdmin(); store19.setUser(currentUser);
+      const dash = await view19('dashboard.js', 'renderDashboard');
+      const leoCard = $all('.crm-card', dash).find((c) => /Leavernineteen/.test(c.textContent));
+      log(!!leoCard && /Left early/.test(leoCard.textContent) && !/\bLeft\b/.test(leoCard.textContent.replace(/Left early/g, '')),
+        'v0.0.19 Dashboard: the patient shows as "Left early", not as a finished visit');
+      dash.remove();
+      const mp = mk19('Mo', 'Movenineteen');
+      db.saveVitals(signInAdmin(), mp.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(signInAdmin(), mp.id, 'dentist');
+      db.adminMovePatient(signInAdmin(), mp.id, 'dismiss');
+      const mA = db.getPatient(mp.id);
+      db.adminMovePatient(signInAdmin(), mp.id, 'reopen');
+      log(/^Checked out from Management by /.test(mA.left_early_reason || '') && !db.getPatient(mp.id).left_early_reason,
+        'v0.0.19 Management: an administrator\'s check-out of an unfinished visit is marked left early; re-opening it clears that');
+
+      // ---- 9. The exit survey: one tap per answer ----
+      const sx19 = await import('../src/renderer/i18n/exitSurvey.js');
+      const { openExitSurvey } = await import('../src/renderer/js/components/exitSurvey.js');
+      const sp = mk19('Sue', 'Surveynineteen');
+      const pendS = openExitSurvey(db.getPatient(sp.id), { lang: 'en', stage: 'exit' });
+      await settle19(6);
+      const ovS = document.querySelector('.survey-overlay');
+      let sTaps = 0;
+      sx19.QUESTIONS.forEach((q) => {
+        const qn = ovS.querySelector(`#q-${q.key}`);
+        const b = q.type === 'multi' ? qn.querySelector('.chip-select') : qn.querySelector('.choice-btn');
+        b.click(); sTaps++;
+      });
+      const progS = ovS.querySelector('.survey-progress-text').textContent;
+      clickText('Finish', ovS); await settle19(10); await pendS;
+      const svS = db.getExitSurvey(sp.id);
+      log(sTaps === 34 && progS === '34 of 34 answered' && !ovS.querySelector('select') && svS.exit_status === 'completed'
+        && Object.keys(svS.answers).length === 34,
+        'v0.0.19 survey: all 34 questions answered in 34 taps (it was about 65), no dropdowns, every answer stored');
+    } finally {
+      window.print = printWas;
+      $all('.modal-overlay, .survey-overlay').forEach((o) => o.remove());
+      currentUser = signed19; store19.setUser(signed19);
+      i18n19.setLang('en');
     }
   }
 

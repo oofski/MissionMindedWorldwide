@@ -6,6 +6,7 @@ import { medicalDisplay, dentalDisplay, firstMissingMedical, normalizeMedical } 
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities } from './intakeSections.js';
+import { printWristband } from './wristband.js';
 
 // A history answer as the clinician should read it. 'na' (the pregnancy row's
 // fourth answer) and 'unsure' must not surface as raw codes — "na" next to
@@ -611,6 +612,9 @@ export async function openPatientInfo(idOrPatient, { onChanged } = {}) {
     el('h3', { class: 'modal-title' }, [`${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Patient']),
     el('div', { class: 'modal-body' }, [panel]),
     el('div', { class: 'modal-actions' }, [
+      // A reprint from wherever the record is open: a torn band otherwise
+      // strands the patient at every station that starts with a scan.
+      p.patient_code ? el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => printWristband(p) }, [icon('print', { size: 15 }), 'Print wristband']) : null,
       el('button', { class: 'btn btn--primary', type: 'button', onClick: () => overlay.remove() }, ['Close']),
     ]),
   ]));

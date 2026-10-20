@@ -54,6 +54,7 @@
 .req{ color:var(--danger); font-style:normal; }
 .input{ width:100%; padding:9px 12px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); font-family:inherit; font-size:var(--fs-base); background:var(--surface); color:var(--text); height:var(--control-height); transition:border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .input:focus{ outline:none; border-color:var(--border-focus); box-shadow:var(--focus-ring); }
+.input.input--invalid{ border-color:var(--danger); background:var(--danger-soft); color:var(--danger); font-weight:var(--fw-semibold); }
 .input--sm{ height:30px; padding:6px 9px; font-size:var(--fs-sm); }
 .textarea{ resize:vertical; min-height:64px; height:auto; line-height:var(--lh-normal); }
 .select{ appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--text-subtle) 50%),linear-gradient(135deg,var(--text-subtle) 50%,transparent 50%); background-position:calc(100% - 17px) 52%,calc(100% - 12px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px; }
@@ -92,6 +93,20 @@
 .tri-row--flag .tri-label{ color:var(--text-strong); }
 .tri-row .select{ width:150px; flex:none; }
 .kiosk .tri-row .input{ height:40px; }
+/* The label wraps, the answers stay on one line at the right, so every row
+   reads the same and the Yes / No / Unsure columns line up down the list. A
+   row whose answers leave its label too narrow (the pregnancy row's four)
+   puts them on a line of their own. */
+.tri-row{ flex-wrap:wrap; }
+.tri-row .tri-label{ flex:1 1 130px; min-width:0; }
+.tri-row .choice-row{ flex:none; flex-wrap:nowrap; gap:4px; margin-left:auto; }
+.tri-row .choice-btn{ padding:6px 10px; }
+.kiosk .choice-btn{ min-height:40px; }
+.cond-none-row{ margin:6px 0 2px; }
+/* An unanswered question after Next: every one marked at once. */
+.tri-row.is-missing{ background:var(--danger-soft); box-shadow:inset 3px 0 0 var(--danger); padding-left:8px; }
+.field.is-missing{ outline:2px solid var(--danger-border); outline-offset:4px; border-radius:var(--radius-sm); }
+.field.is-missing > .field-label{ color:var(--danger); }
 
 /* ===== Tables ===== */
 .data-table{ width:100%; border-collapse:collapse; }
@@ -275,6 +290,7 @@
 .thanks-check{ width:84px; height:84px; border-radius:var(--radius-full); background:var(--success); color:#fff; display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow-md); }
 .kiosk-thanks h1{ font-size:var(--fs-display); }
 .thanks-name{ font-size:var(--fs-h2); color:var(--text-muted); margin-bottom:8px; }
+.thanks-code{ font-size:var(--fs-h3); color:var(--text-muted); margin-bottom:var(--space-4); letter-spacing:.04em; }
 
 /* lookup */
 .lookup-row{ display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:16px; }
@@ -884,6 +900,8 @@ body.survey-open{ overflow:hidden; }
 .survey-q-text{ font-size:var(--fs-base); font-weight:var(--fw-medium); line-height:1.45; }
 .survey-q-opt{ flex:none; font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); }
 .survey-q-hint{ margin:6px 0 0; font-size:var(--fs-sm); color:var(--text-muted); }
+.survey-q .choice-row{ margin-top:10px; gap:8px; }
+.survey-q .choice-btn{ min-height:44px; padding:10px 16px; font-size:var(--fs-base); }
 
 /* One answer: a dropdown. Several: chips. Both sized for a finger, since the
    patient answers on a tablet handed across the desk. */

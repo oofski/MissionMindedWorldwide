@@ -236,27 +236,58 @@ jobs:
 
             ### New in this build
 
-            Two fixes from the clinic walk-through.
+            Fixes from the clinic walk-through: faster forms, and fewer ways
+            for a mistake to get through unnoticed.
 
-            **No more patients stuck at the front desk over an unsigned
-            consent.**
-            - The check-in kiosk no longer says the signature is optional. It
-              asks the patient to sign, either by drawing a signature or by
-              pressing **Type my name** (best on a laptop with no
-              touchscreen). Next stays on the consent until it is signed.
-            - In **Arrivals**, a patient marked **Consent missing** now has a
-              **Sign consent** button. It opens the missing consents in the
-              patient's own language, with the HIV / Hepatitis Yes/No, "I
-              agree" and a signature, and saves them the same way the kiosk
-              does. **They're here** then sends the patient through.
-              Registration, vitals and triage staff can all use it. Tooth
-              numbers are still recorded by the provider at the chair.
+            **Wristbands at the front desk.** Every row in **Arrivals** has
+            **Print wristband**, and **Reprint wristband** once the patient is
+            confirmed. **View / edit** also prints the band, wherever it is
+            opened. The kiosk's thank-you screen shows the wristband ID, and a
+            check-in run by signed-in staff can print the band right there.
 
-            **The hygienist's "Transfer to Dental Triage" works.** It used to
-            fail every time with "Your role does not have permission for this
-            action." It now sends the patient to Dental Triage. The hygienist
-            can only send their own cleaning patients, and only to Dental
-            Triage. Choosing a patient's station is still done at vitals.
+            **A faster medical history.** Every Yes / No / Unsure question is now
+            one tap instead of a dropdown, at the kiosk, in staff edits and on
+            the online pre-registration form. **I have none of these — No to
+            all** answers every condition the patient hasn't already answered,
+            so a healthy patient finishes the step in about 6 taps instead of
+            about 63. Every condition is still shown and answered. If something
+            is missing, Next marks **all** the unanswered questions in red at
+            once and scrolls to the first. The dental questions work the same
+            way.
+
+            **Going Back keeps the consent.** A patient who goes back from
+            Review to change their visit returns to a consent that is still
+            ticked, answered and signed. Choosing an extraction adds an Oral
+            Surgery consent step, which now says why it appeared.
+
+            **Vitals catch typos.** A reading that can't be real is refused by
+            name and marked in red, with nothing saved. Examples: systolic 400,
+            pulse 0, blood sugar 2000, breathing 99, or a diastolic above the
+            systolic. A reading that is possible but unusual asks for a re-check
+            before it saves. The blood-thinner question is asked once; use
+            **Change** next to the answer to update it.
+
+            **No more silently dropped extractions.** Saving the chart with an
+            extraction row (or a marked filling) that has no tooth number stops
+            the save. It names the row, so the patient still gets their
+            after-care sheet.
+
+            **Leaving before the visit is finished.** Check-out says plainly
+            when a patient isn't finished, for example "still waiting for a
+            treatment chair — not treated yet". Checking them out asks why they
+            are leaving, and the reason is required and kept on the record. The
+            Dashboard, check-out list and Reports show them as **Left early**,
+            not as a finished visit.
+
+            **A faster exit survey.** All 34 questions are one tap per answer
+            (tap again to clear), about 34 taps instead of about 65. Every
+            question is still optional.
+
+            **Update the sync server** for the online form changes. Open the
+            Worker's **Edit code**, paste in the new `cloud/worker.js` and
+            **Deploy** (see *Keeping the server up to date* in
+            docs/CLOUD_SETUP.md). Everything else works with the server as it
+            is.
 
             ### Signing in
             Every install now comes with an administrator already set up:

@@ -103,6 +103,9 @@ export function renderDashboard(ctx) {
     // "Checked out" = the board's final column (completed + dismissed), so the
     // KPI tile and the board column always agree.
     const checkedOut = patients.filter((p) => p.status === 'completed' || p.status === 'dismissed').length;
+    // Visits that finished: a patient checked out before theirs was (still
+    // waiting for a chair, still being seen) left, and is not one of them.
+    const finishedVisits = patients.filter((p) => (p.status === 'completed' || p.status === 'dismissed') && !p.left_early_reason).length;
     const statCards = [
       { label: t('dash.total'), value: stats.total, ic: 'users', kind: 'all' },
       { label: t('dash.waiting'), value: stats.waiting_triage, ic: 'syringe', warn: stats.waiting_triage > 0, kind: 'vitals' },
@@ -165,7 +168,7 @@ export function renderDashboard(ctx) {
     /* ---- Completion ring ----
        Same number the "Visits finished" reporting uses, drawn rather than
        written: at a glance across a room it reads faster than a percentage. */
-    const finishedPct = stats.total ? Math.round((checkedOut / stats.total) * 100) : 0;
+    const finishedPct = stats.total ? Math.round((finishedVisits / stats.total) * 100) : 0;
     const R = 19, CIRC = 2 * Math.PI * R;
     const ringSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     ringSvg.setAttribute('viewBox', '0 0 44 44');
@@ -185,12 +188,12 @@ export function renderDashboard(ctx) {
         el('div', { class: 'stat-value' }, [`${finishedPct}%`]),
         el('div', { class: 'stat-label' }, ['Visits finished']),
       ]),
-      el('div', { class: 'ring-wrap' }, [ringSvg, el('div', { class: 'ring-label' }, [String(checkedOut)])]),
+      el('div', { class: 'ring-wrap' }, [ringSvg, el('div', { class: 'ring-label' }, [String(finishedVisits)])]),
     ];
     const ringTarget = navFor('done');
     const ringCard = ringTarget
-      ? el('button', { class: 'stat-card stat-card--ring stat-card--link', title: `${checkedOut} of ${stats.total} visits finished`, onClick: () => ctx.navigate(ringTarget) }, ringKids)
-      : el('div', { class: 'stat-card stat-card--ring', title: `${checkedOut} of ${stats.total} visits finished` }, ringKids);
+      ? el('button', { class: 'stat-card stat-card--ring stat-card--link', title: `${finishedVisits} of ${stats.total} visits finished`, onClick: () => ctx.navigate(ringTarget) }, ringKids)
+      : el('div', { class: 'stat-card stat-card--ring', title: `${finishedVisits} of ${stats.total} visits finished` }, ringKids);
 
     // Route "open" to a view the current role may actually see.
     function openByStatus(p) {
@@ -278,7 +281,8 @@ export function renderDashboard(ctx) {
       // Confirmed present by the front desk (Arrivals), so the floor can tell a
       // patient who is actually here from one who has only checked in on paper.
       if (p.status === 'checked_in' && p.arrived_at) foot.push(el('span', { class: 'crm-chip crm-chip--ok', title: 'Front desk confirmed this patient is here' }, [icon('check', { size: 10 }), 'Here']));
-      if (p.status === 'dismissed') foot.push(el('span', { class: 'crm-chip crm-chip--left', title: 'Checked out — the patient has left' }, [icon('check', { size: 10 }), 'Left']));
+      if (p.status === 'dismissed' && p.left_early_reason) foot.push(el('span', { class: 'crm-chip crm-chip--warn', title: `Checked out before the visit was finished — ${p.left_early_reason}` }, [icon('alert', { size: 10 }), 'Left early']));
+      else if (p.status === 'dismissed') foot.push(el('span', { class: 'crm-chip crm-chip--left', title: 'Checked out — the patient has left' }, [icon('check', { size: 10 }), 'Left']));
       // Two time tags: total time and time at the current stage. Pre-registered
       // patients don't start the clock until they arrive at Vitals, so both are
       // suppressed (clockStart/stageEnteredAt return null) until then.

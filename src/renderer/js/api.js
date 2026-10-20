@@ -57,7 +57,7 @@ export const api = {
   // Front-desk arrivals (v1.5.24)
   arrivalCheck: (id) => call('patientsArrivalCheck', id),
   confirmArrival: (id, route) => call('patientsConfirmArrival', { id, route }),
-  dismissPatient: (id) => call('patientsDismiss', id),
+  dismissPatient: (id, { reason } = {}) => call('patientsDismiss', reason ? { id, reason } : id),
   movePatient: (id, target) => call('patientsMove', { id, target }),
   patientAudit: (id) => call('patientsAudit', id),
 

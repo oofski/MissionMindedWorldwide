@@ -79,7 +79,9 @@ export function renderCheckout(ctx, params = {}) {
         el('td', {}, [p.complaint || '—']),
         el('td', {}, [statusPill(p.status),
           // Green "Left" tag once the patient has actually been checked out.
-          isDone ? el('span', { class: 'pill pill--success', style: 'margin-left:6px', title: 'Checked out — the patient has left' }, [el('span', { class: 'pill-dot' }), 'Left']) : null]),
+          isDone && p.left_early_reason
+            ? el('span', { class: 'pill pill--warning', style: 'margin-left:6px', title: `Checked out before the visit was finished — ${p.left_early_reason}` }, [el('span', { class: 'pill-dot' }), 'Left early'])
+            : isDone ? el('span', { class: 'pill pill--success', style: 'margin-left:6px', title: 'Checked out — the patient has left' }, [el('span', { class: 'pill-dot' }), 'Left']) : null]),
         el('td', {}, [el('div', { class: 'inline-row', style: 'margin:0; justify-content:flex-end' }, [
           isDone ? null : tickBtn,
           el('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); detail(p.id); } }, ['Review', icon('chevron', { size: 15 })]),
@@ -128,8 +130,28 @@ export function renderCheckout(ctx, params = {}) {
       toast(`${p.first_name} ${p.last_name} has already been checked out.`, 'info');
     } else if (p.status === 'checked_in') {
       toast(`${p.first_name} ${p.last_name} has not been through the clinic yet — they cannot be checked out.`, 'error');
+    } else if (!finishedVisit(p)) {
+      toast(`${p.first_name} ${p.last_name}: ${notFinishedText(p)}`, 'error');
     }
     detail(p.id);
+  }
+
+  // Whether the visit is finished — marked complete at a chair, or signed
+  // off and locked — and, when not, where the patient is in it, in words the
+  // desk can say to them.
+  function finishedVisit(p) {
+    return p.status === 'completed' || !!(p.treatment && p.treatment.locked) || !!(p.lock && p.lock.locked);
+  }
+  function notFinishedText(p) {
+    const route = (p.triage && p.triage.route) || p.route;
+    if (p.status === 'treatment_waiting') return 'still waiting for a treatment chair — not treated yet.';
+    if (p.status === 'in_treatment') {
+      if (route === 'hygienist') return 'still with the hygienist — the cleaning is not finished.';
+      const waited = (p.triage && p.triage.treatment_waiting_at) || p.treatment_waiting_at;
+      return waited ? 'still at a treatment chair — the treatment is not finished.' : 'still being examined at Dental Triage — not treated yet.';
+    }
+    if (p.status === 'triaged') return `waiting for ${route === 'hygienist' ? 'the hygienist' : 'Dental Triage'} — not seen yet.`;
+    return 'the visit is not finished yet.';
   }
 
   async function detail(id) {
@@ -148,6 +170,10 @@ export function renderCheckout(ctx, params = {}) {
     // what is blocked is dismissing someone who was never asked.
     const surveyDone = st.key !== 'none';
     const canDismiss = p.status !== 'dismissed' && p.status !== 'checked_in' && surveyDone;
+    // Said on the screen, not only in a hover title: a touch screen has none.
+    const whyNot = p.status === 'dismissed' ? null
+      : p.status === 'checked_in' ? 'This patient has not been through the clinic yet — there is nothing to check them out of.'
+        : surveyDone ? null : 'Take the exit survey first — the patient may decline it.';
     // One after-care lookup for the whole screen: the block lists it, and the
     // summary button and the email say they carry it only when the summary
     // does (a patient checked out before a chair, or with nothing recorded,
@@ -174,7 +200,10 @@ export function renderCheckout(ctx, params = {}) {
               ? el('div', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Provider signed off — record locked'])
               : visitComplete
                 ? el('div', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Visit marked complete'])
-                : el('div', { class: 'pill pill--warning' }, [el('span', { class: 'pill-dot' }), 'Visit still in progress — you can still check the patient out']),
+                : p.status === 'dismissed'
+                  ? el('div', { class: 'banner banner--alert' }, [icon('alert', { size: 16 }), ` Left before the visit was finished${p.left_early_reason ? ' — ' + p.left_early_reason : ''}.`])
+                  : el('div', { class: 'banner banner--alert' }, [icon('alert', { size: 16 }),
+                    ` Not finished: ${notFinishedText(p)} If they are leaving now, check them out and say why.`]),
             el('div', { class: 'kv-grid', style: 'margin-top:12px' }, [
               kv('Provider', tx.provider_name), kv('Completed', tx.completed_at ? fmtWhen(tx.completed_at) : '—'),
               kv('Completed by', p.completed_by_name), kv('Dental notes', tx.clinical_notes ? 'Present' : '—'),
@@ -222,7 +251,10 @@ export function renderCheckout(ctx, params = {}) {
               // Primary action — the climax: last, prominent, on its own.
               p.status === 'dismissed'
                 ? el('div', { class: 'pill pill--neutral', style: 'margin-top:8px' }, [`Dismissed by ${p.dismissed_by_name || '—'} · ${fmtWhen(p.dismissed_at)}`])
-                : el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', title: p.status === 'checked_in' ? 'This patient has not been through the clinic yet — there is nothing to check them out of' : surveyDone ? null : 'Take the exit survey first — the patient may decline it', onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
+                : el('div', {}, [
+                  el('button', { class: 'btn btn--primary btn--block', style: 'margin-top:8px', disabled: canDismiss ? null : 'disabled', title: whyNot, onClick: () => dismiss(p) }, [icon('checkCircle', { size: 16 }), 'Verify & dismiss patient']),
+                  whyNot ? el('p', { class: 'view-sub', style: 'margin-top:6px' }, [whyNot]) : null,
+                ]),
             ]),
           ]),
         ]),
@@ -331,6 +363,7 @@ export function renderCheckout(ctx, params = {}) {
   // without waiting on it: confirming dismisses whether or not anything was
   // printed. Built from text nodes, never markup, since it carries the name.
   async function dismiss(p) {
+    if (!finishedVisit(p)) { leavingEarly(p); return; }
     const a = aftercareParts(p);
     const body = el('div', { class: 'dismiss-confirm' }, [
       el('p', {}, [`Confirm that ${p.first_name} ${p.last_name}’s treatment and notes are complete, and dismiss them.`]),
@@ -345,6 +378,52 @@ export function renderCheckout(ctx, params = {}) {
     const ok = await modal({ title: 'Dismiss patient?', body, confirmText: 'Verify & dismiss', cancelText: 'Cancel' });
     if (!ok) return;
     try { await api.dismissPatient(p.id); toast('Patient dismissed', 'success'); queue(); } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // A patient leaving before their visit is finished. The ordinary
+  // confirmation said their "treatment and notes are complete"; this one says
+  // where they are in the visit, and the desk records why they are leaving —
+  // required, and kept on the record, so the Dashboard and the clinic's
+  // totals count a visit that did not finish as one.
+  function leavingEarly(p) {
+    const a = aftercareParts(p);
+    const why = el('textarea', { class: 'input', rows: 2, placeholder: 'Why are they leaving?', style: 'height:auto' });
+    const REASONS = ['Could not wait any longer', 'Felt unwell', 'Decided not to have treatment', 'Will come back another day'];
+    const overlay = el('div', { class: 'modal-overlay leave-early-overlay' });
+    const close = () => overlay.remove();
+    const go = el('button', { class: 'btn btn--danger', type: 'button' }, [icon('checkCircle', { size: 15 }), 'Check out — leaving early']);
+    go.addEventListener('click', async () => {
+      const reason = why.value.trim();
+      if (!reason) { toast('Required: why the patient is leaving before the visit is finished.', 'error'); why.focus(); return; }
+      go.disabled = true;
+      try {
+        await api.dismissPatient(p.id, { reason });
+        close();
+        toast(`${p.first_name} ${p.last_name} checked out — left before the visit was finished`, 'success');
+        queue();
+      } catch (e) { toast(e.message, 'error'); go.disabled = false; }
+    });
+    overlay.append(el('div', { class: 'modal-card' }, [
+      el('h3', { class: 'modal-title' }, [`${p.first_name} ${p.last_name} is leaving before the visit is finished`]),
+      el('div', { class: 'modal-body dismiss-confirm' }, [
+        el('div', { class: 'banner banner--alert' }, [icon('alert', { size: 16 }), ` ${p.first_name} is ${notFinishedText(p)}`]),
+        el('label', { class: 'field', style: 'margin-top:12px' }, [el('span', { class: 'field-label' }, ['Why are they leaving?', el('em', { class: 'req' }, [' *'])]), why]),
+        el('div', { class: 'chip-row' }, REASONS.map((r) => el('button', { class: 'chip-btn', type: 'button', onClick: () => { why.value = r; } }, [r]))),
+        el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
+          el('span', { class: 'field-label' }, ['After-care instructions (optional)']),
+          a.chips,
+          a.note,
+          a.printBtn,
+          a.englishBtn,
+        ]),
+      ]),
+      el('div', { class: 'modal-actions' }, [
+        el('button', { class: 'btn btn--ghost', type: 'button', onClick: close }, ['Cancel']),
+        go,
+      ]),
+    ]));
+    document.body.append(overlay);
+    return overlay;
   }
 
   // Email the visit summary to the patient. mailto cannot auto-attach a file

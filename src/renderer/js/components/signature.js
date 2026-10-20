@@ -9,6 +9,10 @@ export function SignaturePad({ onChange } = {}) {
   let drawing = false;
   let dirty = false;
   let last = null;
+  // A signature put back on the pad (the patient went Back and returned). It
+  // is returned exactly as it was given until the patient draws on it or
+  // clears it — re-encoding the canvas would not give back the same image.
+  let loaded = null;
 
   function resize() {
     // Keep the backing store crisp on HiDPI while preserving drawn content.
@@ -45,6 +49,7 @@ export function SignaturePad({ onChange } = {}) {
     ctx.lineTo(p.x, p.y);
     ctx.stroke();
     last = p;
+    loaded = null;
     if (!dirty) { dirty = true; if (onChange) onChange(); }
   }
   function end() { drawing = false; last = null; }
@@ -56,7 +61,7 @@ export function SignaturePad({ onChange } = {}) {
 
   const clearBtn = el('button', {
     class: 'btn btn--ghost btn--sm', type: 'button',
-    onClick: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; if (onChange) onChange(); },
+    onClick: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; loaded = null; if (onChange) onChange(); },
   }, [t('common.clearSignature')]);
 
   const wrap = el('div', { class: 'sigpad' }, [
@@ -77,8 +82,17 @@ export function SignaturePad({ onChange } = {}) {
   return {
     node: wrap,
     isEmpty: () => !dirty,
-    clear: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; },
-    getDataUrl: () => (dirty ? canvas.toDataURL('image/png') : null),
+    clear: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; loaded = null; },
+    getDataUrl: () => (dirty ? loaded || canvas.toDataURL('image/png') : null),
+    /** Put a signature back on the pad. */
+    load: (url) => {
+      if (!url) return;
+      loaded = url;
+      dirty = true;
+      const img = new Image();
+      img.onload = () => { const r = canvas.getBoundingClientRect(); ctx.drawImage(img, 0, 0, r.width || canvas.width, 180); };
+      img.src = url;
+    },
     destroy: () => window.removeEventListener('resize', onResize),
   };
 }

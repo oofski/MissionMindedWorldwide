@@ -9,6 +9,32 @@ import { bloodThinnerStatus, bloodThinnerText, bpStatus, BP_SYS_MAX, BP_DIA_MAX 
 import { statusPill } from './dashboard.js';
 import { sortedByName } from '../patientSort.js';
 import { scanBox, wristbandLabel, printWristband } from '../components/wristband.js';
+import { VITAL_LIMITS, vitalsProblems } from '../vitalsRange.js';
+
+// Before a reading is saved: one that cannot be real is refused, naming it,
+// and one that is possible but unusual is put to the EMT to re-check first.
+// `inputs` (key → input) marks the impossible fields on screen. Resolves true
+// when the readings may be saved.
+async function readingsOk(v, inputs = {}) {
+  const sets = [vitalsProblems(v), ...((v.bp_rechecks || []).map((r, i) => vitalsProblems(r, `Re-check #${i + 1}: `)))];
+  const impossible = sets.flatMap((x) => x.impossible);
+  const unusual = sets.flatMap((x) => x.unusual);
+  Object.values(inputs).forEach((inp) => inp && inp.classList.remove('input--invalid'));
+  if (impossible.length) {
+    impossible.forEach((x) => { if (inputs[x.key] && !/^Re-check/.test(x.msg)) inputs[x.key].classList.add('input--invalid'); });
+    toast(impossible[0].msg + (impossible.length > 1 ? ` (and ${impossible.length - 1} more)` : ''), 'error');
+    return false;
+  }
+  if (!unusual.length) return true;
+  return modal({
+    title: 'Check these readings',
+    body: el('div', {}, [
+      el('p', { style: 'margin:0 0 var(--space-2)' }, ['Please re-take or re-check before saving:']),
+      el('ul', { style: 'margin:0;padding-left:18px' }, unusual.map((x) => el('li', {}, [x.msg]))),
+    ]),
+    confirmText: 'Readings are correct — save', cancelText: 'Re-enter',
+  });
+}
 
 // Route metadata shared by the queue pills, the next-step card and the toasts.
 // 'both' is retained only so legacy records still render a sensible label — the
@@ -145,6 +171,7 @@ export function renderEmt(ctx, params = {}) {
   async function doRoute(id, route, pendingVitals) {
     try {
       if (pendingVitals && (pendingVitals.bp_systolic || pendingVitals.heart_rate || pendingVitals.glucose || pendingVitals.respiration)) {
+        if (!(await readingsOk(pendingVitals))) return;
         await api.saveVitals(id, pendingVitals);
       }
       await api.routePatient(id, route);
@@ -166,13 +193,14 @@ export function renderEmt(ctx, params = {}) {
     // refuses vitals and routing on it for everyone but an administrator.
     const readOnly = !!(p.treatment && p.treatment.locked) && !store.is('admin');
 
-    const sys = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.bpSys'), value: tr.bp_systolic != null ? tr.bp_systolic : (m.bp_systolic || '') });
-    const dia = el('input', { class: 'input', type: 'number', min: '0', max: '200', placeholder: t('intake.bpDia'), value: tr.bp_diastolic != null ? tr.bp_diastolic : (m.bp_diastolic || '') });
-    const hr = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.hr'), value: tr.heart_rate != null ? tr.heart_rate : (m.heart_rate || '') });
+    const lim = (k) => ({ min: String(VITAL_LIMITS[k].min), max: String(VITAL_LIMITS[k].max) });
+    const sys = el('input', { class: 'input', type: 'number', ...lim('bp_systolic'), placeholder: t('intake.bpSys'), value: tr.bp_systolic != null ? tr.bp_systolic : (m.bp_systolic || '') });
+    const dia = el('input', { class: 'input', type: 'number', ...lim('bp_diastolic'), placeholder: t('intake.bpDia'), value: tr.bp_diastolic != null ? tr.bp_diastolic : (m.bp_diastolic || '') });
+    const hr = el('input', { class: 'input', type: 'number', ...lim('heart_rate'), placeholder: t('intake.hr'), value: tr.heart_rate != null ? tr.heart_rate : (m.heart_rate || '') });
     // MMW Clearance also records blood sugar and respiration — the printed
     // record's band is BP / BS / PULSE / RESP.
-    const glu = el('input', { class: 'input', type: 'number', min: '0', max: '900', placeholder: 'mg/dL', value: tr.glucose != null ? tr.glucose : '' });
-    const resp = el('input', { class: 'input', type: 'number', min: '0', max: '90', placeholder: '/min', value: tr.respiration != null ? tr.respiration : '' });
+    const glu = el('input', { class: 'input', type: 'number', ...lim('glucose'), placeholder: 'mg/dL', value: tr.glucose != null ? tr.glucose : '' });
+    const resp = el('input', { class: 'input', type: 'number', ...lim('respiration'), placeholder: '/min', value: tr.respiration != null ? tr.respiration : '' });
 
     // Turn the blood-pressure reading RED when it hits hypertensive-crisis levels
     // (systolic over 180 or diastolic over 100). The offending field(s) go red as
@@ -202,15 +230,16 @@ export function renderEmt(ctx, params = {}) {
     }
     sys.addEventListener('input', refreshBpHighlight);
     dia.addEventListener('input', refreshBpHighlight);
+    [sys, dia, hr, glu, resp].forEach((inp) => inp.addEventListener('input', () => inp.classList.remove('input--invalid')));
 
     // BP re-checks: when the primary reading is high, the EMT may record up to TWO
     // additional readings. Each row highlights red the same way as the primary.
     const recheckRows = el('div', {});
     function makeRecheck(r = {}) {
       if (recheckRows.children.length >= 2) return;
-      const rs = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.bpSys'), value: r.bp_systolic != null ? r.bp_systolic : '' });
-      const rd = el('input', { class: 'input', type: 'number', min: '0', max: '200', placeholder: t('intake.bpDia'), value: r.bp_diastolic != null ? r.bp_diastolic : '' });
-      const rh = el('input', { class: 'input', type: 'number', min: '0', max: '300', placeholder: t('intake.hr'), value: r.heart_rate != null ? r.heart_rate : '' });
+      const rs = el('input', { class: 'input', type: 'number', ...lim('bp_systolic'), placeholder: t('intake.bpSys'), value: r.bp_systolic != null ? r.bp_systolic : '' });
+      const rd = el('input', { class: 'input', type: 'number', ...lim('bp_diastolic'), placeholder: t('intake.bpDia'), value: r.bp_diastolic != null ? r.bp_diastolic : '' });
+      const rh = el('input', { class: 'input', type: 'number', ...lim('heart_rate'), placeholder: t('intake.hr'), value: r.heart_rate != null ? r.heart_rate : '' });
       const paintRow = () => {
         const st = bpStatus(rs.value, rd.value);
         const c = (inp, hi) => { inp.style.borderColor = hi ? 'var(--danger, #c0392b)' : ''; inp.style.color = hi ? 'var(--danger, #c0392b)' : ''; inp.style.fontWeight = hi ? '700' : ''; };
@@ -293,10 +322,15 @@ export function renderEmt(ctx, params = {}) {
     }
 
     async function save() {
+      const v = currentVitals();
+      if (!(await readingsOk(v, { bp_systolic: sys, bp_diastolic: dia, heart_rate: hr, glucose: glu, respiration: resp }))) return;
       try {
-        await api.saveVitals(id, currentVitals());
+        await api.saveVitals(id, v);
         toast('Vitals recorded', 'success');
-        await askBloodThinner();
+        // Asked once: a re-save (a corrected number, a BP re-check) keeps the
+        // answer, which "Change" beside it re-opens.
+        if (tr.blood_thinner === 'yes' || tr.blood_thinner === 'no') detail(id);
+        else await askBloodThinner();
       } catch (e) { toast(e.message, 'error'); }
     }
 
@@ -323,9 +357,11 @@ export function renderEmt(ctx, params = {}) {
     const bloodThinnerLine = el('p', { style: 'margin-top:var(--space-2)' });
     function paintThinnerLine() {
       const bt = bloodThinnerText(p);
+      const answered = tr.blood_thinner === 'yes' || tr.blood_thinner === 'no';
       bloodThinnerLine.replaceChildren(bt.level === 'danger'
         ? el('span', { class: 'pill pill--danger' }, [el('span', { class: 'pill-dot' }), bt.text])
-        : el('span', { class: 'subtle small' }, [bt.text]));
+        : el('span', { class: 'subtle small' }, [bt.text]),
+      answered && !readOnly ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-left:var(--space-2)', onClick: () => askBloodThinner() }, ['Change']) : null);
     }
     paintThinnerLine();
 

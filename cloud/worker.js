@@ -935,6 +935,7 @@ const I18N = {
     allergies: 'Medication allergies', allergiesHint: 'Check all that apply', allergyOther: 'Other allergy (specify)',
     allergyQ: 'Do you have an allergy or serious reaction to any medication?', nkda: 'No known drug allergies (NKDA)',
     conditions: 'Do you have any of these conditions?', condHint: 'Answer Yes, No or Unsure for each', conditionOther: 'Other condition (optional)', otherOpt: 'Other',
+    condNone: 'I have none of these — No to all', condNoneRest: 'No to all the rest', moreMarked: ' (and {n} more, marked in red)',
     meds: 'Current medications', medsHint: 'Check every medication you take', medOther: 'Other medication (type the name)', addMed: '+ Add medication', noMeds: 'No medications', medNamePh: 'Medication',
     surgerySites: 'If so, where?',
     medHist: 'Medical History', dentHist: 'Dental History', priorDentist: 'When did you last see a dentist?', yes: 'Yes', no: 'No', unsure: 'Unsure', notApplicable: 'Not applicable', dash: '—',
@@ -974,6 +975,7 @@ const I18N = {
     allergies: 'Alergias a medicamentos', allergiesHint: 'Marque todas las que apliquen', allergyOther: 'Otra alergia (especifique)',
     allergyQ: '¿Tiene alergia o una reacción grave a algún medicamento?', nkda: 'Sin alergias conocidas a medicamentos (NKDA)',
     conditions: '¿Tiene alguna de estas condiciones?', condHint: 'Responda Sí, No o No estoy seguro/a para cada una', conditionOther: 'Otra condición (opcional)', otherOpt: 'Otro',
+    condNone: 'No tengo ninguna — No a todas', condNoneRest: 'No a todas las demás', moreMarked: ' (y {n} más, marcadas en rojo)',
     meds: 'Medicamentos actuales', medsHint: 'Marque todos los medicamentos que toma', medOther: 'Otro medicamento (escriba el nombre)', addMed: '+ Agregar medicamento', noMeds: 'Sin medicamentos', medNamePh: 'Medicamento',
     surgerySites: 'Si es así, ¿dónde?',
     medHist: 'Historial médico', dentHist: 'Historial dental', priorDentist: '¿Cuándo visitó al dentista por última vez?', yes: 'Sí', no: 'No', unsure: 'No estoy seguro/a', notApplicable: 'No aplica', dash: '—',
@@ -1045,7 +1047,11 @@ function checkinShell(title, inner) {
     '.addbtn{border:1px dashed var(--line);background:#fff;border-radius:10px;padding:9px 12px;font-size:14px;cursor:pointer;margin-top:8px}' +
     '.ok{text-align:center;padding:30px 10px}.ok .big{font-size:44px}.err{color:#c0392b;font-size:14px;margin-top:8px}' +
     '.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
-    '.yn{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.yn:last-child{border-bottom:0}.yn span{font-size:13px;font-weight:600}.yn select{width:150px;flex:none}' +
+    '.yn{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 10px;padding:8px 0;border-bottom:1px solid var(--line)}.yn:last-child{border-bottom:0}.yn>span{font-size:13px;font-weight:600;flex:1 1 180px}' +
+    '.ynb{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}.ynb label{margin:0;font-weight:500}.ynb input{position:absolute;opacity:0;width:1px;height:1px}' +
+    '.ynb span{display:inline-block;min-width:52px;text-align:center;padding:9px 12px;border:1px solid var(--line);border-radius:999px;font-size:14px;background:#fff;cursor:pointer}' +
+    '.ynb input:checked+span{border-color:var(--g);background:#eaf5ef;color:var(--g);font-weight:700}.ynb input:focus-visible+span{outline:2px solid var(--g);outline-offset:2px}' +
+    '.yn.miss{background:#fdecea;box-shadow:inset 3px 0 0 #c0392b;padding-left:8px}' +
     'h3.sub{font-size:14px;margin:18px 0 4px}' +
     '.consent{max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fbfcfc;font-size:12.5px;line-height:1.55;color:#33454f}' +
     '.consent h3{font-size:13px;margin:0 0 8px;color:var(--ink)}.consent ol{margin:0;padding-left:18px}.consent li{margin:0 0 8px}.consent p{margin:0 0 9px}' +
@@ -1075,13 +1081,14 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     ? '<div id="cityOtherWrap" style="display:none"><label>' + htmlEscape(L.cityOther) + ' <span class="req">*</span></label><input type="text" id="city_other" maxlength="80"></div>'
     : '';
 
-  // Every single-choice history question is a dropdown with a blank first
-  // option, and every one is required: a blank is not the same as "no", and the
-  // dentist reads these before deciding whether it is safe to treat.
-  const answer = { yes: L.yes, no: L.no, unsure: L.unsure, na: L.notApplicable };
-  const selRow = (id, label, values) => '<div class="yn"><span>' + htmlEscape(label) + ' <span class="req">*</span></span><select id="' + id + '">' +
-    '<option value="">' + htmlEscape(L.dash) + '</option>' +
-    values.map((v) => '<option value="' + v + '">' + htmlEscape(answer[v]) + '</option>').join('') + '</select></div>';
+  // Every single-choice history question is a row of tap buttons (radio
+  // inputs), one tap per answer — they were dropdowns, two taps each and a
+  // picker on a phone. None starts chosen, and every one is required: a blank
+  // is not the same as "no", and the dentist reads these before deciding
+  // whether it is safe to treat.
+  const answer = { yes: L.yes, no: L.no, unsure: L.unsure, na: L.notApplicable, nkda: L.nkda };
+  const selRow = (id, label, values) => '<div class="yn"><span>' + htmlEscape(label) + ' <span class="req">*</span></span><div class="ynb" id="' + id + '" role="radiogroup">' +
+    values.map((v) => '<label><input type="radio" name="' + id + '" value="' + v + '"><span>' + htmlEscape(answer[v]) + '</span></label>').join('') + '</div></div>';
   const medQ = (k) => (L.medYesNo.find(([key]) => key === k) || [])[1];
   // Condition ids are namespaced (cond_<key>): kidney and liver are also body
   // sites for the surgery question, and two elements must never share an id.
@@ -1094,7 +1101,8 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
   const dentalYesNo = L.dentalYesNo.map(([k, l]) => selRow(k, l, ['yes', 'no'])).join('');
   const genConsent = '<h3>' + htmlEscape(L.generalTitle) + '</h3>' + (L.generalMode === 'ol' ? ('<ol>' + L.general.map((c) => '<li>' + htmlEscape(c) + '</li>').join('') + '</ol>') : L.general.map((c) => '<p>' + htmlEscape(c) + '</p>').join(''));
   const surConsent = '<h3>' + htmlEscape(L.surgeryTitle) + '</h3>' + L.surgeryText.map((c) => '<p>' + htmlEscape(c) + '</p>').join('');
-  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh };
+  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh,
+    condNone: L.condNone, condNoneRest: L.condNoneRest, moreMarked: L.moreMarked };
   // The wording each refusal quotes, keyed like firstMissingHistory's ids, so
   // the page names the question it wants exactly as the server would.
   const Q = { under_treatment: medQ('under_treatment'), major_surgery: medQ('major_surgery'), tobacco: medQ('tobacco'),
@@ -1139,6 +1147,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     '<div class="card"><h2>' + htmlEscape(L.medHist) + '</h2>' +
     selRow('under_treatment', medQ('under_treatment'), ['yes', 'no']) +
     '<h3 class="sub">' + htmlEscape(L.conditions) + ' <span class="req">*</span></h3><p class="hint" style="margin:0 0 4px">' + htmlEscape(L.condHint) + '</p>' +
+    '<button type="button" class="addbtn" id="condnone">' + htmlEscape(L.condNone) + '</button>' +
     '<div id="conditions">' + condRows + '</div>' +
     '<label>' + htmlEscape(L.conditionOther) + '</label><input type="text" id="conditions_other">' +
     '<h3 class="sub">' + htmlEscape(L.meds) + ' <span class="req">*</span></h3><p class="hint" style="margin:0 0 4px">' + htmlEscape(L.medsHint) + '</p>' +
@@ -1150,9 +1159,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     '<div id="surgerySitesWrap" style="display:none"><label>' + htmlEscape(L.surgerySites) + ' <span class="req">*</span></label><div class="chips" id="sites">' + siteChips + '</div></div>' +
     selRow('tobacco', medQ('tobacco'), ['yes', 'no']) +
     '<h3 class="sub">' + htmlEscape(L.allergies) + ' <span class="req">*</span></h3>' +
-    '<div class="yn"><span>' + htmlEscape(L.allergyQ) + ' <span class="req">*</span></span><select id="allergy_status">' +
-    '<option value="">' + htmlEscape(L.dash) + '</option><option value="nkda">' + htmlEscape(L.nkda) + '</option>' +
-    '<option value="yes">' + htmlEscape(L.yes) + '</option><option value="unsure">' + htmlEscape(L.unsure) + '</option></select></div>' +
+    selRow('allergy_status', L.allergyQ, ['nkda', 'yes', 'unsure']) +
     '<div id="allergyListWrap" style="display:none"><p class="hint" style="margin:6px 0 4px">' + htmlEscape(L.allergiesHint) + '</p><div class="chips" id="allergies">' + allergyChips + '</div>' +
     '<div id="allergyOtherWrap" style="display:none"><label for="allergies_other">' + htmlEscape(L.allergyOther) + ' <span class="req">*</span></label><input type="text" id="allergies_other"></div></div>' +
     '</div>' +
@@ -1186,9 +1193,16 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     'var Q=' + JSON.stringify(Q) + ';' +
     'var CONDQ=' + JSON.stringify(L.conditionList.map(([k]) => k)) + ';' +
     'var DENTQ=' + JSON.stringify(L.dentalYesNo.map(([k]) => k)) + ';' +
-    "function el(id){return document.getElementById(id);}function val(id){var e=el(id);return e?e.value:'';}" +
+    "function el(id){return document.getElementById(id);}function val(id){var e=el(id);if(!e)return'';if(e.classList.contains('ynb')){var c=e.querySelector('input:checked');return c?c.value:'';}return e.value;}" +
     "function chipwire(id){document.querySelectorAll('#'+id+' .chip input').forEach(function(i){i.addEventListener('change',function(){i.closest('.chip').classList.toggle('on',i.checked);});});}" +
     "chipwire('services');chipwire('race');chipwire('sites');chipwire('allergies');" +
+    // "None of these" answers No to every condition not yet answered — one tap
+    // for a healthy patient, who still sees each condition and can change any.
+    "function syncCondNone(){var b=el('condnone'),any=false,all=true;CONDQ.forEach(function(k){if(val('cond_'+k))any=true;else all=false;});b.textContent=any?T.condNoneRest:T.condNone;b.style.display=all?'none':'';}" +
+    "el('condnone').onclick=function(){CONDQ.forEach(function(k){if(!val('cond_'+k)){var r=document.querySelector('#cond_'+k+' input[value=no]');r.checked=true;r.closest('.yn').classList.remove('miss');}});syncCondNone();};" +
+    "el('conditions').addEventListener('change',syncCondNone);syncCondNone();" +
+    // An answered question loses its red mark at once.
+    "document.querySelectorAll('.ynb').forEach(function(g){g.addEventListener('change',function(){g.closest('.yn').classList.remove('miss');});});" +
     // "Prefer not to answer" is about the race list, so it replaces it — shown
     // on the page as the walk-in form shows it, not reconciled silently on save.
     "document.querySelectorAll('#race input').forEach(function(i){i.addEventListener('change',function(){if(!i.checked)return;var pna=i.value==='prefer_not';document.querySelectorAll('#race input').forEach(function(o){if(o!==i&&(pna||o.value==='prefer_not'))o.checked=false;o.closest('.chip').classList.toggle('on',o.checked);});});});" +
@@ -1246,7 +1260,9 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     // not the same as "no", and the dentist reads these before treating. The
     // message names the question, as the walk-in form's refusal does.
     "var miss=missingHistory();" +
-    "if(miss){err.textContent=T.errMedical.replace(/\\.$/,'')+': '+Q[miss[0]];var e2=el(miss[1]||miss[0]);if(e2){e2.scrollIntoView({block:'center'});if(e2.focus)e2.focus();}return;}" +
+    // Every unanswered one-tap question is marked at once, and counted.
+    "var unans=[];document.querySelectorAll('.ynb').forEach(function(g){var y=g.closest('.yn');if(val(g.id)){y.classList.remove('miss');}else{y.classList.add('miss');unans.push(g.id);}});" +
+    "if(miss){var more=unans.length-(unans.indexOf(miss[1]||miss[0])>=0?1:0);err.textContent=T.errMedical.replace(/\\.$/,'')+': '+Q[miss[0]]+(more>0?T.moreMarked.replace('{n}',more):'');var e2=el(miss[1]||miss[0]);if(e2){e2.scrollIntoView({block:'center'});if(e2.focus)e2.focus();}return;}" +
     "if(!el('cagree').checked){err.textContent=T.errConsent;return;}" +
     "if(!val('signer').trim()){err.textContent=T.errSigner;return;}" +
     "if(!gpad||!gpad.data()){err.textContent=T.errSign;el('gsig').scrollIntoView({block:'center'});return;}" +

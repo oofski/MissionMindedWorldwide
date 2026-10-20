@@ -6,9 +6,10 @@
 // language the volunteer has the app set to.
 //
 // All 34 questions, in one sitting (v0.0.15). A question with one answer is a
-// dropdown and a select-all-that-apply question is a set of chips — the same
-// two controls the rest of the intake uses — which keeps thirty-four questions
-// to a form a patient can get through at the desk.
+// row of answer chips, one tap (v0.0.19 — 31 of them were dropdowns, two taps
+// each and a native picker on a touch screen, some 65 taps for the whole
+// form), and a select-all-that-apply question is a set of chips: the controls
+// the rest of the intake uses.
 //
 // It is voluntary. Every question can be left blank, and the whole thing can be
 // declined, because it is attached to free care and a patient who does not want
@@ -19,7 +20,7 @@
 import { el, toast, modal, withBusy } from '../dom.js';
 import { icon } from '../icons.js';
 import { api } from '../api.js';
-import { selectField, chipGrid } from '../forms.js';
+import { choiceRow, chipGrid } from '../forms.js';
 import { SECTIONS, SURVEY_VERSION, SURVEY_TITLE, EXIT_SECTIONS, questionsForStage } from '../../i18n/exitSurvey.js';
 
 const UI = {
@@ -42,6 +43,7 @@ const UI = {
     declined: 'No problem. Thank you for visiting.',
     close: 'Close',
     optional: 'Optional',
+    tapClear: 'Tap an answer to choose it; tap it again to clear it.',
   },
   es: {
     title: SURVEY_TITLE.es,
@@ -62,6 +64,7 @@ const UI = {
     declined: 'No hay problema. Gracias por su visita.',
     close: 'Cerrar',
     optional: 'Opcional',
+    tapClear: 'Toque una respuesta para elegirla; tóquela otra vez para borrarla.',
   },
 };
 
@@ -136,16 +139,16 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
         });
         control = chips.node;
       } else {
-        // A blank first choice is how a question is left unanswered — or put
-        // back to unanswered, by a patient who would rather not say.
-        const sel = selectField('', [{ value: '', label: '—' }, ...q.options.map((o) => ({ value: o.value, label: o[L] || o.en }))],
-          { value: answers[q.key] || '' });
-        sel.input.setAttribute('aria-label', q[L] || q.en);
-        sel.input.addEventListener('change', () => {
-          if (sel.get()) answers[q.key] = sel.get(); else delete answers[q.key];
+        // None chosen is how a question is left unanswered; tapping the chosen
+        // answer again puts it back, for a patient who would rather not say.
+        const row = choiceRow(q.options.map((o) => ({ value: o.value, label: o[L] || o.en })),
+          { value: answers[q.key] || '', allowClear: true });
+        row.node.setAttribute('aria-label', q[L] || q.en);
+        row.input.addEventListener('change', () => {
+          if (row.get()) answers[q.key] = row.get(); else delete answers[q.key];
           refreshProgress();
         });
-        control = sel.input;
+        control = row.node;
       }
 
       return el('div', { class: 'survey-q', id: `q-${q.key}` }, [
@@ -169,6 +172,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
         el('div', { class: 'survey-lede' }, [
           el('p', {}, [t.lede]),
           el('p', { class: 'survey-privacy' }, [icon('lock', { size: 14 }), el('span', {}, [t.privacy])]),
+          el('p', { class: 'survey-privacy' }, [icon('check', { size: 14 }), el('span', {}, [t.tapClear])]),
           fromRegistration ? el('p', { class: 'survey-prefilled' }, [icon('info', { size: 14 }), el('span', {}, [t.prefilled])]) : null,
         ]),
         ...MY_SECTIONS.map((sec) => el('section', { class: 'survey-section' }, [

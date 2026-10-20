@@ -243,7 +243,7 @@ export function renderProvider(ctx, params = {}) {
     // with manual typing preserved. onChange fires on every value change.
     function toothField(value, onChange) {
       const cb = typeof onChange === 'function' ? onChange : () => {};
-      const inp = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: value || '', onInput: () => cb() });
+      const inp = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: value || '', onInput: () => { inp.classList.remove('input--invalid'); cb(); } });
       if (locked) { inp.disabled = true; return { node: inp, input: inp }; }
       const step = (delta) => {
         const cur = parseInt(inp.value, 10);
@@ -300,6 +300,7 @@ export function renderProvider(ctx, params = {}) {
       row.dataset.tooth = f.tooth || '';
       if (auto) row.dataset.auto = '1';
       row._get = () => ({ ...keptF, tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
+      row._tooth = tooth;
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       fillingRows.append(row);
     }
@@ -332,6 +333,7 @@ export function renderProvider(ctx, params = {}) {
       row.dataset.tooth = x.tooth || '';
       if (auto) row.dataset.auto = '1';
       row._get = () => ({ ...keptX, tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
+      row._tooth = tooth;
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       extractRows.append(row);
     }
@@ -993,12 +995,37 @@ export function renderProvider(ctx, params = {}) {
     // finalize that locks the record read-only). Nobody has to lock to move a
     // patient through to check-out. v0.0.15: 'waiting' saves the same way and
     // parks the patient in Treatment Waiting for a treatment chair.
+    // A procedure row is kept by its tooth: one without a tooth number is
+    // dropped by the save, and an extraction dropped that way also lost the
+    // patient their extraction after-care sheet — with "Moved" shown as if all
+    // was well. An extraction row always needs its tooth; a filling row once
+    // anything is marked on it (the empty one the chart opens with is not a
+    // filling).
+    function rowWithoutTooth() {
+      const ext = Array.from(extractRows.children);
+      for (let i = 0; i < ext.length; i++) {
+        if (!ext[i]._get().tooth) return { msg: `Extraction ${i + 1}: enter the tooth #, or remove the row with ✕.`, input: ext[i]._tooth };
+      }
+      const fil = Array.from(fillingRows.children);
+      for (let i = 0; i < fil.length; i++) {
+        const f = fil[i]._get();
+        if (!f.tooth && (f.surfaces.length || f.ant || f.post)) return { msg: `Filling ${i + 1}: enter the tooth #, or remove the row with ✕.`, input: fil[i]._tooth };
+      }
+      return null;
+    }
+
     async function save(mode) {
       // Gate: the dentist can't document treatment until the general consent is on
       // file. Every kiosk check-in already captures it; if it's somehow missing,
       // the Consents panel above lets the patient complete it right here first.
       if (!(p.consents || []).some((c) => c.type === 'general')) {
         toast('The general consent must be completed before documenting treatment — use the Consents panel above.', 'error');
+        return;
+      }
+      const noTooth = rowWithoutTooth();
+      if (noTooth) {
+        toast(noTooth.msg, 'error');
+        if (noTooth.input) { noTooth.input.classList.add('input--invalid'); noTooth.input.focus(); }
         return;
       }
       // Checked here so the dentist is told at once, rather than by a refusal

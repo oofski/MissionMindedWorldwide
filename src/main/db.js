@@ -317,6 +317,9 @@ function migrate() {
     if (assigned) db.prepare('UPDATE patients SET patient_code = ? WHERE id = ?').run(assigned, row.id);
   }
   addColumn('patients', 'arrived_by_name', 'TEXT');
+  // v0.0.19: why a patient was checked out before their visit was finished
+  // (still waiting for a chair, still being seen). NULL for a finished visit.
+  addColumn('patients', 'left_early_reason', 'TEXT');
   // v1.6.0: deleting a record locally used to be undone by the next sync — the
   // row was simply pulled back from the cloud. A tombstone is the record OF a
   // deletion: it carries the uid and nothing else (no patient data), is pushed
@@ -2186,9 +2189,38 @@ function assertNotLocked(actor, patientId) {
   if (isRecordLocked(patientId)) throw new Error(LOCKED_MSG);
 }
 
+// What a vitals reading can be. Outside these a number is a typo (a systolic of
+// 400, a pulse of 0), refused rather than stored as a reading the dentist acts
+// on. The same numbers as src/renderer/js/vitalsRange.js, which also asks the
+// EMT to re-check a possible but unusual one; the harness pins the two equal.
+const VITAL_LIMITS = {
+  bp_systolic: { min: 50, max: 300, label: 'Systolic' },
+  bp_diastolic: { min: 20, max: 200, label: 'Diastolic' },
+  heart_rate: { min: 20, max: 250, label: 'Pulse' },
+  glucose: { min: 10, max: 900, label: 'Blood sugar' },
+  respiration: { min: 4, max: 60, label: 'Respiration' },
+};
+function assertVitalsPossible(v, prefix = '') {
+  const got = {};
+  for (const [key, lim] of Object.entries(VITAL_LIMITS)) {
+    const raw = String(v[key] == null ? '' : v[key]).trim();
+    if (!raw) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < lim.min || n > lim.max) {
+      throw new Error(`${prefix}${lim.label} ${raw} is not a possible reading (${lim.min}–${lim.max}). Re-enter it.`);
+    }
+    got[key] = n;
+  }
+  if (got.bp_systolic != null && got.bp_diastolic != null && got.bp_diastolic >= got.bp_systolic) {
+    throw new Error(`${prefix}Diastolic ${got.bp_diastolic} is not lower than systolic ${got.bp_systolic} — check the two numbers (they may be swapped).`);
+  }
+}
+
 // EMT / staff-measured vitals stored (with accountability) on the triage row.
 function saveVitals(actor, patientId, data) {
   assertNotLocked(actor, patientId);
+  assertVitalsPossible(data || {});
+  if (data && Array.isArray(data.bp_rechecks)) data.bp_rechecks.slice(0, 2).forEach((r, i) => assertVitalsPossible(r || {}, `Re-check #${i + 1}: `));
   const tr = db.prepare('SELECT id FROM triage WHERE patient_id = ?').get(patientId);
   const d = data || {};
   const sys = toIntOrNull(d.bp_systolic), dia = toIntOrNull(d.bp_diastolic), hr = toIntOrNull(d.heart_rate);
@@ -2385,8 +2417,14 @@ function updateConsentTeeth(actor, consentId, toothNumbers) {
   return getPatient(c.patient_id);
 }
 
+// Whether a patient's visit is finished: marked complete at a chair, or
+// signed off and locked.
+function visitFinished(p) {
+  return p.status === 'completed' || isRecordLocked(p.id);
+}
+
 // Checkout staff dismiss a patient — only after the provider has signed off.
-function dismissPatient(actor, id) {
+function dismissPatient(actor, id, opts = {}) {
   const p = db.prepare('SELECT * FROM patients WHERE id = ?').get(id);
   if (!p) throw new Error('Patient not found.');
   // v1.2.1: patients move through the stations freely — check-out no longer
@@ -2394,9 +2432,16 @@ function dismissPatient(actor, id) {
   // guard the obvious cases so nobody is dismissed before they've been seen.
   if (p.status === 'dismissed') throw new Error('Patient is already checked out.');
   if (p.status === 'checked_in') throw new Error('Patient still needs vitals from the EMT/nurse before check-out.');
-  db.prepare("UPDATE patients SET status='dismissed', dismissed_by=?, dismissed_at=?, updated_at=? WHERE id=?")
-    .run(actor ? actor.id : null, now(), now(), id);
-  audit(actor, 'dismiss', 'patient', id, `${p.first_name} ${p.last_name}`.trim());
+  // A patient can leave before their visit is finished — tired of waiting for
+  // a chair, feeling unwell — but the desk says so, and why. The check-out
+  // confirmation used to say their "treatment and notes are complete", and the
+  // Dashboard and the clinic's totals counted the visit as finished.
+  const finished = visitFinished(p);
+  const reason = String((opts && opts.reason) || '').trim().slice(0, 300);
+  if (!finished && !reason) throw new Error('This patient’s visit is not finished. Say why they are leaving before checking them out.');
+  db.prepare("UPDATE patients SET status='dismissed', dismissed_by=?, dismissed_at=?, left_early_reason=?, updated_at=? WHERE id=?")
+    .run(actor ? actor.id : null, now(), finished ? null : reason, now(), id);
+  audit(actor, 'dismiss', 'patient', id, `${p.first_name} ${p.last_name}`.trim() + (finished ? '' : ` · left before the visit was finished: ${reason}`));
   return getPatient(id);
 }
 
@@ -2439,7 +2484,7 @@ function adminMovePatient(actor, id, target) {
       routePatient(actor, id, tr && tr.route === 'both' ? 'both' : 'dentist');
     }
     // From check-out back to a chair: the visit is open again, like a re-open.
-    db.prepare('UPDATE patients SET dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL WHERE id=?').run(id);
+    db.prepare('UPDATE patients SET dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, left_early_reason=NULL WHERE id=?').run(id);
     liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
     markTreatmentWaiting(actor, id);
     audit(actor, 'admin_move', 'patient', id, target);
@@ -2451,7 +2496,7 @@ function adminMovePatient(actor, id, target) {
     // vitals are kept — they are clinical facts, not workflow state — so the
     // patient reappears in the arrivals list and the vitals queue.
     db.prepare(`UPDATE patients SET status='checked_in', arrived_at=NULL, arrived_by_name=NULL,
-                  dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
+                  dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, left_early_reason=NULL, updated_at=? WHERE id=?`).run(now(), id);
     db.prepare(`UPDATE triage SET route=NULL, routed_by=NULL, routed_at=NULL, routed_by_name=NULL, emt_signed_off=0,
                   status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
     liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
@@ -2460,20 +2505,25 @@ function adminMovePatient(actor, id, target) {
     // they are genuinely waiting to be seen again rather than sitting in a
     // treatment queue with a 'checked_in' label.
     db.prepare(`UPDATE patients SET status='checked_in', dismissed_by=NULL, dismissed_by_name=NULL,
-                  dismissed_at=NULL, updated_at=? WHERE id=?`).run(now(), id);
+                  dismissed_at=NULL, left_early_reason=NULL, updated_at=? WHERE id=?`).run(now(), id);
     db.prepare(`UPDATE triage SET routed_at=NULL, emt_signed_off=0,
                   status='waiting', ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
     liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
   } else if (target === 'reopen') {
     // Bring a completed OR dismissed patient back into treatment and unlock the
     // record so it can be edited again (clears any dismissal).
-    db.prepare("UPDATE patients SET status='in_treatment', dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, updated_at=? WHERE id=?").run(now(), id);
+    db.prepare("UPDATE patients SET status='in_treatment', dismissed_by=NULL, dismissed_by_name=NULL, dismissed_at=NULL, left_early_reason=NULL, updated_at=? WHERE id=?").run(now(), id);
     liftLock(actor, id, 'Admin move: ' + MOVE_LABELS[target]);
     db.prepare("UPDATE triage SET status='in_treatment' WHERE patient_id=? AND status IN ('completed','treatment_waiting')").run(id);
     db.prepare(`UPDATE triage SET ${CLEAR_WAITING_SQL} WHERE patient_id=?`).run(id);
   } else if (target === 'dismiss') {
-    // Admin override: check a patient out from any stage.
-    db.prepare("UPDATE patients SET status='dismissed', dismissed_by=?, dismissed_at=?, updated_at=? WHERE id=?").run(actor ? actor.id : null, now(), now(), id);
+    // Admin override: check a patient out from any stage — said for what it
+    // is when the visit was not finished.
+    const before = db.prepare('SELECT id, status FROM patients WHERE id = ?').get(id);
+    const early = before && before.status !== 'dismissed' && !visitFinished(before)
+      ? `Checked out from Management by ${(actor && actor.full_name) || 'an administrator'}` : null;
+    db.prepare("UPDATE patients SET status='dismissed', dismissed_by=?, dismissed_at=?, left_early_reason=COALESCE(?, left_early_reason), updated_at=? WHERE id=?")
+      .run(actor ? actor.id : null, now(), early, now(), id);
   }
   audit(actor, 'admin_move', 'patient', id, target);
   return getPatient(id);
@@ -2684,6 +2734,7 @@ function listPatients({ eventId, search } = {}) {
       // the queues and the board, since both are status in_treatment.
       treatment_waiting_at: tr ? tr.treatment_waiting_at : null,
       dismissed_at: pt.dismissed_at || null,
+      left_early_reason: pt.left_early_reason || null,
       emt_signed_off: !!(tr && tr.emt_signed_off),
       blood_thinner: tr ? tr.blood_thinner : null,
       // Reconciled thinner signal so the QUEUES can't understate the risk: true if
@@ -3741,7 +3792,7 @@ function importClinicBundle(actor, bundle) {
     // Patients, keyed by uid so a repeat import updates instead of duplicating.
     const PCOLS = ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email',
       'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'updated_at',
-      'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'];
+      'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name', 'left_early_reason'];
     // A backup's treatment row is the record as it stood when the backup was
     // made. Restored over a record signed off and locked here since, it
     // silently unlocked it and put back the unsigned chart, and one taken at an
@@ -3962,7 +4013,7 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
   const dayRow = (k) => (days[k] = days[k] || { date: k, seen: 0, completed: 0, fillings: 0, extractions: 0, cleanings: 0, treatments: 0 });
   let extractions = 0, fillings = 0, cleanings = 0, xrays = 0, completed = 0;
   let xrays_taken = 0, referrals = 0;
-  let checked_out = 0, flagged = 0, patients_with_xray = 0;
+  let checked_out = 0, left_early = 0, flagged = 0, patients_with_xray = 0;
   let pre_signups = 0, pre_checked_out = 0, onsite_signups = 0, onsite_checked_out = 0;
   // Mean age is kept as a SUM and a COUNT, never as an average. mergeSummaries
   // adds the NUM fields together, and averaging two stored averages across
@@ -3998,9 +4049,12 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     // 'none' and 'other' are what the form stores for "none of these" and "I
     // typed something" — not conditions, so never counted as one.
     (m.conditions || []).forEach((c) => { if (c && c !== 'none' && c !== 'other') bump(conditions, c); });
-    const finished = isFinishedStatus(p.status);
+    // A patient checked out before their visit was finished left; their
+    // visit did not finish, and is counted for what it was.
+    const finished = isFinishedStatus(p.status) && !p.left_early_reason;
     if (finished) completed++;
     if (p.status === 'dismissed') checked_out++;
+    if (p.status === 'dismissed' && p.left_early_reason) left_early++;
     // Where the patient came from: the online link, or the front desk.
     if (d.preregistered) { pre_signups++; if (p.status === 'dismissed') pre_checked_out++; }
     else { onsite_signups++; if (p.status === 'dismissed') onsite_checked_out++; }
@@ -4072,6 +4126,7 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
     patients_seen: patients.length,
     visits_completed: completed,
     checked_out,
+    left_early,
     flagged,
     patients_with_xray,
     pre_signups, pre_checked_out, onsite_signups, onsite_checked_out,
@@ -4103,7 +4158,7 @@ function buildEventSummary(eventId) {
 // day rows merge by date. Fields a summary predates are simply absent and count
 // as zero, so a report kept by an older version still contributes its totals.
 function mergeSummaries(list) {
-  const NUM = ['patients_seen', 'visits_completed', 'checked_out', 'flagged', 'patients_with_xray',
+  const NUM = ['patients_seen', 'visits_completed', 'checked_out', 'left_early', 'flagged', 'patients_with_xray',
     'pre_signups', 'pre_checked_out', 'onsite_signups', 'onsite_checked_out',
     'extractions', 'fillings', 'cleanings', 'xrays', 'referrals',
     'age_sum', 'age_known', 'race_answered', 'race_declined'];
@@ -4402,7 +4457,9 @@ const SYNC_COLS = {
   // Staff account. salt+hash travel so the account can sign in on every laptop;
   // event scoping travels via event_uid (the parent), NULL for global admins.
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
-  patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name'],
+  // left_early_reason: a check-out before the visit was finished, and why, so
+  // every station's board and the clinic's totals tell it from a finished one.
+  patient: ['language', 'first_name', 'last_name', 'dob', 'gender', 'phone', 'email', 'demographics', 'medical_history', 'dental_history', 'status', 'created_at', 'dismissed_at', 'dismissed_by_name', 'arrived_at', 'arrived_by_name', 'left_early_reason'],
   // glucose and respiration were recorded at Vitals since v0.0.4 but never
   // listed here, so the blood sugar and breathing rate existed only on the EMT's
   // own laptop — no other station, printed record or clinic restore had them.
@@ -5336,7 +5393,7 @@ module.exports = {
   updatePatientSection, SECTION_ROLES, unlockRecord, lockRecord, assertNotLocked,
   findPatientByCode,
   listIncompletePatients, deleteIncompletePatients,
-  saveVitals, routePatient, updateConsentTeeth, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,
+  saveVitals, VITAL_LIMITS, routePatient, updateConsentTeeth, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,
   arrivalReadiness, confirmArrival, routeFromVisitType, visitNeedsSurgeryConsent,
   saveTriage, saveTreatment,
   addXray, updateXrayTooth, getXray, listXrays, deleteXray,

@@ -2,7 +2,7 @@ import { el, mount, clear } from '../dom.js';
 import { api } from '../api.js';
 import { icon } from '../icons.js';
 import { store } from '../store.js';
-import { scanBox } from '../components/wristband.js';
+import { scanBox, printWristband } from '../components/wristband.js';
 import { openPatientInfo } from '../components/patientHistory.js';
 import { openDeskConsent } from '../components/consentForm.js';
 
@@ -150,6 +150,15 @@ export function renderArrivals(ctx) {
       // "They're here" refuses an unsigned consent, so the desk has to be able
       // to take one: a patient who reached this list without it was otherwise
       // stuck here with nobody able to send them through.
+      // The desk is where a patient is first banded — a kiosk or online
+      // check-in leaves with no band — and where a torn one is replaced. The
+      // list row lacks what the band prints, so the record is fetched first.
+      const bandBtn = el('button', {
+        class: 'btn btn--ghost btn--sm', type: 'button',
+        onClick: async () => {
+          try { printWristband(await api.getPatient(p.id)); } catch (e) { ctx.toast(e.message, 'error'); }
+        },
+      }, [icon('print', { size: 14 }), confirmed ? 'Reprint wristband' : 'Print wristband']);
       const signBtn = p.consents_ok ? null : el('button', {
         class: 'btn btn--soft btn--sm', type: 'button',
         onClick: () => openDeskConsent(p, p.consents_missing || ['general'], { onSigned: () => load().catch(() => {}) }),
@@ -176,12 +185,14 @@ export function renderArrivals(ctx) {
           ? el('div', { class: 'arrival-done' }, [
             el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Here']),
             el('div', { class: 'subtle small' }, [STATION_LABEL[p.route] ? `Going to: ${STATION_LABEL[p.route]}` : 'No station set']),
+            bandBtn,
           ])
           : el('div', { class: 'arrival-actions' }, [
             el('label', { class: 'field field--inline' }, [
               el('span', { class: 'field-label' }, ['Station']),
               stationSel,
             ]),
+            bandBtn,
             signBtn,
             confirmBtn,
           ]),

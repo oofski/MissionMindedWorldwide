@@ -144,33 +144,40 @@ export function normalizeMedical(input) {
 }
 
 /**
- * The first required answer a v2 history is missing, as a stable id, or null.
- * Ids, in the order the form asks them:
+ * Every required answer a v2 history is missing, as stable ids in the order the
+ * form asks them:
  *   under_treatment, condition:<key>, medications, major_surgery,
  *   surgery_sites, tobacco, allergy_status, allergies, allergies_other
- * The form turns the id into the question's own wording, so a refusal names
- * what it wants rather than "please complete this step".
+ * The form turns an id into the question's own wording, so a refusal names
+ * what it wants rather than "please complete this step" — and marks all of
+ * them at once, so a patient is not sent back once per missing answer.
  */
-export function firstMissingMedical(mh) {
+export function missingMedical(mh) {
   const m = mh || {};
+  const out = [];
   const yn = (v) => v === 'yes' || v === 'no';
-  if (!yn(m.under_treatment)) return 'under_treatment';
+  if (!yn(m.under_treatment)) out.push('under_treatment');
   const answers = asObject(m.condition_answers);
   for (const k of INTAKE_CONDITIONS) {
-    if (!conditionAnswers(k).includes(answers[k])) return 'condition:' + k;
+    if (!conditionAnswers(k).includes(answers[k])) out.push('condition:' + k);
   }
   const meds = asArray(m.medications).filter((r) => r && text(typeof r === 'string' ? r : r.name));
-  if (m.medications_none !== true && !meds.length) return 'medications';
-  if (!yn(m.major_surgery)) return 'major_surgery';
-  if (m.major_surgery === 'yes' && !asArray(m.surgery_sites).length) return 'surgery_sites';
-  if (!yn(m.tobacco)) return 'tobacco';
-  if (!ALLERGY_STATUSES.includes(m.allergy_status)) return 'allergy_status';
+  if (m.medications_none !== true && !meds.length) out.push('medications');
+  if (!yn(m.major_surgery)) out.push('major_surgery');
+  if (m.major_surgery === 'yes' && !asArray(m.surgery_sites).length) out.push('surgery_sites');
+  if (!yn(m.tobacco)) out.push('tobacco');
+  if (!ALLERGY_STATUSES.includes(m.allergy_status)) out.push('allergy_status');
   if (m.allergy_status === 'yes') {
     const picked = asArray(m.allergies).filter((k) => k && k !== 'none');
-    if (!picked.length) return 'allergies';
-    if (picked.includes('other') && !text(m.allergies_other)) return 'allergies_other';
+    if (!picked.length) out.push('allergies');
+    else if (picked.includes('other') && !text(m.allergies_other)) out.push('allergies_other');
   }
-  return null;
+  return out;
+}
+
+/** The first of missingMedical(), or null. */
+export function firstMissingMedical(mh) {
+  return missingMedical(mh)[0] || null;
 }
 
 /**

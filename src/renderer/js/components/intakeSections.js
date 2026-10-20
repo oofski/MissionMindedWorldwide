@@ -28,8 +28,8 @@ import {
   t, getLang, conditions, allergies, conditionLabel, allergyLabel, medChecklist, surgerySites, dentalQuestions, answerLabel,
   visitTypes, priorDentistOptions, referrals, raceOptions, US_STATES, MEDICATIONS,
 } from '../i18n.js';
-import { textField, selectField, chipGrid, limitDigits } from '../forms.js';
-import { normalizeMedical, firstMissingMedical, conditionAnswers, INTAKE_CONDITIONS, INTAKE_ALLERGIES } from '../medicalHistory.js';
+import { textField, selectField, choiceRow, choiceField, chipGrid, limitDigits } from '../forms.js';
+import { normalizeMedical, missingMedical, conditionAnswers, INTAKE_CONDITIONS, INTAKE_ALLERGIES } from '../medicalHistory.js';
 
 // Localised string helper: pick the current language, fall back to English.
 const L = (map) => map[getLang()] || map.en;
@@ -377,10 +377,13 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   const legacyAllergies = Array.isArray(m.allergies) ? m.allergies.filter((k) => k && k !== 'none' && k !== 'other') : [];
   const ynOpts = answerOpts(['yes', 'no']);
 
+  // Every single-choice question is a row of buttons, one tap per answer —
+  // it was a dropdown each (two taps, and a native picker on a touch screen),
+  // some 63 taps for a healthy patient.
   // --- Under a doctor's care (MMW's own question; his form does not ask it) ---
-  const underTx = selectField(t('intake.underTreatment'), ynOpts, { value: m.under_treatment || '', required: true });
+  const underTx = choiceField(t('intake.underTreatment'), ynOpts, { value: m.under_treatment || '', required: true });
 
-  // --- The 25 conditions, one dropdown each ---
+  // --- The 25 conditions, a Yes / No / Unsure row each ---
   const CONDS = conditions();
   const condByKey = new Map(CONDS.map((c) => [c.key, c]));
   const startAnswer = (k) => {
@@ -398,24 +401,40 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
     const c = condByKey.get(key);
     const label = conditionLabel(key);
     const retired = !INTAKE_CONDITIONS.includes(key);
-    const sel = el('select', { class: 'input select' });
     const values = retired ? ['yes', 'no'] : conditionAnswers(key);
-    answerOpts(values).forEach((o) => {
-      const opt = el('option', { value: o.value }, [o.label]);
-      if (o.value === startAnswer(key) || (retired && o.value === 'yes')) opt.selected = true;
-      sel.append(opt);
-    });
-    const node = el('label', { class: 'tri-row' + (c && c.flag ? ' tri-row--flag' : ''), dataset: { key } }, [
+    const row = choiceRow(answerOpts(values), { value: retired ? 'yes' : startAnswer(key), onPick: () => paintNoneBtn() });
+    const node = el('div', { class: 'tri-row' + (c && c.flag ? ' tri-row--flag' : ''), dataset: { key } }, [
       el('span', { class: 'tri-label' }, [label, retired ? el('span', { class: 'subtle small' }, [' ' + L({ en: '(earlier form)', es: '(formulario anterior)' })]) : null]),
-      sel,
+      row.node,
     ]);
-    return { key, label, node, get: () => sel.value };
+    return { key, label, node, get: row.get, set: row.set, input: row.input };
   });
+  // "None of these" answers No to every condition not yet answered — one tap
+  // for a healthy patient, who still sees each condition and can change any
+  // row. Rows already answered (a Yes, an Unsure) are left as they are, so it
+  // can also finish the list after the patient has marked what applies.
+  const noneBtn = el('button', { class: 'btn btn--soft btn--sm cond-none', type: 'button' });
+  function paintNoneBtn() {
+    const any = condRows.some((r) => r.get());
+    noneBtn.replaceChildren(icon('check', { size: 14 }), any
+      ? L({ en: 'No to all the rest', es: 'No a todas las demás', ru: 'Нет на все остальные' })
+      : L({ en: 'I have none of these — No to all', es: 'No tengo ninguna — No a todas', ru: 'Ничего из этого — «Нет» на все' }));
+    noneBtn.style.display = condRows.every((r) => r.get()) ? 'none' : '';
+  }
+  noneBtn.addEventListener('click', () => {
+    condRows.forEach((r) => {
+      if (!r.get()) { r.set('no'); r.input.dispatchEvent(new window.Event('change', { bubbles: true })); }
+    });
+    paintNoneBtn();
+  });
+  paintNoneBtn();
   const condOther = textField(t('intake.conditionOther'), { value: m.conditions_other });
+  const condGrid = el('div', { class: 'tri-grid' }, condRows.map((r) => r.node));
   const condField = el('div', { class: 'field intake-block' }, [
     el('span', { class: 'field-label' }, [t('intake.conditionsTitle'), el('em', { class: 'req' }, [' *'])]),
     el('span', { class: 'field-hint' }, [t('intake.conditionsHint')]),
-    el('div', { class: 'tri-grid' }, condRows.map((r) => r.node)),
+    el('div', { class: 'cond-none-row' }, [noneBtn]),
+    condGrid,
     condOther.node,
   ]);
 
@@ -466,7 +485,7 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
   const medField = el('div', { class: 'intake-block' }, [medGrid.node, medOtherWrap]);
 
   // --- Major surgery in the past six months, and where ---
-  const surgery = selectField(t('intake.majorSurgery'), ynOpts, { value: m.major_surgery || '', required: true });
+  const surgery = choiceField(t('intake.majorSurgery'), ynOpts, { value: m.major_surgery || '', required: true });
   const siteGrid = chipGrid(t('intake.surgerySites') + ' *', surgerySites(), { selected: Array.isArray(m.surgery_sites) ? m.surgery_sites : [] });
   const siteWrap = el('div', { class: 'span-2' }, [siteGrid.node]);
   const syncSites = () => showWhen(siteWrap, surgery.get() === 'yes');
@@ -475,11 +494,11 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
 
   // --- Do you smoke? (stored under the old `tobacco` key; shown to staff as
   // "Smokes / tobacco" so an older record's chewing-tobacco Yes stays true) ---
-  const smoke = selectField(t('intake.tobacco'), ynOpts, { value: m.tobacco || '', required: true });
+  const smoke = choiceField(t('intake.tobacco'), ynOpts, { value: m.tobacco || '', required: true });
 
   // --- Medication allergies: NKDA / Yes / Unsure, the checklist only on Yes ---
   const startStatus = m.allergy_status || (legacyAllergies.length || text(m.allergies_other) ? 'yes' : '');
-  const gate = selectField(t('intake.allergyQuestion'), [
+  const gate = choiceField(t('intake.allergyQuestion'), [
     dash,
     { value: 'nkda', label: t('intake.nkda') },
     { value: 'yes', label: t('common.yes') },
@@ -558,6 +577,26 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
 
   const ORDER = ['under_treatment', ...INTAKE_CONDITIONS.map((k) => 'condition:' + k), 'medications', 'medications_other',
     'major_surgery', 'surgery_sites', 'tobacco', 'allergy_status', 'allergies', 'allergies_other'];
+  // Where each missing answer is on screen, to mark it.
+  const MISSING_NODE = {
+    under_treatment: () => underTx.node,
+    ...Object.fromEntries(condRows.map((r) => ['condition:' + r.key, () => r.node])),
+    medications: () => medGrid.node,
+    medications_other: () => medOtherWrap,
+    major_surgery: () => surgery.node,
+    surgery_sites: () => siteGrid.node,
+    tobacco: () => smoke.node,
+    allergy_status: () => gate.node,
+    allergies: () => allergyGrid.node,
+    allergies_other: () => allergyOther.node,
+  };
+  // An answer given clears its mark at once, not only on the next Next.
+  node.addEventListener('change', (e) => { const f = e.target.closest && e.target.closest('.is-missing'); if (f) f.classList.remove('is-missing'); });
+  node.addEventListener('click', (e) => {
+    const f = e.target.closest && e.target.closest('.chip-grid') && e.target.closest('.is-missing');
+    if (f) f.classList.remove('is-missing');
+  });
+  node.addEventListener('input', (e) => { const f = e.target.closest && e.target.closest('.is-missing'); if (f) f.classList.remove('is-missing'); });
   const QUESTION = {
     under_treatment: () => t('intake.underTreatment'),
     medications: () => t('intake.medsTitle'),
@@ -576,16 +615,30 @@ export function medicalHistorySection(initial = {}, { staff = false } = {}) {
     initial: () => JSON.parse(baseline),
     collect: () => {
       const out = peek();
-      let missing = firstMissingMedical(out);
+      const missing = missingMedical(out);
       // "Other" ticked with nothing typed is a gap the stored shape cannot see
       // (an empty row is dropped), so it is checked here, in its place.
-      const otherEmpty = medsPicked().includes('other') && !otherRows().length;
-      if (otherEmpty && (!missing || ORDER.indexOf(missing) >= ORDER.indexOf('medications'))) missing = 'medications_other';
-      if (missing) {
-        const name = missing.startsWith('condition:')
-          ? (condRows.find((r) => r.key === missing.slice(10)) || {}).label
-          : QUESTION[missing]();
-        toast(req() + name, 'error');
+      if (medsPicked().includes('other') && !otherRows().length && !missing.includes('medications')) {
+        missing.push('medications_other');
+        missing.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
+      }
+      // Every unanswered question is marked at once, and the first is brought
+      // into view — a patient used to learn of them one Next tap at a time.
+      node.querySelectorAll('.is-missing').forEach((n) => n.classList.remove('is-missing'));
+      if (missing.length) {
+        missing.forEach((id) => { const n = MISSING_NODE[id] && MISSING_NODE[id](); if (n) n.classList.add('is-missing'); });
+        const first = missing[0];
+        const name = first.startsWith('condition:')
+          ? (condRows.find((r) => r.key === first.slice(10)) || {}).label
+          : QUESTION[first]();
+        const more = missing.length - 1;
+        toast(req() + name + (more ? L({
+          en: ` — and ${more} more, marked in red`,
+          es: ` — y ${more} más, marcadas en rojo`,
+          ru: ` — и ещё ${more}, отмечены красным`,
+        }) : ''), 'error');
+        const firstNode = MISSING_NODE[first] && MISSING_NODE[first]();
+        if (firstNode && firstNode.scrollIntoView) firstNode.scrollIntoView({ block: 'center', behavior: 'smooth' });
         return false;
       }
       return out;
@@ -619,7 +672,7 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
   const ynOpts = answerOpts(['yes', 'no']);
   const QUESTIONS = dentalQuestions().map((q) => ({
     key: q.key, label: q.label,
-    field: selectField(q.label, ynOpts, { value: dh[q.key] || '', required: true }),
+    field: choiceField(q.label, ynOpts, { value: dh[q.key] || '', required: true }),
   }));
 
   let visit = null;
@@ -629,6 +682,8 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
     el('div', { class: 'form-grid' }, [prior.node, ...QUESTIONS.map((q) => q.field.node)]),
     visit ? visit.node : null,
   ]);
+
+  node.addEventListener('change', (e) => { const f = e.target.closest && e.target.closest('.is-missing'); if (f) f.classList.remove('is-missing'); });
 
   const peek = () => {
     const out = { ...dh, prior_dentist: prior.get() };
@@ -650,9 +705,23 @@ export function dentalHistorySection(initial = {}, { staff = false, includeVisit
       // Every dental question is required. Each refusal names the question it
       // is about — a bare "please complete this step" on a screen of
       // near-identical rows is the reason people give up on a form.
-      if (!prior.get()) { toast(req() + t('intake.priorDentist'), 'error'); return false; }
-      const missing = QUESTIONS.find((q) => !q.field.get());
-      if (missing) { toast(req() + missing.label, 'error'); return false; }
+      // All unanswered ones are marked at once, as on the medical step.
+      node.querySelectorAll('.is-missing').forEach((n) => n.classList.remove('is-missing'));
+      const gaps = [
+        ...(prior.get() ? [] : [{ label: t('intake.priorDentist'), node: prior.node }]),
+        ...QUESTIONS.filter((q) => !q.field.get()).map((q) => ({ label: q.label, node: q.field.node })),
+      ];
+      if (gaps.length) {
+        gaps.forEach((g) => g.node.classList.add('is-missing'));
+        const more = gaps.length - 1;
+        toast(req() + gaps[0].label + (more ? L({
+          en: ` — and ${more} more, marked in red`,
+          es: ` — y ${more} más, marcadas en rojo`,
+          ru: ` — и ещё ${more}, отмечены красным`,
+        }) : ''), 'error');
+        if (gaps[0].node.scrollIntoView) gaps[0].node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return false;
+      }
       if (visit && !visit.get()) { toast(L({ en: 'Please choose what you need today.', es: 'Por favor elija qué necesita hoy.', ru: 'Пожалуйста, выберите, что вам нужно сегодня.' }), 'error'); return false; }
       return peek();
     },
