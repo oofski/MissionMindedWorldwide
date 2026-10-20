@@ -2253,6 +2253,14 @@ function requireVitals(patientId) {
 }
 function routePatient(actor, patientId, route) {
   if (!ROUTES.includes(route)) throw new Error('Choose where the patient goes next: Dental Triage, the hygienist, or both.');
+  // The cleaning station may route, but only for its one hand-off: "Transfer
+  // to Dental Triage" when a patient needs restorative work. Choosing a
+  // patient's station is the vitals station's job.
+  if (actor && actor.role === 'hygienist') {
+    if (route !== 'dentist') throw new Error('From the cleaning station a patient can only be sent to Dental Triage.');
+    const at = db.prepare('SELECT route FROM triage WHERE patient_id = ?').get(patientId);
+    if (!at || !['hygienist', 'both'].includes(at.route)) throw new Error('Only a patient at the cleaning station can be transferred from it.');
+  }
   // A signed-off record is not re-routed from a station; an administrator's
   // move (Management) is how a finished patient is sent somewhere again.
   assertNotLocked(actor, patientId);
@@ -2336,13 +2344,21 @@ function confirmArrival(actor, patientId, opts = {}) {
 
 // A consent completed chairside for an EXISTING patient — e.g. the dentist has the
 // patient sign the oral-surgery consent at the chair (capturing the tooth numbers
-// at the same time), or captures a general consent the intake missed.
+// at the same time), or captures a general consent the intake missed. The front
+// desk takes one here too, for a patient who reached Arrivals without it.
 function addPatientConsent(actor, patientId, consent) {
   const p = db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId);
   if (!p) throw new Error('Patient not found.');
   assertNotLocked(actor, patientId);
   const c = consent || {};
   if (c.type !== 'general' && c.type !== 'oral_surgery') throw new Error('Unknown consent type.');
+  // The desk and the vitals station take the patient's signature and nothing
+  // else: no consent without the signature image, and no tooth numbers, which
+  // the provider records at the chair.
+  if (actor && actor.role !== 'admin' && actor.role !== 'doctor') {
+    if (!/^data:image\//.test(String(c.signature_png || ''))) throw new Error('The consent needs the patient’s signature — drawn, or with their typed name.');
+    if (c.tooth_numbers != null && String(c.tooth_numbers).trim()) throw new Error('Tooth numbers are recorded by the provider at the chair.');
+  }
   const teeth = c.tooth_numbers != null && String(c.tooth_numbers).trim() ? String(c.tooth_numbers).trim() : null;
   db.prepare(
     `INSERT INTO consents (patient_id, type, version, language, signer_name, relationship, signature_png, signed_at, tooth_numbers, amended_by, amended_at, deemed_consent, signature_method)
@@ -2651,7 +2667,15 @@ function listPatients({ eventId, search } = {}) {
       // consents this visit needs are actually signed.
       arrived_at: p.arrived_at || null,
       visit_type: (pt.dental_history && pt.dental_history.visit_type) || null,
-      consents_ok: (() => { try { const r = arrivalReadiness(p.id); return r.general_signed && r.surgery_signed; } catch { return false; } })(),
+      ...(() => {
+        // Which consents are still unsigned, so the desk's "Sign consent" asks
+        // for exactly those.
+        try {
+          const r = arrivalReadiness(p.id);
+          const missing = [r.general_signed ? null : 'general', r.surgery_signed ? null : 'oral_surgery'].filter(Boolean);
+          return { consents_ok: !missing.length, consents_missing: missing };
+        } catch { return { consents_ok: false, consents_missing: [] }; }
+      })(),
       // Stage timestamps for the live board's "total time" + "time at stage" tags.
       vitals_at: tr ? tr.vitals_at : null,
       routed_at: tr ? tr.routed_at : null,

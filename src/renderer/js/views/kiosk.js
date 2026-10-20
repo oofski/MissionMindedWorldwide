@@ -3,6 +3,7 @@ import { icon } from '../icons.js';
 import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpeaking, priorDentistLabel, routeForVisitType, answerLabel, medChecklist } from '../i18n.js';
 import { textField } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
+import { SIGN_HELP, SIGN_REQUIRED, DEEMED_NOTICE, DEEMED_REQUIRED, consentVersion } from '../components/consentForm.js';
 import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, matchCity } from '../components/intakeSections.js';
 import { medicalDisplay } from '../medicalHistory.js';
 import { api } from '../api.js';
@@ -228,11 +229,7 @@ export function renderKiosk(ctx) {
       }),
     ]);
 
-    const sigHelp = L({
-      en: 'Signature optional — you may sign with a stylus/touchscreen or leave blank.',
-      es: 'Firma opcional — puede firmar con un lápiz óptico/pantalla táctil o dejarlo en blanco.',
-      ru: 'Подпись необязательна — вы можете расписаться стилусом/на сенсорном экране или оставить поле пустым.',
-    });
+    const sigHelp = L(SIGN_HELP);
 
     /* The MMW consent carries an explicit YES/NO the patient must answer before
        signing — highlighted on the paper form. Ticking "I agree" is not the same
@@ -251,11 +248,7 @@ export function renderKiosk(ctx) {
     }, [v === 'yes' ? t('common.yes') : t('common.no')]));
     const deemedRow = el('div', { class: 'chip-row' }, deemedBtns);
     const deemedField = el('div', { class: 'deemed-field' }, [
-      el('span', { class: 'field-label' }, [L({
-        en: 'The deemed notice for HIV, Covid-19, Hepatitis B and C exposure has been explained to me and I understand it.',
-        es: 'Se me ha explicado el aviso de consentimiento presunto para la exposición al VIH, Covid-19 y Hepatitis B y C, y lo entiendo.',
-        ru: 'Мне разъяснено уведомление о предполагаемом согласии на тестирование на ВИЧ, Covid-19 и гепатит B и C, и я это понимаю.',
-      })]),
+      el('span', { class: 'field-label' }, [L(DEEMED_NOTICE)]),
       deemedRow,
     ]);
 
@@ -275,21 +268,20 @@ export function renderKiosk(ctx) {
       collect: () => {
         if (!agree.checked) { toast(t('consent.agree'), 'error'); return false; }
         if (!deemed) {
-          toast(L({
-            en: 'Please answer Yes or No to the HIV / Hepatitis notice.',
-            es: 'Responda Sí o No al aviso sobre VIH / Hepatitis.',
-            ru: 'Ответьте «Да» или «Нет» на уведомление о ВИЧ / гепатите.',
-          }), 'error');
+          toast(L(DEEMED_REQUIRED), 'error');
           return false;
         }
         if (!signer.get()) { toast(t('common.required') + ': ' + t('intake.signerName'), 'error'); return false; }
-        // A5: signature is optional — a missing signature does not block submission.
+        // The front desk will not send a patient through on an unsigned
+        // consent, so the kiosk must not let one leave unsigned. Typing the
+        // name ("Type my name") is a signature, for a laptop with no touch.
+        if (sigPad.isEmpty()) { toast(L(SIGN_REQUIRED), 'error'); return false; }
         upsertConsent('general', {
           signer_name: signer.get(), relationship: rel.get(),
-          signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
-          signature_method: sigPad.isEmpty() ? null : sigPad.getMethod(),
+          signature_png: sigPad.getDataUrl(),
+          signature_method: sigPad.getMethod(),
           deemed_consent: deemed,
-          version: `mmw-general-${getLang()}-v1`,
+          version: consentVersion('general', getLang()),
         });
         return true;
       },
@@ -309,11 +301,7 @@ export function renderKiosk(ctx) {
       ru: 'Номер(а) зуба: заполняется врачом у кресла.',
     }[getLang()] || 'Tooth number(s): to be completed at chairside by the provider.';
 
-    const sigHelp = L({
-      en: 'Signature optional — you may sign with a stylus/touchscreen or leave blank.',
-      es: 'Firma opcional — puede firmar con un lápiz óptico/pantalla táctil o dejarlo en blanco.',
-      ru: 'Подпись необязательна — вы можете расписаться стилусом/на сенсорном экране или оставить поле пустым.',
-    });
+    const sigHelp = L(SIGN_HELP);
 
     // English shows the complete oral-surgery wording (consent.oralSurgeryFull,
     // rendered as paragraphs — it already includes the post-op / emergency call
@@ -339,11 +327,11 @@ export function renderKiosk(ctx) {
       node,
       collect: () => {
         if (!agree.checked) { toast(t('consent.agree'), 'error'); return false; }
-        // A5: signature is optional — a missing signature does not block submission.
+        if (sigPad.isEmpty()) { toast(L(SIGN_REQUIRED), 'error'); return false; }
         upsertConsent('oral_surgery', {
           signer_name: signer.get() || signerFromGeneral(),
-          signature_png: sigPad.isEmpty() ? null : sigPad.getDataUrl(),
-          signature_method: sigPad.isEmpty() ? null : sigPad.getMethod(),
+          signature_png: sigPad.getDataUrl(),
+          signature_method: sigPad.getMethod(),
           // Which text was signed. A language without the full wording signs
           // the sections above, which end with consent.emergency; its number
           // changed in v0.0.15 (MMW's line replaced an Oregon one), so a row

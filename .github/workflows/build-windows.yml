@@ -236,41 +236,27 @@ jobs:
 
             ### New in this build
 
-            **Direct connect — sync the clinic's laptops over a router, no
-            internet needed.** In **Admin → Cloud**, choose **Clinic network
-            (no internet)**:
+            Two fixes from the clinic walk-through.
 
-            1. Connect every laptop to the same Wi-Fi router. Any router will
-               do; give it a Wi-Fi password (WPA2 or WPA3). It does not need
-               internet.
-            2. On the laptop that stays on all day (registration is a good
-               choice), set that Wi-Fi to a **Private** network (Settings →
-               Network & internet → Wi-Fi → the network → Network profile
-               type → Private), type a clinic network name and press **Host
-               the clinic network**. When Windows says the firewall "has
-               blocked some features of this app", tick **Private networks**
-               and press **Allow access** — or press **Allow through the
-               firewall** on the same screen.
-            3. On every other laptop, open Admin → Cloud → Clinic network,
-               press **Choose** beside the clinic network it finds, type the
-               clinic key shown on the host and press **Join** — or paste the
-               host's connection code. A new laptop can do this from the
-               sign-in screen with **Join a clinic already set up**. **Test the
-               clinic network** says what is wrong if it cannot connect.
+            **No more patients stuck at the front desk over an unsigned
+            consent.**
+            - The check-in kiosk no longer says the signature is optional. It
+              asks the patient to sign, either by drawing a signature or by
+              pressing **Type my name** (best on a laptop with no
+              touchscreen). Next stays on the consent until it is signed.
+            - In **Arrivals**, a patient marked **Consent missing** now has a
+              **Sign consent** button. It opens the missing consents in the
+              patient's own language, with the HIV / Hepatitis Yes/No, "I
+              agree" and a signature, and saves them the same way the kiosk
+              does. **They're here** then sends the patient through.
+              Registration, vitals and triage staff can all use it. Tooth
+              numbers are still recorded by the provider at the chair.
 
-            From then on the laptops sync exactly as they do online — the same
-            process and the same screens. If the host laptop sleeps or is
-            switched off, everyone keeps working and catches up when it is
-            back; if the router gives it a new address, the others find it
-            again on their own. Records travel encrypted, and a laptop only
-            accepts its own clinic's host. Opened away from the clinic's Wi-Fi
-            (a hotel, a phone hotspot), the host pauses and starts again by
-            itself once it is back. On a Mac, allow incoming connections when
-            asked.
-
-            Update **every laptop** to this version before using direct
-            connect. The online pre-registration link still needs an internet
-            server.
+            **The hygienist's "Transfer to Dental Triage" works.** It used to
+            fail every time with "Your role does not have permission for this
+            action." It now sends the patient to Dental Triage. The hygienist
+            can only send their own cleaning patients, and only to Dental
+            Triage. Choosing a patient's station is still done at vitals.
 
             ### Signing in
             Every install now comes with an administrator already set up:

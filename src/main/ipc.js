@@ -88,14 +88,17 @@ const PERMS = {
   // legacy path saves inside db.createPatient, not over this channel).
   'survey:save': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
   'vitals:save': ['admin', 'doctor', 'triage', 'emt'],
-  'patients:route': ['admin', 'doctor', 'triage', 'emt'],
+  // hygienist: only its "Transfer to Dental Triage" (db.routePatient enforces it).
+  'patients:route': ['admin', 'doctor', 'triage', 'emt', 'hygienist'],
   'treatment:save': ['admin', 'doctor', 'hygienist'],
   // Unlocking a signed-off record (reason required) and locking one are the
   // administrator's, like every other override of the flow.
   'treatment:unlock': ['admin'],
   'treatment:lock': ['admin'],
   'consent:setTeeth': ['admin', 'doctor'],
-  'consent:add': ['admin', 'doctor'],
+  // The desk's "Sign consent" for a patient who reached Arrivals unsigned;
+  // db.addPatientConsent requires the signature and refuses tooth numbers for them.
+  'consent:add': ['admin', 'doctor', 'registration', 'emt', 'triage'],
   'xray:add': ['admin', 'doctor', 'triage', 'emt'],
   'xray:setTooth': ['admin', 'doctor'],
   'xray:folderList': ['admin', 'doctor'],

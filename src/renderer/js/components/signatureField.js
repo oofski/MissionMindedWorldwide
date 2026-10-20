@@ -24,8 +24,6 @@ import { t, getLang } from '../i18n.js';
 import { icon } from '../icons.js';
 import { SignaturePad } from './signature.js';
 
-const L = (map) => map[getLang()] || map.en;
-
 /** Script faces that ship with Windows and macOS, in preference order. */
 const SCRIPT_STACK = '"Segoe Script", "Bradley Hand", "Snell Roundhand", "Apple Chancery", cursive';
 
@@ -81,11 +79,14 @@ export function renderTypedSignature(name, { width = 600, height = 180, method =
  * A signature control offering all three methods.
  *
  * `getName()` supplies the current typed name from the signer field, so Type and
- * Generate do not ask the patient to write their name a second time.
+ * Generate do not ask the patient to write their name a second time. `lang` and
+ * `label` are for a screen in another language than the consent — the front
+ * desk, in English, taking a Spanish speaker's signature.
  *
  * Returns { node, getMethod(), getDataUrl(), isEmpty() }.
  */
-export function SignatureField({ getName = () => '', onChange = () => {} } = {}) {
+export function SignatureField({ getName = () => '', onChange = () => {}, lang = null, label = null } = {}) {
+  const L = (map) => map[lang || getLang()] || map.en;
   let method = 'draw';
   const pad = SignaturePad({ onChange });
 
@@ -144,7 +145,7 @@ export function SignatureField({ getName = () => '', onChange = () => {} } = {})
   }));
 
   const node = el('div', { class: 'sigfield' }, [
-    el('span', { class: 'field-label' }, [t('common.signHere')]),
+    el('span', { class: 'field-label' }, [label || t('common.signHere')]),
     tabRow,
     drawWrap,
     preview,

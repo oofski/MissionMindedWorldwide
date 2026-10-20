@@ -4,6 +4,7 @@ import { icon } from '../icons.js';
 import { store } from '../store.js';
 import { scanBox } from '../components/wristband.js';
 import { openPatientInfo } from '../components/patientHistory.js';
+import { openDeskConsent } from '../components/consentForm.js';
 
 // The front desk's arrival check. Everyone who has checked in — at the desk or
 // online, sometimes days earlier — waits here until someone confirms they are
@@ -146,6 +147,13 @@ export function renderArrivals(ctx) {
           }
         },
       }, [icon('checkCircle', { size: 15 }), 'They’re here — ready to go']);
+      // "They're here" refuses an unsigned consent, so the desk has to be able
+      // to take one: a patient who reached this list without it was otherwise
+      // stuck here with nobody able to send them through.
+      const signBtn = p.consents_ok ? null : el('button', {
+        class: 'btn btn--soft btn--sm', type: 'button',
+        onClick: () => openDeskConsent(p, p.consents_missing || ['general'], { onSigned: () => load().catch(() => {}) }),
+      }, [icon('pen', { size: 15 }), 'Sign consent']);
 
       return el('div', { class: 'arrival-row' + (p.id === scannedId ? ' arrival-row--scanned' : '') }, [
         el('div', { class: 'arrival-who' }, [
@@ -174,6 +182,7 @@ export function renderArrivals(ctx) {
               el('span', { class: 'field-label' }, ['Station']),
               stationSel,
             ]),
+            signBtn,
             confirmBtn,
           ]),
       ]);

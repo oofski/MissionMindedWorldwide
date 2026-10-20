@@ -45,8 +45,9 @@ window.devicePixelRatio = 1;
 window.speechSynthesis = { cancel() {}, speak() {} };
 globalThis.SpeechSynthesisUtterance = class { constructor() {} };
 window.SpeechSynthesisUtterance = globalThis.SpeechSynthesisUtterance;
-// canvas stub (signature pad)
-const fakeCtx = new Proxy({}, { get: () => () => {} });
+// canvas stub (signature pad). measureText answers, so a typed or generated
+// signature (renderTypedSignature fits the name to the width) can render.
+const fakeCtx = new Proxy({}, { get: (_, k) => (k === 'measureText' ? () => ({ width: 0 }) : () => {}) });
 window.HTMLCanvasElement.prototype.getContext = () => fakeCtx;
 window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,SIG';
 window.HTMLElement.prototype.setPointerCapture = function () {};
@@ -66,7 +67,7 @@ const PERMS = {
   'patientsSearchAll': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'], 'patientsHistory': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist'],
   'patientsIncomplete': ['admin'], 'patientsCleanupIncomplete': ['admin'], 'patientsDelete': ['admin'],
   'patientsDismiss': ['admin', 'checkout'], 'patientsMove': ['admin'], 'patientsAudit': ['admin', 'doctor', 'checkout', 'hygienist'],
-  'vitalsSave': ['admin', 'doctor', 'triage', 'emt'], 'patientsRoute': ['admin', 'doctor', 'triage', 'emt'], 'consentSetTeeth': ['admin', 'doctor'], 'consentAdd': ['admin', 'doctor'],
+  'vitalsSave': ['admin', 'doctor', 'triage', 'emt'], 'patientsRoute': ['admin', 'doctor', 'triage', 'emt', 'hygienist'], 'consentSetTeeth': ['admin', 'doctor'], 'consentAdd': ['admin', 'doctor', 'registration', 'emt', 'triage'],
   'usbLoad': ['admin', 'doctor', 'triage', 'checkout'], 'usbUploadCheckout': ['admin', 'doctor', 'triage', 'checkout'], 'usbClear': ['admin', 'doctor', 'triage', 'checkout'],
   'triageSave': ['admin', 'doctor', 'triage'], 'treatmentSave': ['admin', 'doctor', 'hygienist'],
   'surveySave': ['admin', 'checkout', 'doctor', 'triage', 'emt', 'hygienist'],
@@ -167,6 +168,7 @@ window.api = {
   patientsRoute: okWrap(({ patientId, route }) => db.routePatient(currentUser, patientId, route), 'patientsRoute'),
   consentSetTeeth: okWrap(({ consentId, tooth_numbers }) => db.updateConsentTeeth(currentUser, consentId, tooth_numbers), 'consentSetTeeth'),
   consentAdd: okWrap(({ patientId, consent }) => db.addPatientConsent(currentUser, patientId, consent), 'consentAdd'),
+  patientsConfirmArrival: okWrap(({ id, route }) => db.confirmArrival(currentUser, id, { route }), 'patientsConfirmArrival'),
   patientsDismiss: okWrap((id) => db.dismissPatient(currentUser, id), 'patientsDismiss'),
   patientsMove: okWrap(({ id, target }) => db.adminMovePatient(currentUser, id, target), 'patientsMove'),
   patientsAudit: okWrap((id) => db.patientAudit(id), 'patientsAudit'),
@@ -639,12 +641,18 @@ async function main() {
   log(pr.ok && pr.data.triage.route === 'hygienist', 'EMT routes a second patient to the hygienist');
   pr = await window.api.patientsRoute({ patientId: hp.id, route: 'nowhere' });
   log(!pr.ok, 'invalid route rejected: ' + (pr.ok ? 'NOT REJECTED' : 'rejected'));
-  // hygienist role cannot route (routing is the EMT/doctor station's job)
+  // The hygienist routes only for its "Transfer to Dental Triage"; choosing a
+  // patient's station stays the vitals station's job (v0.0.18).
   currentUser = signInAdmin();
   db.createUser(currentUser, { username: 'hygroute', full_name: 'Hyg Route', role: 'hygienist', password: 'x' });
   await window.api.authLogin({ username: 'hygroute', password: 'x' });
-  pr = await window.api.patientsRoute({ patientId: hp.id, route: 'dentist' });
-  log(!pr.ok && /permission/i.test(pr.error || ''), 'HYGIENIST blocked from routing (guard): ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
+  pr = await window.api.patientsRoute({ patientId: hp.id, route: 'both' });
+  const prHyg = await window.api.patientsRoute({ patientId: hp.id, route: 'hygienist' });
+  const prNotHers = await window.api.patientsRoute({ patientId: vp.id, route: 'dentist' });
+  log(!pr.ok && !prHyg.ok && /only be sent to Dental Triage/.test(pr.error || '') && /only be sent to Dental Triage/.test(prHyg.error || '')
+    && !prNotHers.ok && /at the cleaning station/.test(prNotHers.error || '')
+    && db.getPatient(hp.id).triage.route === 'hygienist',
+    'HYGIENIST may route only to Dental Triage — any other station is refused: ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
   pr = await window.api.usersList();
   log(!pr.ok, 'EMT blocked from staff list (guard): ' + (pr.ok ? 'NOT BLOCKED' : 'blocked'));
   // checkout dismiss: a locked (signed-off) patient can be dismissed
@@ -3064,6 +3072,7 @@ async function main() {
       const esAgree = kes.querySelector('.big-check'); esAgree.checked = true; esAgree.dispatchEvent(new window.Event('change', { bubbles: true }));
       kes.querySelector('.deemed-field .chip-btn').click();
       put(T('intake.signerName'), 'Lucía Espanola');
+      drawSig(kes);
       await nextStep();
       const esReview = kes.querySelector('.review') ? kes.querySelector('.review').textContent : '';
       log(/Acetaminofén \(Tylenol\)/.test(esReview) && !/Acetaminophen/.test(esReview) && /Sin alergias conocidas/.test(esReview),
@@ -9276,10 +9285,12 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
         const agreeG = k.querySelector('.big-check'); agreeG.checked = true; agreeG.dispatchEvent(new window.Event('change', { bubbles: true }));
         k.querySelector('.deemed-field .chip-btn').click();
         put(T('intake.signerName'), `Consent ${last}`);
+        drawSig(k);
         await next();
         const onSurgery = k.querySelector('.kiosk-step-label').textContent.includes(T('intake.s_surgery'));
         const text = k.querySelector('.kiosk-body').textContent;
         const agreeS = k.querySelector('.big-check'); agreeS.checked = true; agreeS.dispatchEvent(new window.Event('change', { bubbles: true }));
+        drawSig(k);
         await next();
         $all('.kiosk-nav button', k).pop().click();
         await settle(4);
@@ -11013,6 +11024,199 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       $all('.modal-overlay').forEach((o) => o.remove());
       for (const k of Object.keys(window.api)) if (!(k in savedApiL)) delete window.api[k];
       Object.assign(window.api, savedApiL);
+    }
+  }
+
+  /* ===== v0.0.18 — the two blockers from the clinic walk-through =====
+     1. The kiosk said "Signature optional — … or leave blank", but Arrivals
+        refuses a consent with no signature and nobody at the desk could add
+        one, so a patient who left it blank was stuck at the front desk.
+     2. The hygienist's "Transfer to Dental Triage" always failed: the role
+        had no permission to route. */
+  {
+    const signed18 = currentUser;
+    const settle18 = async (n = 16) => { for (let i = 0; i < n; i++) await tick(); };
+    const store18 = (await import('../src/renderer/js/store.js')).store;
+    const i18n18 = await import('../src/renderer/js/i18n.js');
+    const cf18 = await import('../src/renderer/js/components/consentForm.js');
+    const st18 = await import('../src/renderer/i18n/strings.js');
+    const ctxToasts18 = [];
+    const ctx18 = { navigate: () => {}, toast: (m) => ctxToasts18.push(m), store: store18, setDetail: () => {} };
+    const view18 = async (file, fn, params = {}) => {
+      const node = (await import(`../src/renderer/js/views/${file}`))[fn](ctx18, params);
+      document.body.append(node); await settle18(); return node;
+    };
+    const lastToast18 = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+    const btn18 = (root, re) => $all('button', root).find((b) => re.test(b.textContent.trim()));
+    try {
+      // ---- 1a. The kiosk: no signature, no leaving the consent step ----
+      currentUser = null; store18.setUser(null);
+      const k = (await import('../src/renderer/js/views/kiosk.js')).renderKiosk({ navigate: () => {} });
+      document.body.append(k);
+      await settle18(4);
+      Array.from(k.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click();
+      await settle18(4);
+      const T = i18n18.t;
+      const fieldOf = (label) => Array.from(k.querySelectorAll('.kiosk-body label.field'))
+        .find((l) => (l.querySelector('.field-label') || {}).textContent.replace(/\s*\*\s*$/, '').trim() === label);
+      const put = (label, v) => { const f = fieldOf(label); const x = f.querySelector('select') || f.querySelector('input'); setInput(x, v); };
+      const next = async () => { clickText(T('common.next'), k); await settle18(3); };
+      const stepIs = (key) => k.querySelector('.kiosk-step-label').textContent.includes(T(key));
+      put(T('intake.firstName'), 'Unsigned'); put(T('intake.lastName'), 'Kioskeighteen'); put(T('intake.dob'), '1980-01-01');
+      put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+      const citySel = fieldOf(T('intake.city')).querySelector('select');
+      put(T('intake.city'), citySel ? citySel.options[1].value : 'Sandy');
+      put(T('intake.state'), 'OR'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+      await next();
+      k.querySelectorAll('.tri-row select').forEach((x) => { setInput(x, x.closest('.tri-row').dataset.key === 'pregnant' ? 'na' : 'no'); });
+      put(T('intake.underTreatment'), 'no'); put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+      k.querySelector('.chip-select[data-key="acetaminophen"]').click();
+      await next();
+      Array.from(k.querySelectorAll('.kiosk-body select')).forEach((x, i) => setInput(x, i === 0 ? 'never' : 'no'));
+      k.querySelectorAll('.kiosk-body .highlight-field button')[3].click(); // Dental cleaning
+      await next();
+      const onConsent = stepIs('intake.s_consent');
+      const kHelp = k.querySelector('.kiosk-body').textContent;
+      log(onConsent && kHelp.includes(cf18.SIGN_HELP.en) && !/optional|leave blank/i.test(kHelp),
+        'v0.0.18 kiosk: the consent step no longer calls the signature optional — it says how to sign, including by typing the name');
+      const agreeK = k.querySelector('.big-check'); agreeK.checked = true; agreeK.dispatchEvent(new window.Event('change', { bubbles: true }));
+      k.querySelector('.deemed-field .chip-btn').click();
+      put(T('intake.signerName'), 'Unsigned Kioskeighteen');
+      await next();
+      log(stepIs('intake.s_consent') && lastToast18() === cf18.SIGN_REQUIRED.en,
+        'v0.0.18 kiosk: Next with no signature stays on the consent and says how to sign');
+      // "Type my name" is a signature — the way through on a laptop with no touch.
+      btn18(k.querySelector('.sigfield'), /^Type my name$/).click();
+      await next();
+      const onReview = stepIs('intake.s_review');
+      $all('.kiosk-nav button', k).pop().click();
+      await settle18(6);
+      k.remove();
+      i18n18.setLang('en');
+      const kP = db.listPatients({ eventId: 'all' }).find((x) => x.last_name === 'Kioskeighteen');
+      const kC = kP ? (db.getPatient(kP.id).consents || []).find((c) => c.type === 'general') : null;
+      log(onReview && !!kC && /^data:image\/png/.test(kC.signature_png || '') && kC.signature_method === 'type' && kC.version === 'mmw-general-en-v1'
+        && kP.consents_ok === true && kP.consents_missing.length === 0,
+        'v0.0.18 kiosk: a typed-name signature passes, is stored as typed, and Arrivals counts the consent signed');
+
+      // ---- 1b. The desk takes a consent the patient reached Arrivals without ----
+      currentUser = signInAdmin();
+      // The shape the old kiosk saved for a patient who left it blank: the
+      // consent row, with no signature. Spanish-speaking, for an extraction.
+      const dp = db.createPatient(currentUser, {
+        first_name: 'Rosa', last_name: 'Deskeighteen', dob: '1975-05-05', language: 'es',
+        demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
+        consents: [{ type: 'general', signer_name: 'Rosa Deskeighteen', signature_png: null, deemed_consent: 'yes', version: 'mmw-general-es-v1', language: 'es' }],
+      });
+      const dl0 = db.listPatients({}).find((x) => x.id === dp.id);
+      log(dl0 && dl0.consents_ok === false && JSON.stringify(dl0.consents_missing) === '["general","oral_surgery"]' && dl0.language === 'es',
+        'v0.0.18 desk: the list names which consents are still unsigned, and the patient\'s language');
+      db.createUser(currentUser, { username: 'desk18', full_name: 'Desk Eighteen', role: 'registration', password: 'x' });
+      await window.api.authLogin({ username: 'desk18', password: 'x' });
+      store18.setUser(currentUser);
+      const av = await view18('arrivals.js', 'renderArrivals');
+      btn18(av, /^Registered at the desk/).click();
+      await settle18(2);
+      setInput(av.querySelector('input[type="search"]'), 'Deskeighteen');
+      await settle18(2);
+      const rowOf = () => $all('.arrival-row', av).find((r) => /Deskeighteen, Rosa/.test(r.textContent));
+      let dRow = rowOf();
+      btn18(dRow, /They’re here/).click();
+      await settle18(6);
+      log(/general consent has not been signed/.test(ctxToasts18[ctxToasts18.length - 1] || '') && !db.getPatient(dp.id).arrived_at,
+        'v0.0.18 desk: "They\'re here" still refuses the unsigned consent');
+      dRow = rowOf();
+      log(!!dRow && /Consent missing/.test(dRow.textContent) && !!btn18(dRow, /^Sign consent$/),
+        'v0.0.18 desk: a row with a consent missing offers "Sign consent"');
+      btn18(dRow, /^Sign consent$/).click();
+      await settle18(2);
+      const ov = document.querySelector('.desk-consent-overlay');
+      const ovTxt = ov ? ov.textContent : '';
+      const esGen = st18.CATALOG.es.consent.generalTitle;
+      const esSurg = st18.CATALOG.es.consent.surgeryTitle;
+      log(!!ov && $all('.desk-consent', ov).length === 2 && ovTxt.includes(esGen) && ovTxt.includes(esSurg)
+        && ovTxt.includes(cf18.DEEMED_NOTICE.es) && ovTxt.includes(cf18.SIGN_HELP.es) && /Escribir mi nombre/.test(ovTxt)
+        && ov.querySelector('input.input').value === 'Rosa Deskeighteen',
+        'v0.0.18 desk: "Sign consent" shows both missing consents in the patient\'s language (Spanish), signer prefilled');
+      const nC = () => db.getPatient(dp.id).consents.length;
+      const before = nC();
+      const save = () => btn18(ov, /^Save signed consent$/).click();
+      save(); await settle18(4);
+      const tDeemed = lastToast18();
+      const [gB, sB] = $all('.desk-consent', ov);
+      gB.querySelector('.deemed-field .chip-btn').click();
+      [gB, sB].forEach((b) => { const a = b.querySelector('.big-check'); a.checked = true; a.dispatchEvent(new window.Event('change', { bubbles: true })); });
+      drawSig(gB);
+      save(); await settle18(4);
+      const tSign = lastToast18();
+      log(tDeemed === cf18.DEEMED_REQUIRED.es && tSign === cf18.SIGN_REQUIRED.es && document.body.contains(ov) && nC() === before,
+        'v0.0.18 desk: Save refuses an unanswered HIV notice and an unsigned consent, keeps the form open, and writes nothing');
+      btn18(sB.querySelector('.sigfield'), /^Escribir mi nombre$/).click();
+      save(); await settle18(10);
+      const dpA = db.getPatient(dp.id);
+      const gNew = dpA.consents.filter((c) => c.type === 'general' && c.signature_png);
+      const sNew = dpA.consents.find((c) => c.type === 'oral_surgery');
+      log(!document.body.contains(ov) && gNew.length === 1 && gNew[0].signature_method === 'draw' && gNew[0].deemed_consent === 'yes'
+        && gNew[0].language === 'es' && gNew[0].version === 'mmw-general-es-v1'
+        && !!sNew && sNew.signature_method === 'type' && /^data:image\/png/.test(sNew.signature_png) && sNew.version === 'oral_surgery-es-v2'
+        && !sNew.tooth_numbers && db.patientAudit(dp.id).some((a) => a.action === 'consent_add'),
+        'v0.0.18 desk: both consents are saved signed, in Spanish, with the kiosk\'s versions, and audited');
+      dRow = rowOf();
+      log(!!dRow && /Consents signed/.test(dRow.textContent) && !btn18(dRow, /^Sign consent$/),
+        'v0.0.18 desk: the row now reads "Consents signed" and the Sign consent button is gone');
+      btn18(dRow, /They’re here/).click();
+      await settle18(8);
+      log(!!db.getPatient(dp.id).arrived_at, 'v0.0.18 desk: and "They\'re here" sends the patient through');
+      av.remove();
+      // The channel itself: the desk adds a signature, nothing less, nothing more.
+      const dp2 = db.createPatient(signInAdmin(), { first_name: 'Ivo', last_name: 'Deskguard', demographics: {}, medical_history: {}, dental_history: {}, consents: [] });
+      const noSig = await window.api.consentAdd({ patientId: dp2.id, consent: { type: 'general', signer_name: 'Ivo', signature_png: '' } });
+      const fakeSig = await window.api.consentAdd({ patientId: dp2.id, consent: { type: 'general', signer_name: 'Ivo', signature_png: 'yes' } });
+      const teeth = await window.api.consentAdd({ patientId: dp2.id, consent: { type: 'oral_surgery', signer_name: 'Ivo', signature_png: 'data:image/png;base64,AAAA', tooth_numbers: '30' } });
+      log(!noSig.ok && !fakeSig.ok && /signature/.test(noSig.error) && !teeth.ok && /provider/.test(teeth.error) && db.getPatient(dp2.id).consents.length === 0,
+        'v0.0.18 desk: the desk cannot save a consent without a signature image, or with tooth numbers');
+      for (const role of ['emt', 'triage']) {
+        db.createUser(signInAdmin(), { username: 'c18_' + role, full_name: 'C18 ' + role, role, password: 'x' });
+      }
+      await window.api.authLogin({ username: 'c18_emt', password: 'x' });
+      const emtSig = await window.api.consentAdd({ patientId: dp2.id, consent: { type: 'general', signer_name: 'Ivo', signature_png: 'data:image/png;base64,AAAA' } });
+      await window.api.authLogin({ username: 'c18_triage', password: 'x' });
+      const triSig = await window.api.consentAdd({ patientId: dp2.id, consent: { type: 'oral_surgery', signer_name: 'Ivo', signature_png: 'data:image/png;base64,AAAA' } });
+      log(emtSig.ok && triSig.ok, 'v0.0.18 desk: every role that works Arrivals (registration, EMT, triage) can take the consent');
+
+      // ---- 2. The hygienist's "Transfer to Dental Triage" ----
+      currentUser = signInAdmin();
+      const hp18 = db.createPatient(currentUser, {
+        first_name: 'Theo', last_name: 'Transfereighteen', dob: '1970-07-07', demographics: {}, medical_history: {},
+        dental_history: { visit_type: 'cleaning' },
+        consents: [{ type: 'general', signer_name: 'Theo', signature_png: 'data:image/png;base64,AAAA' }],
+      });
+      db.saveVitals(currentUser, hp18.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+      db.routePatient(currentUser, hp18.id, 'hygienist');
+      db.createUser(currentUser, { username: 'hyg18', full_name: 'Hy Eighteen', role: 'hygienist', password: 'x' });
+      await window.api.authLogin({ username: 'hyg18', password: 'x' });
+      store18.setUser(currentUser);
+      const hq = await view18('hygienist.js', 'renderHygienist');
+      const inCleaningQ = /Transfereighteen/.test(hq.textContent);
+      hq.remove();
+      const hd = await view18('hygienist.js', 'renderHygienist', { id: hp18.id });
+      btn18(hd, /^Transfer to Dental Triage$/).click();
+      await settle18(2);
+      const conf = $all('.modal-overlay').pop();
+      btn18(conf, /^Transfer to Dental Triage$/).click();
+      await settle18(10);
+      const hpA = db.getPatient(hp18.id);
+      log(inCleaningQ && hpA.triage.route === 'dentist' && hpA.triage.status === 'ready' && hpA.status === 'triaged'
+        && lastToast18() === 'Patient transferred to Dental Triage' && !/permission/i.test(lastToast18())
+        && db.patientAudit(hp18.id).some((a) => a.action === 'route' && a.detail === 'dentist'),
+        'v0.0.18 hygienist: "Transfer to Dental Triage" sends the patient to Dental Triage (no permission error)');
+      log(db.listPatients({}).some((x) => x.id === hp18.id && x.route === 'dentist'),
+        'v0.0.18 hygienist: the transferred patient is in the Dental Triage queue');
+      hd.remove();
+    } finally {
+      $all('.modal-overlay').forEach((o) => o.remove());
+      currentUser = signed18; store18.setUser(signed18);
+      i18n18.setLang('en');
     }
   }
 
