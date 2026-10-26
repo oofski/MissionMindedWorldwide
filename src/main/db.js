@@ -2406,6 +2406,29 @@ function addPatientConsent(actor, patientId, consent) {
   return getPatient(patientId);
 }
 
+// Signing a finished visit that was completed to "sign later": the provider's
+// name and signature, and nothing else. A full chart save would move the
+// patient — a progress save puts them back in treatment, a completion back in
+// the check-out queue with a new completion time, and the hygienist's station
+// refuses any save once they are checked out — so signing later had no way to
+// happen. The visit, its completion and the patient's place stay as they are.
+function signTreatment(actor, patientId, { provider_name, provider_signature } = {}) {
+  const p = db.prepare('SELECT status FROM patients WHERE id = ?').get(patientId);
+  if (!p) throw new Error('There is no treatment record to sign.');
+  if (p.status !== 'completed' && p.status !== 'dismissed') throw new Error('Only a finished visit is signed this way — finish the visit from the chart.');
+  const t = db.prepare('SELECT * FROM treatments WHERE patient_id = ?').get(patientId);
+  if (!t) throw new Error('There is no treatment record to sign.');
+  if (t.locked) throw new Error('This record is signed off and locked.');
+  const name = String(provider_name || '').trim();
+  const sig = String(provider_signature || '');
+  if (!name) throw new Error('Enter the provider’s printed name — a treatment note has to say who provided the care.');
+  if (!/^data:image\//.test(sig)) throw new Error('Sign in the signature box first.');
+  db.prepare('UPDATE treatments SET provider_name = ?, provider_signature = ? WHERE patient_id = ?').run(name, sig, patientId);
+  db.prepare('UPDATE patients SET updated_at = ? WHERE id = ?').run(now(), patientId);
+  audit(actor, 'treatment_sign', 'patient', patientId, name);
+  return getPatient(patientId);
+}
+
 // Doctor adds tooth number(s) to an oral-surgery consent AFTER the patient signed.
 function updateConsentTeeth(actor, consentId, toothNumbers) {
   const c = db.prepare("SELECT * FROM consents WHERE id = ? AND type = 'oral_surgery'").get(consentId);
@@ -5396,7 +5419,7 @@ module.exports = {
   updatePatientSection, SECTION_ROLES, unlockRecord, lockRecord, assertNotLocked,
   findPatientByCode,
   listIncompletePatients, deleteIncompletePatients,
-  saveVitals, VITAL_LIMITS, routePatient, updateConsentTeeth, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,
+  saveVitals, VITAL_LIMITS, routePatient, updateConsentTeeth, signTreatment, addPatientConsent, dismissPatient, adminMovePatient, patientAudit, importPatientFromPortable,
   arrivalReadiness, confirmArrival, routeFromVisitType, visitNeedsSurgeryConsent,
   saveTriage, saveTreatment,
   addXray, updateXrayTooth, getXray, listXrays, deleteXray,

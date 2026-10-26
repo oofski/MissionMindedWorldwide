@@ -108,7 +108,7 @@ export function scanBox({ onFound, onName = null, label = 'Scan wristband', auto
   const input = el('input', {
     class: 'input scan-input',
     type: 'text',
-    inputmode: 'numeric',
+    // No numeric keypad: a name can be typed here too.
     placeholder: 'Scan band, type ID or name…',
     'aria-label': label,
   });
@@ -120,9 +120,15 @@ export function scanBox({ onFound, onName = null, label = 'Scan wristband', auto
     const hits = (await api.listPatients({})).filter((p) => nameMatches(p, text));
     if (!hits.length) { toast(`No patient named “${text}” in this clinic.`, 'error'); input.select(); return; }
     input.value = '';
-    if (hits.length === 1) { onFound(await api.getPatient(hits[0].id)); return; }
+    // A chart opens straight away only for the patient's whole name, typed
+    // exactly. A part of a name ("lee" for Ashlee Ruiz) is offered to pick
+    // from, with the birth date — opening the wrong chart at a clinical
+    // station is worse than one more tap.
+    const exact = (p) => `${p.first_name || ''} ${p.last_name || ''}`.toLowerCase().replace(/\s+/g, ' ').trim()
+      === text.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (hits.length === 1 && exact(hits[0])) { onFound(await api.getPatient(hits[0].id)); return; }
     picks.replaceChildren(
-      el('div', { class: 'scan-picks-head' }, [`${hits.length} patients match “${text}” — choose one:`]),
+      el('div', { class: 'scan-picks-head' }, [hits.length === 1 ? `1 patient matches “${text}” — is this them?` : `${hits.length} patients match “${text}” — choose one:`]),
       ...hits.slice(0, 12).map((p) => el('button', {
         class: 'scan-pick', type: 'button',
         onClick: async () => { hidePicks(); try { onFound(await api.getPatient(p.id)); } catch (e) { toast(e.message, 'error'); } },

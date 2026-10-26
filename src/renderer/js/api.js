@@ -50,6 +50,7 @@ export const api = {
   saveTreatment: (patientId, data, finalize) => call('treatmentSave', { patientId, data, finalize }),
   unlockRecord: (patientId, reason) => call('treatmentUnlock', { patientId, reason }),
   lockRecord: (patientId) => call('treatmentLock', { patientId }),
+  signTreatment: (patientId, { provider_name, provider_signature }) => call('treatmentSign', { patientId, provider_name, provider_signature }),
   saveVitals: (patientId, data) => call('vitalsSave', { patientId, data }),
   routePatient: (patientId, route) => call('patientsRoute', { patientId, route }),
   setConsentTeeth: (consentId, tooth_numbers) => call('consentSetTeeth', { consentId, tooth_numbers }),

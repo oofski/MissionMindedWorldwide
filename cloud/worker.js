@@ -748,7 +748,8 @@ function eventState(location) {
     const hit = up && US_STATE_LIST.find(([code, name]) => code === up || name.toUpperCase() === up);
     return hit ? hit[0] : '';
   };
-  const parts = String(location || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  // A ZIP code after the state ("Sandy, OR 97055") is not part of it.
+  const parts = String(location || '').split(/[,\n]/).map((x) => x.replace(/\s*\d{5}(?:-\d{4})?$/, '').trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
     const code = codeOf(parts[i]) || codeOf(parts[i].split(/\s+/).pop());
     if (code) return code;
@@ -877,6 +878,12 @@ const ORAL_SURGERY_CONSENT = [
 // online form's two languages: the general consent is v1, Spanish v2 (the full
 // MMW text, translated, since v0.0.20); the oral-surgery consent is English v1,
 // Spanish v3 (likewise).
+// One label carries two wordings in old records, and cannot be relabelled
+// after the fact: before v0.0.20 this form filed its own, older surgery text
+// as "oral_surgery-<lang>-v1" (and its general consent as
+// "general-oregon-<lang>-v1+covid"). Those rows are the ones signed online
+// (sync stamp "…@prereg-c2") before this release; every row since carries the
+// kiosk's wording under the kiosk's label.
 function consentVersion(type, lang) {
   if (type === 'general') return 'mmw-general-' + lang + '-' + (lang === 'es' ? 'v2' : 'v1');
   return lang === 'es' ? 'oral_surgery-es-v3' : 'oral_surgery-' + lang + '-v1';
@@ -1319,7 +1326,8 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
     // message names the question, as the walk-in form's refusal does.
     "var miss=missingHistory();" +
     // Every unanswered one-tap question is marked at once, and counted.
-    "var unans=[];document.querySelectorAll('.ynb').forEach(function(g){var y=g.closest('.yn');if(val(g.id)){y.classList.remove('miss');}else{y.classList.add('miss');unans.push(g.id);}});" +
+    // The consent's own Yes / No is asked with the consent, not counted here.
+    "var unans=[];document.querySelectorAll('.ynb').forEach(function(g){if(g.id==='deemed')return;var y=g.closest('.yn');if(val(g.id)){y.classList.remove('miss');}else{y.classList.add('miss');unans.push(g.id);}});" +
     "if(miss){var more=unans.length-(unans.indexOf(miss[1]||miss[0])>=0?1:0);err.textContent=T.errMedical.replace(/\\.$/,'')+': '+Q[miss[0]]+(more>0?T.moreMarked.replace('{n}',more):'');var e2=el(miss[1]||miss[0]);if(e2){e2.scrollIntoView({block:'center'});if(e2.focus)e2.focus();}return;}" +
     "if(!val('deemed')){err.textContent=T.errDeemed;var dq=el('deemed');dq.closest('.yn').classList.add('miss');dq.scrollIntoView({block:'center'});return;}" +
     "if(!el('cagree').checked){err.textContent=T.errConsent;return;}" +

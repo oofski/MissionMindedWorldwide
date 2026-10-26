@@ -132,7 +132,8 @@ export function normalizeState(v) {
 export function eventState(ev) {
   const loc = String((ev && ev.location) || '').trim();
   if (!loc) return '';
-  const parts = loc.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  // A ZIP code after the state ("Sandy, OR 97055") is not part of it.
+  const parts = loc.split(/[,\n]/).map((x) => x.replace(/\s*\d{5}(?:-\d{4})?$/, '').trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
     const code = normalizeState(parts[i]) || normalizeState(parts[i].split(/\s+/).pop());
     if (code) return code;

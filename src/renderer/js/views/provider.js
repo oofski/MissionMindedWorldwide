@@ -226,6 +226,7 @@ export function renderProvider(ctx, params = {}) {
         if (!cleanState.teeth) cleanState.teeth = [];
         if (!cleanState.teeth.includes(id)) { cleanState.teeth.push(id); renderCleanTeeth(); }
       }
+      paintAddLabels();
     }
     function removeAutoRows(id, keepTx) {
       [['filling', fillingRows], ['extraction', extractRows]].forEach(([tx, rows]) => {
@@ -337,7 +338,10 @@ export function renderProvider(ctx, params = {}) {
     let addExtractionBtn = null;
     function paintAddLabels() {
       if (!addFillingBtn || !addExtractionBtn) return;
-      const label = (btn, rowsEl, noun) => btn.replaceChildren(icon('plus', { size: 15 }), rowsEl.children.length ? `Add another ${noun}` : `Add ${noun}`);
+      // "another" once a row has a tooth — the empty row a new chart opens
+      // with is not yet a filling.
+      const label = (btn, rowsEl, noun) => btn.replaceChildren(icon('plus', { size: 15 }),
+        Array.from(rowsEl.children).some((r) => r._get && r._get().tooth) ? `Add another ${noun}` : `Add ${noun}`);
       label(addFillingBtn, fillingRows, 'filling');
       label(addExtractionBtn, extractRows, 'extraction');
     }
@@ -858,6 +862,46 @@ export function renderProvider(ctx, params = {}) {
       );
     }
 
+    /* ---------- The station's actions ---------- */
+    // A visit completed to "sign later" is signed here without saving the
+    // chart: a chart save would move the patient (back into treatment, or
+    // back into the check-out queue with a new completion time).
+    async function signVisit() {
+      const name = providerName.value.trim();
+      const sig = sigPad.getDataUrl();
+      if (!name) { toast('Enter the dentist’s printed name — a treatment note has to say who provided the care.', 'error'); providerName.focus(); return; }
+      if (!sig) { toast('Sign in the signature box under Provider sign-off first.', 'error'); if (sigPad.node.scrollIntoView) sigPad.node.scrollIntoView({ block: 'center' }); return; }
+      try {
+        await api.signTreatment(id, { provider_name: name, provider_signature: sig });
+        toast('Visit signed', 'success');
+        detail(id);
+      } catch (e) { toast(e.message, 'error'); }
+    }
+    function actionBar() {
+      const btn = (cls, ic, label, onClick) => el('button', { class: `btn ${cls}`, type: 'button', onClick }, [icon(ic, { size: 16 }), label]);
+      const finished = p.status === 'completed' || p.status === 'dismissed';
+      const unsigned = finished && !amending && !tx.provider_signature;
+      let kids;
+      if (amending) {
+        kids = [btn('btn--ghost', 'save', 'Save amendment', () => save(false)), btn('btn--primary', 'lock', 'Re-sign & lock', () => save('lock'))];
+      } else if (p.status === 'dismissed') {
+        // Checked out: nothing here may pull the patient back into the clinic.
+        kids = unsigned
+          ? [btn('btn--primary', 'pen', 'Sign the visit', signVisit)]
+          : [el('span', { class: 'subtle small' }, ['Checked out — this visit is finished. An administrator can unlock the record to correct it.'])];
+      } else if (unsigned) {
+        kids = [btn('btn--ghost', 'save', 'Save progress', () => save(false)), btn('btn--primary', 'pen', 'Sign the visit', signVisit)];
+      } else {
+        kids = [
+          btn('btn--ghost', 'save', 'Save progress', () => save(false)),
+          atTriage
+            ? btn('btn--primary', 'calendar', 'Move Patient to Treatment Waiting', () => save('waiting'))
+            : btn('btn--primary', 'checkCircle', 'Mark visit complete', () => save('complete')),
+        ];
+      }
+      return el('div', { class: 'chart-actions-bar' }, kids);
+    }
+
     /* ---------- Chairside consent capture ---------- */
     // Sometimes a patient wanted a filling but the dentist recommends an extraction,
     // so the oral-surgery consent wasn't signed at check-in. The dentist can have the
@@ -1046,9 +1090,11 @@ export function renderProvider(ctx, params = {}) {
         if (!x.tooth) return { msg: `Extraction ${i + 1}: enter the tooth #, or remove the row with ✕.`, input: ext[i]._tooth };
         // Finishing the visit prints the after-care, and a surgical extraction
         // has instructions of its own — so by then each one needs its type.
-        // (At Dental Triage, planning, it may not be known yet.)
-        if ((mode === 'complete' || mode === 'lock') && !x.types.length) {
-          return { msg: `Extraction #${x.tooth}: choose its type (Simple, Surgical…) — the after-care sheet depends on it.`, input: ext[i].querySelector('.chip-btn, button') };
+        // (At Dental Triage, planning, it may not be known yet; and an
+        // administrator correcting an older record is not made to invent a
+        // type that was never recorded.)
+        if ((mode === 'complete' || mode === 'lock') && !amending && !x.types.length) {
+          return { msg: `Extraction #${x.tooth}: choose its type (Simple, Surgical…) — the after-care sheet depends on it.`, input: ext[i].querySelector('.chip-btn') };
         }
       }
       const fil = Array.from(fillingRows.children);
@@ -1070,7 +1116,15 @@ export function renderProvider(ctx, params = {}) {
       const noTooth = rowWithoutTooth(mode);
       if (noTooth) {
         toast(noTooth.msg, 'error');
-        if (noTooth.input) { noTooth.input.classList.add('input--invalid'); noTooth.input.focus(); }
+        if (noTooth.input) {
+          // A tooth box is marked itself; a missing type marks its row.
+          if (noTooth.input.classList.contains('input')) noTooth.input.classList.add('input--invalid');
+          else {
+            const row = noTooth.input.closest('.ext-row');
+            if (row) { row.classList.add('is-missing'); row.addEventListener('click', () => row.classList.remove('is-missing'), { once: true }); }
+          }
+          noTooth.input.focus();
+        }
         return;
       }
       // Checked here so the dentist is told at once, rather than by a refusal
@@ -1105,6 +1159,7 @@ export function renderProvider(ctx, params = {}) {
       // visit is finished or locked; a mid-treatment progress save is not blocked.
       if ((mode === 'complete' || mode === 'lock') && !payload.provider_name) {
         toast('Enter the dentist’s printed name — a treatment note has to say who provided the care.', 'error');
+        if (providerName.scrollIntoView) providerName.scrollIntoView({ block: 'center' });
         providerName.focus();
         return;
       }
@@ -1114,7 +1169,7 @@ export function renderProvider(ctx, params = {}) {
       if (mode === 'complete' && !payload.provider_signature) {
         const ok = await modal({
           title: 'Complete without a signature?',
-          body: 'Nobody has signed this visit off. Go back and sign in Provider sign-off, or complete it now and sign later — check-out and the Dashboard will show it as not signed until someone does.',
+          body: 'Nobody has signed this visit off. Go back and sign under Provider sign-off, or complete it now and sign later — check-out and the Dashboard will show it as not signed until someone does.',
           confirmText: 'Complete — sign later', cancelText: 'Go back and sign',
         });
         if (!ok) { sigPad.node.scrollIntoView && sigPad.node.scrollIntoView({ block: 'center' }); return; }
@@ -1354,14 +1409,9 @@ export function renderProvider(ctx, params = {}) {
           : sigPad.node,
         locked
           ? exportButtons(ctx, id)
-          : amending
-            // Correcting a finished visit an administrator unlocked: save the
-            // correction (the patient stays where they are), then sign it off
-            // and lock it again.
-            ? el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
-                primaryBtn('lock', 'Re-sign & lock', () => save('lock')),
-                el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
-              ])
+          // Correcting a finished visit an administrator unlocked: its "Save
+          // amendment" and "Re-sign & lock" are in the bar at the foot.
+          : amending ? null
           : el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
               // Less-common actions tucked away so the screen isn't a wall of
               // buttons; the station's own actions are in the bar at the foot.
@@ -1371,6 +1421,10 @@ export function renderProvider(ctx, params = {}) {
                   // At Dental Triage, finishing the visit here (nothing that
                   // needs a treatment chair) is the exception, not the default.
                   atTriage ? el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark visit complete — no treatment chair needed']) : null,
+                  // Taken into a chair from Treatment Waiting and not treated
+                  // after all: back in the queue for a chair.
+                  p.status === 'in_treatment' && tr.treatment_waiting_at
+                    ? el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save('waiting') }, [icon('calendar', { size: 16 }), 'Move back to Treatment Waiting']) : null,
                   el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: transferToHygienist }, [icon('sparkle', { size: 16 }), 'Transfer to hygienist']),
                   el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Sign off & lock (make record read-only)']),
                   store.can('admin', 'doctor')
@@ -1388,17 +1442,7 @@ export function renderProvider(ctx, params = {}) {
       // next step is a treatment chair, so "Move to Treatment Waiting" leads
       // and completing the visit is under More options — it used to be the
       // most prominent button, and sent untreated patients to check-out.
-      locked ? null : el('div', { class: 'chart-actions-bar' }, amending
-        ? [
-            el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
-            el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Re-sign & lock']),
-          ]
-        : [
-            el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save progress']),
-            atTriage
-              ? el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('waiting') }, [icon('calendar', { size: 16 }), 'Move Patient to Treatment Waiting'])
-              : el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark visit complete']),
-          ]),
+      locked ? null : actionBar(),
     );
     refreshMarks();
   }
@@ -1487,7 +1531,6 @@ function legacyKeys(row, rebuilt) {
 function iconBtn(name, onClick) { return el('button', { class: 'btn btn--ghost btn--sm btn--icon', type: 'button', onClick }, [icon(name, { size: 15 })]); }
 function ghostBtn(name, label, onClick) { return el('button', { class: 'btn btn--ghost btn--sm', onClick }, [icon(name, { size: 15 }), label]); }
 function softBtn(name, label, onClick) { return el('button', { class: 'btn btn--soft btn--sm', type: 'button', onClick }, [icon(name, { size: 15 }), label]); }
-function primaryBtn(name, label, onClick) { return el('button', { class: 'btn btn--primary btn--block', onClick }, [icon(name, { size: 16 }), label]); }
 function backBtn(onClick) { return el('button', { class: 'btn btn--ghost btn--sm', onClick }, [icon('back', { size: 15 }), t('common.back')]); }
 function chevronBtn(label, onClick) { return el('button', { class: 'btn btn--primary btn--sm', onClick }, [label, icon('chevron', { size: 15 })]); }
 // "waiting 25m" / "waiting 1h 5m", from when the patient was parked.

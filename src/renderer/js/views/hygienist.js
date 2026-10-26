@@ -330,7 +330,22 @@ export function renderHygienist(ctx, params = {}) {
             el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Hygienist (printed name)']), hygName]),
             el('div', { style: 'margin-top:8px' }, [sigPad.node]),
             tx.completed_at ? el('p', { class: 'subtle small', style: 'margin-top:6px' }, [`Completed by ${p.completed_by_name || tx.provider_name || '—'} · ${fmtWhen(tx.completed_at)}`]) : null,
-            locked ? null : amending ? el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
+            // A cleaning completed to "sign later" is signed without a chart
+            // save, which would move the patient (or, once they are checked
+            // out, be refused): its signature and nothing else.
+            !locked && !amending && (p.status === 'completed' || p.status === 'dismissed') && !tx.provider_signature
+              ? el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
+                el('p', { class: 'subtle small' }, ['Completed without a signature — sign above, then:']),
+                el('button', { class: 'btn btn--primary btn--block', type: 'button', onClick: async () => {
+                  const name = hygName.value.trim();
+                  const sig = sigPad.getDataUrl();
+                  if (!name) { toast('Enter the hygienist’s printed name — a treatment note has to say who provided the care.', 'error'); hygName.focus(); return; }
+                  if (!sig) { toast('Sign in the box above first.', 'error'); return; }
+                  try { await api.signTreatment(id, { provider_name: name, provider_signature: sig }); toast('Cleaning signed', 'success'); detail(id); }
+                  catch (e) { toast(e.message, 'error'); }
+                } }, [icon('pen', { size: 16 }), 'Sign the cleaning']),
+              ])
+            : locked ? null : amending ? el('div', { class: 'action-stack', style: 'margin-top:10px' }, [
               // Correcting a finished visit: save the correction (the patient
               // stays where they are), then sign it off and lock it again.
               el('button', { class: 'btn btn--primary btn--block', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Re-sign & lock']),

@@ -95,6 +95,8 @@ const PERMS = {
   // administrator's, like every other override of the flow.
   'treatment:unlock': ['admin'],
   'treatment:lock': ['admin'],
+  // Signing a visit completed to "sign later" — the providers who complete one.
+  'treatment:sign': ['admin', 'doctor', 'hygienist'],
   'consent:setTeeth': ['admin', 'doctor'],
   // The desk's "Sign consent" for a patient who reached Arrivals unsigned;
   // db.addPatientConsent requires the signature and refuses tooth numbers for them.
@@ -700,6 +702,7 @@ function register(getMainWindow) {
     db.saveTreatment(currentUser, patientId, data, finalize));
   handle('treatment:unlock', ({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason));
   handle('treatment:lock', ({ patientId } = {}) => db.lockRecord(currentUser, patientId));
+  handle('treatment:sign', ({ patientId, provider_name, provider_signature } = {}) => db.signTreatment(currentUser, patientId, { provider_name, provider_signature }));
 
   /* ---- v1.0.6: vitals, consent teeth, dismissal, per-patient audit ---- */
   handle('vitals:save', ({ patientId, data }) => db.saveVitals(currentUser, patientId, data));

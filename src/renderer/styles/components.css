@@ -105,7 +105,7 @@
 .cond-none-row{ margin:6px 0 2px; }
 /* An unanswered question after Next: every one marked at once. */
 .tri-row.is-missing{ background:var(--danger-soft); box-shadow:inset 3px 0 0 var(--danger); padding-left:8px; }
-.field.is-missing, .agree-row.is-missing, .deemed-field.is-missing, .sigfield.is-missing, .span-2.is-missing{ outline:2px solid var(--danger-border); outline-offset:4px; border-radius:var(--radius-sm); }
+.ext-row.is-missing, .field.is-missing, .agree-row.is-missing, .deemed-field.is-missing, .sigfield.is-missing, .span-2.is-missing{ outline:2px solid var(--danger-border); outline-offset:4px; border-radius:var(--radius-sm); }
 .field.is-missing > .field-label{ color:var(--danger); }
 
 /* ===== Tables ===== */
@@ -331,6 +331,9 @@
 .lock-banner .btn{ flex:none; margin-left:auto; }
 .plain-list{ list-style:none; margin:4px 0 0; padding:0; display:flex; flex-direction:column; gap:3px; }
 .toast-host{ position:fixed; bottom:22px; right:22px; display:flex; flex-direction:column; gap:10px; z-index:1100; }
+/* A sticky action bar sits at the bottom of the chart and vitals pages: keep
+   messages above it so they never cover its buttons. */
+body:has(.chart-actions-bar) .toast-host, body:has(.next-step-bar) .toast-host{ bottom:104px; }
 .toast{ display:flex; align-items:center; gap:10px; background:var(--surface-inverse); color:#fff; padding:12px 16px; border-radius:var(--radius-sm); box-shadow:var(--shadow-md); opacity:0; transform:translateY(10px); transition:opacity var(--dur) var(--ease), transform var(--dur) var(--ease); max-width:380px; font-weight:var(--fw-medium); font-size:var(--fs-sm); border-left:3px solid var(--info); }
 .toast.show{ opacity:1; transform:translateY(0); }
 .toast--success{ border-left-color:var(--success); }

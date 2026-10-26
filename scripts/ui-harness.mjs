@@ -87,7 +87,7 @@ const PERMS = {
   // create channel itself is registered ungated there, and so is its mock.
   'patientsCreate': ['admin', 'doctor', 'triage', 'emt', 'registration'], 'patientsNewVisit': ['admin', 'doctor', 'triage', 'emt', 'registration'],
   'patientsUpdateSection': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist', 'checkout'],
-  'treatmentUnlock': ['admin'], 'treatmentLock': ['admin'],
+  'treatmentUnlock': ['admin'], 'treatmentLock': ['admin'], 'treatmentSign': ['admin', 'doctor', 'hygienist'],
   'patientsArrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'], 'patientsConfirmArrival': ['admin', 'registration', 'emt', 'triage'],
   'xrayFolderList': ['admin', 'doctor'], 'usbList': ['admin', 'doctor', 'triage', 'emt', 'checkout'],
   'reportExport': ['admin', 'doctor'], 'inventoryChairUsage': ['admin', 'doctor'],
@@ -164,6 +164,7 @@ window.api = {
   treatmentSave: okWrap(({ patientId, data, finalize }) => db.saveTreatment(currentUser, patientId, data, finalize), 'treatmentSave'),
   treatmentUnlock: okWrap(({ patientId, reason } = {}) => db.unlockRecord(currentUser, patientId, reason), 'treatmentUnlock'),
   treatmentLock: okWrap(({ patientId } = {}) => db.lockRecord(currentUser, patientId), 'treatmentLock'),
+  treatmentSign: okWrap(({ patientId, provider_name, provider_signature } = {}) => db.signTreatment(currentUser, patientId, { provider_name, provider_signature }), 'treatmentSign'),
   vitalsSave: okWrap(({ patientId, data }) => db.saveVitals(currentUser, patientId, data), 'vitalsSave'),
   patientsRoute: okWrap(({ patientId, route }) => db.routePatient(currentUser, patientId, route), 'patientsRoute'),
   consentSetTeeth: okWrap(({ consentId, tooth_numbers }) => db.updateConsentTeeth(currentUser, consentId, tooth_numbers), 'consentSetTeeth'),
@@ -3217,8 +3218,9 @@ async function main() {
     log(!fd.querySelector('#conditions select') && fd.querySelectorAll('#conditions .ynb').length === 25
       && fd.querySelectorAll('#cond_pregnant input').length === 4 && fd.querySelectorAll('#allergy_status input').length === 3
       && !fd.querySelector('#under_treatment').closest('.yn').classList.contains('miss')
-      && markedOnline === 25 + 3 + 8 + 1 && /\(and 36 more, marked in red\)/.test(firstRefusal),
-      'online form (real page): the history questions are one-tap rows, and a refused submit marks all 37 unanswered (the consent\'s Yes / No too) at once');
+      && markedOnline === 25 + 3 + 8 && /\(and 35 more, marked in red\)/.test(firstRefusal)
+      && !fd.getElementById('deemed').closest('.yn').classList.contains('miss'),
+      'online form (real page): the history questions are one-tap rows, and a refused submit marks all 36 unanswered history questions at once (not the consent\'s, asked with the consent)');
     fset('cond_diabetes', 'yes'); fset('cond_pregnant', 'na');
     const noneBtnO = fd.getElementById('condnone');
     const noneTxtO = noneBtnO.textContent;
@@ -11911,12 +11913,13 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         'v0.0.20 chart: at Dental Triage the bar leads with "Move Patient to Treatment Waiting"; completing the visit there is under More options, said for what it is');
       // Fillings: an empty row is filled before another; the finished one is named.
       const fillRows = () => $all('.filling-row', pv);
-      btn20(pv, /^Add another filling$/).click(); await settle20(2);
+      const freshLabel = !!btn20(pv, /^Add filling$/);
+      btn20(pv, /^Add filling$/).click(); await settle20(2);
       const emptyAsk = lastToast20();
       setInput(fillRows()[0].querySelector('input'), '19');
       fillRows()[0].querySelector('.surf-chip').click();
       btn20(pv, /^Add another filling$/).click(); await settle20(2);
-      log(/^Enter the tooth # for this filling first\.$/.test(emptyAsk) && fillRows().length === 2
+      log(freshLabel && /^Enter the tooth # for this filling first\.$/.test(emptyAsk) && fillRows().length === 2
         && /^Filling #19 M noted — enter the next one\. Save to keep them\.$/.test(lastToast20()),
         'v0.0.20 chart: "Add another filling" asks for the empty row\'s tooth first, then names the filling it noted');
       // The tooth chart: a procedure tapped in the popover tags the tooth and closes it.
@@ -11924,7 +11927,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       tooth3.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await settle20(2);
       const pop = pv.querySelector('.odo-pop');
       Array.from(pop.querySelectorAll('.odo-pop-opt')).find((b) => /Extraction/.test(b.textContent)).click(); await settle20(4);
-      log(!pv.querySelector('.odo-pop') && $all('.ext-row', pv).some((r) => r.querySelector('input').value === '3'),
+      log(!pv.querySelector('.odo-pop') && $all('.ext-row', pv).some((r) => r.querySelector('input').value === '3') && !!btn20(pv, /^Add another extraction$/),
         'v0.0.20 chart: tapping Extraction on a tooth tags it and closes the popover in one tap, adding the extraction row');
       pv.remove();
       const cp = mk20('Cal', 'Chairstage', { dental_history: { visit_type: 'filling' } }); vitals20(cp); db.routePatient(signInAdmin(), cp.id, 'dentist');
@@ -11983,6 +11986,78 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       const xsCard = $all('.crm-card', dash2).find((c) => /Chairstage, Cal/.test(c.textContent));
       log(!!xsCard && /Not signed/.test(xsCard.textContent), 'v0.0.20 Dashboard: an unsigned finished visit is flagged "Not signed"');
       dash2.remove();
+
+      // ---- Review round: signing later, the scan box, the state's ZIP ----
+      // A visit completed "sign later" is signed later — and nothing else
+      // changes: not where the patient is, not when the visit was completed.
+      const sl = mk20('Sid', 'Signlater', { dental_history: { visit_type: 'filling' } }); vitals20(sl); db.routePatient(signInAdmin(), sl.id, 'dentist');
+      db.saveTreatment(signInAdmin(), sl.id, { fillings: [{ tooth: '4', surfaces: ['O'] }] }, 'complete');
+      db.saveExitSurvey(signInAdmin(), sl.id, { declined: true, stage: 'exit' });
+      db.dismissPatient(signInAdmin(), sl.id);
+      const slBefore = db.getPatient(sl.id);
+      await asRole20('doctor');
+      pv = await view20('provider.js', 'renderProvider', { id: sl.id });
+      const slBar = barTxt(pv);
+      btn20(pv.querySelector('.chart-actions-bar'), /^Sign the visit$/).click(); await settle20(4);
+      const slAsk = lastToast20();
+      drawSig(pv);
+      btn20(pv.querySelector('.chart-actions-bar'), /^Sign the visit$/).click(); await settle20(10);
+      const slA = db.getPatient(sl.id);
+      log(JSON.stringify(slBar) === JSON.stringify(['Sign the visit']) && /^Sign in the signature box under Provider sign-off first\.$/.test(slAsk)
+        && slA.status === 'dismissed' && /^data:image/.test(slA.treatment.provider_signature || '') && slA.treatment.completed_at === slBefore.treatment.completed_at
+        && db.listPatients({}).find((x) => x.id === sl.id).unsigned === false && db.patientAudit(sl.id).some((a) => a.action === 'treatment_sign'),
+        'v0.0.20 chart: a checked-out visit completed "sign later" offers only "Sign the visit" — signing it keeps the patient checked out and the completion time as it was, and clears "Not signed"');
+      pv.remove();
+      let signErr = '';
+      try { db.signTreatment(signInAdmin(), cp.id, { provider_name: 'Dr X', provider_signature: '' }); } catch (e) { signErr = e.message; }
+      let signErr2 = '';
+      try { db.signTreatment(signInAdmin(), tp.id, { provider_name: 'Dr X', provider_signature: 'data:image/png;base64,AAAA' }); } catch (e) { signErr2 = e.message; }
+      await asRole20('checkout');
+      const coSign = await window.api.treatmentSign({ patientId: cp.id, provider_name: 'X', provider_signature: 'data:image/png;base64,AAAA' });
+      log(/Sign in the signature box first/.test(signErr) && /Only a finished visit is signed this way/.test(signErr2) && !coSign.ok && /permission/i.test(coSign.error),
+        'v0.0.20: signing later needs a signature, is only for a finished visit, and only for the providers');
+      // The hygienist signs a cleaning completed unsigned, even once the patient is checked out.
+      const hs = mk20('Hana', 'Signcleaning'); vitals20(hs); db.routePatient(signInAdmin(), hs.id, 'hygienist');
+      db.saveTreatment(signInAdmin(), hs.id, { cleaning: { adult_prophy: true } }, 'cleaning_complete');
+      db.saveExitSurvey(signInAdmin(), hs.id, { declined: true, stage: 'exit' });
+      db.dismissPatient(signInAdmin(), hs.id);
+      await asRole20('hygienist');
+      const hv = await view20('hygienist.js', 'renderHygienist', { id: hs.id });
+      drawSig(hv);
+      const signClean = btn20(hv, /^Sign the cleaning$/);
+      if (signClean) signClean.click(); await settle20(10);
+      const hsA = db.getPatient(hs.id);
+      log(!!signClean && hsA.status === 'dismissed' && /^data:image/.test(hsA.treatment.provider_signature || ''),
+        'v0.0.20 hygienist: a cleaning completed unsigned is signed later with "Sign the cleaning", the patient left checked out');
+      hv.remove();
+      // In a chair after Treatment Waiting, and not treated after all: back to the queue.
+      const bw = mk20('Bo', 'Backtowait', { dental_history: { visit_type: 'filling' } }); vitals20(bw); db.routePatient(signInAdmin(), bw.id, 'dentist');
+      db.saveTreatment(signInAdmin(), bw.id, { fillings: [{ tooth: '5', surfaces: ['O'] }] }, 'waiting');
+      db.saveTreatment(signInAdmin(), bw.id, { fillings: [{ tooth: '5', surfaces: ['O'] }] }, false);
+      await asRole20('doctor');
+      pv = await view20('provider.js', 'renderProvider', { id: bw.id });
+      const backBtn = btn20(pv, /^Move back to Treatment Waiting$/);
+      if (backBtn) backBtn.click(); await settle20(10);
+      log(!!backBtn && db.getPatient(bw.id).status === 'treatment_waiting',
+        'v0.0.20 chart: a patient taken into a chair from Treatment Waiting can be moved back to it');
+      pv.remove();
+      // A part of a name is offered to pick from; only the whole name opens a chart.
+      await asRole20('emt');
+      mk20('Ashlee', 'Ruizveinte');
+      ev = await view20('emt.js', 'renderEmt');
+      await scanType(ev, 'lee');
+      const partial = ev.querySelector('.scan-picks') && ev.querySelector('.scan-picks').style.display !== 'none'
+        && /1 patient matches “lee” — is this them\?/.test(ev.textContent) && !btn20(ev, /^Save vitals$/);
+      ev.remove();
+      ev = await view20('emt.js', 'renderEmt');
+      await scanType(ev, 'ashlee  ruizveinte');
+      log(partial && /Ashlee Ruizveinte/.test(ev.querySelector('h1').textContent),
+        'v0.0.20 stations: part of a name is offered to pick from, with the birth date; only the whole name opens the chart directly');
+      ev.remove();
+      const IS20 = await import('../src/renderer/js/components/intakeSections.js');
+      log(IS20.eventState({ location: 'Sandy, OR 97055' }) === 'OR' && IS20.eventState({ location: 'Lowell, Oregon 97452-1234' }) === 'OR'
+        && IS20.eventState({ location: 'Boring' }) === '',
+        'v0.0.20: the event\'s state is read past a ZIP code ("Sandy, OR 97055"), and a location with no state gives none');
     } finally {
       $all('.modal-overlay, .survey-overlay').forEach((o) => o.remove());
       if (prevEv20) db.setActiveEvent(signInAdmin(), prevEv20.id);
