@@ -461,7 +461,9 @@ async function main() {
   // major surgery, "Do you smoke?" — and Step 3 is his eight questions.
   const NO_CONDITIONS = Object.fromEntries(INTAKE_CONDITIONS.map((k) => [k, k === 'pregnant' ? 'na' : 'no']));
   const REQ = {
-    form_version: 2,
+    form_version: 3,
+    // The MMW consent's HIV / Hepatitis Yes or No (v0.0.20), as at the kiosk.
+    deemed_consent: 'yes',
     // Required online since v0.0.15, as it always was at the kiosk.
     phone: '5550002222',
     emergency_name: 'Kin Contact', emergency_phone: '5550001111',
@@ -559,7 +561,13 @@ async function main() {
   const gConsent = Array.from(env.DB._store.values()).find((r) => r.entity === 'consent' && r.patient_uid === stored.uid && JSON.parse(r.data).type === 'general');
   const gc = gConsent ? JSON.parse(gConsent.data) : null;
   check('a SIGNED general consent is filed with the patient (routes into the chart)',
-    !!gc && gc.type === 'general' && gc.signer_name === 'Pre Reg' && gc.relationship === 'Self' && typeof gc.signature_png === 'string' && /^general-oregon-es/.test(gc.version) && gConsent.event_uid === 'evt-1');
+    !!gc && gc.type === 'general' && gc.signer_name === 'Pre Reg' && gc.relationship === 'Self' && typeof gc.signature_png === 'string' && gc.version === 'mmw-general-es-v2' && gc.deemed_consent === 'yes' && gConsent.event_uid === 'evt-1');
+
+  // The MMW consent's HIV / Hepatitis Yes or No is required, as at the kiosk (v0.0.20).
+  const noDeemed = await call(env, 'POST', '/checkin/evt-1', { body: { ...REQ, deemed_consent: '', first_name: 'No', last_name: 'Deemed', dob: '1990-01-01', gender: 'male', city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'No Deemed', signature_png: 'data:image/png;base64,AAAA' } });
+  const noDeemedEs = await call(env, 'POST', '/checkin/evt-1', { body: { ...REQ, deemed_consent: 'maybe', language: 'es', first_name: 'Sin', last_name: 'Aviso', dob: '1990-01-01', gender: 'male', city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'Sin Aviso', signature_png: 'data:image/png;base64,AAAA' } });
+  check('the HIV / Hepatitis Yes or No is required online, as at the kiosk — refused by name, in the patient\'s language',
+    noDeemed.status === 400 && /HIV \/ Hepatitis notice/.test(noDeemed.data.error) && noDeemedEs.status === 400 && /VIH \/ Hepatitis/.test(noDeemedEs.data.error));
 
   // Birthdate and gender are REQUIRED (Sandy Oregon clinic request).
   const noDob = await call(env, 'POST', '/checkin/evt-1', { body: { ...REQ, ...REQ, first_name: 'No', last_name: 'Dob', gender: 'male', visit_type: 'cleaning', consent_agree: true } });
@@ -642,7 +650,8 @@ async function main() {
   check('the pre-registration form carries the full check-in options + consent to sign',
     /Azithromycin \/ Erythromycin \/ Clarithromycin/.test(fullForm.text) && /Osteoporosis \/ Bone Disease/.test(fullForm.text) && /Sleep Apnea/.test(fullForm.text) &&
     /Warfarin \(Coumadin\)/.test(fullForm.text) && /name="surgery_site" value="knee"/.test(fullForm.text) &&
-    /Hold Harmless/.test(fullForm.text) && /Consent for Oral Surgery/.test(fullForm.text) && /id="gsig"/.test(fullForm.text));
+    /PATIENT WAIVER/.test(fullForm.text) && /NOTICE OF DEEMED CONSENT FOR HIV/.test(fullForm.text) && /Consent for Oral Surgery/.test(fullForm.text)
+    && /Leave a message for Vinh Trinh/.test(fullForm.text) && /<div class="ynb" id="deemed" role="radiogroup">/.test(fullForm.text) && /id="gsig"/.test(fullForm.text));
   check('the 25 conditions are each a row of one-tap answers with a namespaced id (kidney and liver are surgery sites too)',
     (fullForm.text.match(/<div class="ynb" id="cond_[a-z_]+" role="radiogroup">/g) || []).length === 25 && !/<select id="cond_/.test(fullForm.text)
     && !/id="kidney"|id="liver"/.test(fullForm.text));
@@ -748,7 +757,8 @@ async function main() {
   check('the Spanish form offers "No aplica" on the pregnancy question',
     /value="na"><span>No aplica<\/span>/.test(esForm.text));
   check('the Spanish form carries the Spanish consent + agree text',
-    esForm.text.includes('Consentimiento General para Tratamiento Dental') &&
+    esForm.text.includes('Solicitud del Paciente y Consentimiento para Atención Médica') &&
+    esForm.text.includes('AVISO DE CONSENTIMIENTO PRESUNTO PARA LAS PRUEBAS DE VIH') && esForm.text.includes('Consentimiento para Cirugía Oral') &&
     esForm.text.includes('He leído y entiendo lo anterior, y doy mi consentimiento.'));
   check('the Spanish form links back to English',
     /\?lang=en/.test(esForm.text) && esForm.text.includes('English'));
@@ -880,7 +890,7 @@ async function main() {
     const f = await getText('/checkin/evt-1');
     check('the form marks the phone number required and blocks submit without one',
       /Phone number <span class="req">\*<\/span><\/label><input type="tel" id="phone"/.test(f.text) && f.text.includes('T.errPhone'));
-    check('the page says which form it is, from the one constant the server checks', f.text.includes('var payload={form_version:2,'));
+    check('the page says which form it is, from the one constant the server checks', f.text.includes('var payload={form_version:3,'));
     check('the form marks the emergency contact required',
       /id="emergency_name"/.test(f.text) && /Emergency contact name <span class="req">\*<\/span>/.test(f.text) &&
       f.text.includes("if(!val('emergency_name')"));
@@ -905,7 +915,7 @@ async function main() {
     check('... in Spanish too', oldPageEs.status === 400 && /cargar la página/i.test(oldPageEs.data.error));
     // From v0.0.15 a page says which form it is; one that is not this form is
     // told to reload however complete its answers look.
-    const otherForm = await post({ ...full, first_name: 'Other', last_name: 'Version', form_version: 3 });
+    const otherForm = await post({ ...full, first_name: 'Other', last_name: 'Version', form_version: 4 });
     check('a page that says it is a different form is told to reload the page',
       otherForm.status === 400 && /reload the page/i.test(otherForm.data.error));
   }

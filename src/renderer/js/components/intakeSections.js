@@ -125,6 +125,48 @@ export function normalizeState(v) {
   return byName ? byName[0] : '';
 }
 
+// The state an event is held in, from its location ("Sandy, OR", "Lowell,
+// Oregon"), as a code, or ''. Nearly every patient lives in it, so a new
+// check-in starts there rather than at the top of a 56-entry list — where a
+// tap that missed left "Alabama" on the record.
+export function eventState(ev) {
+  const loc = String((ev && ev.location) || '').trim();
+  if (!loc) return '';
+  const parts = loc.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const code = normalizeState(parts[i]) || normalizeState(parts[i].split(/\s+/).pop());
+    if (code) return code;
+  }
+  return '';
+}
+
+// Every gap on a step at once: each marked in red, the first named in the
+// toast with how many more there are, and brought into view. A patient used
+// to learn of them one Next tap at a time. `gaps` is [{ msg, node }] in the
+// order the step asks them; returns false when there were any.
+export function refuseGaps(root, gaps) {
+  root.querySelectorAll('.is-missing').forEach((n) => n.classList.remove('is-missing'));
+  if (!gaps.length) return true;
+  gaps.forEach((g) => g.node && g.node.classList.add('is-missing'));
+  const more = gaps.length - 1;
+  // "…notice." + " — and 3 more" would read ". —": the sentence's own full
+  // stop gives way to the count.
+  toast((more ? gaps[0].msg.replace(/\.$/, '') : gaps[0].msg) + (more ? L({
+    en: ` — and ${more} more, marked in red`,
+    es: ` — y ${more} más, marcadas en rojo`,
+    ru: ` — и ещё ${more}, отмечены красным`,
+  }) : ''), 'error');
+  if (gaps[0].node && gaps[0].node.scrollIntoView) gaps[0].node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  return false;
+}
+// An answer given clears its own mark at once, not only on the next Next.
+export function clearMarksOnAnswer(root) {
+  const clear = (e) => { const f = e.target.closest && e.target.closest('.is-missing'); if (f) f.classList.remove('is-missing'); };
+  root.addEventListener('change', clear);
+  root.addEventListener('input', clear);
+  root.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('button')) clear(e); });
+}
+
 /**
  * Demographics. `initial` is patient-shaped: { first_name, last_name, dob,
  * gender, phone, email, demographics: {...} }. `cities` is the event's list;
@@ -134,7 +176,7 @@ export function normalizeState(v) {
  * and does not demand them — they cannot be answered here, and a missing one
  * must not hold up a phone-number fix.
  */
-export function demographicsSection(initial = {}, { staff = false, cities = [], lockIdentity = false } = {}) {
+export function demographicsSection(initial = {}, { staff = false, cities = [], lockIdentity = false, defaultState = '' } = {}) {
   const base = initial || {};
   const d = base.demographics || {};
   const first = textField(t('intake.firstName'), { value: base.first_name, required: !lockIdentity });
@@ -184,10 +226,14 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
   // A dropdown, not a text box: "OR", "Oregon" and "ore" were landing in the
   // city/state report as three different places. An old answer that cannot be
   // matched to a state unambiguously is shown as recorded rather than hidden.
+  // `defaultState` (the event's) is listed first and, for a new check-in
+  // with no state yet, chosen — a staff edit starts from what the record says.
+  const homeState = normalizeState(defaultState);
+  const stateRows = US_STATES.map(([code, name]) => ({ value: code, label: `${name} (${code})` }));
   const stateF = recordedSelect(
     t('intake.state'),
-    [dash, ...US_STATES.map(([code, name]) => ({ value: code, label: `${name} (${code})` }))],
-    normalizeState(d.state) || d.state, { required: true },
+    [dash, ...stateRows.filter((o) => o.value === homeState), ...stateRows.filter((o) => o.value !== homeState)],
+    normalizeState(d.state) || d.state || (staff ? '' : homeState), { required: true },
   );
   const mailing = textField(t('intake.mailing'), { value: d.mailing_address });
   const marital = recordedSelect(t('intake.marital'), [
@@ -316,6 +362,7 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
     },
   });
   const baseline = JSON.stringify(peek());
+  clearMarksOnAnswer(node);
 
   return {
     node,
@@ -324,19 +371,24 @@ export function demographicsSection(initial = {}, { staff = false, cities = [], 
     collect: () => {
       const out = peek();
       const dm = out.demographics;
+      const gaps = [];
       if (!lockIdentity) {
-        if (!out.first_name || !out.last_name) { toast(req() + t('intake.firstName') + ' / ' + t('intake.lastName'), 'error'); return false; }
-        if (!out.dob) { toast(req() + t('intake.dob'), 'error'); return false; }
-        if (!out.gender) { toast(req() + t('intake.gender'), 'error'); return false; }
+        if (!out.first_name || !out.last_name) {
+          gaps.push({ msg: req() + t('intake.firstName') + ' / ' + t('intake.lastName'), node: !out.first_name ? first.node : last.node });
+          if (!out.first_name && !out.last_name) gaps.push({ msg: '', node: last.node });
+        }
+        if (!out.dob) gaps.push({ msg: req() + t('intake.dob'), node: dob.node });
+        if (!out.gender) gaps.push({ msg: req() + t('intake.gender'), node: gender.node });
       }
-      if (cityOther && city.get() === 'other' && !cityOther.get()) { toast(req() + t('intake.cityOther'), 'error'); return false; }
-      if (!dm.city) { toast(req() + t('intake.city'), 'error'); return false; }
-      if (!dm.state) { toast(req() + t('intake.state'), 'error'); return false; }
-      if (!out.phone) { toast(req() + t('intake.phone'), 'error'); return false; }
-      if (!dm.emergency_name) { toast(req() + t('intake.emergencyName'), 'error'); return false; }
-      if (!dm.emergency_phone) { toast(req() + t('intake.emergencyPhone'), 'error'); return false; }
-      if (!dm.services.length) { toast(L({ en: 'Please choose at least one service.', es: 'Elija al menos un servicio.', ru: 'Выберите хотя бы одну услугу.' }), 'error'); return false; }
-      return out;
+      // In the order the online form asks them, so the two refuse alike.
+      if (cityOther && city.get() === 'other' && !cityOther.get()) gaps.push({ msg: req() + t('intake.cityOther'), node: cityOther.node });
+      else if (!dm.city) gaps.push({ msg: req() + t('intake.city'), node: city.node });
+      if (!dm.state) gaps.push({ msg: req() + t('intake.state'), node: stateF.node });
+      if (!out.phone) gaps.push({ msg: req() + t('intake.phone'), node: phone.node });
+      if (!dm.emergency_name) gaps.push({ msg: req() + t('intake.emergencyName'), node: emName.node });
+      if (!dm.emergency_phone) gaps.push({ msg: req() + t('intake.emergencyPhone'), node: emPhone.node });
+      if (!dm.services.length) gaps.push({ msg: L({ en: 'Please choose at least one service.', es: 'Elija al menos un servicio.', ru: 'Выберите хотя бы одну услугу.' }), node: servicesField });
+      return refuseGaps(node, gaps) ? out : false;
     },
   };
 }

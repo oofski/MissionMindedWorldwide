@@ -64,7 +64,7 @@ export function renderRecords(ctx, params = {}) {
         el('td', {}, [p.dob || '—']),
         el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
         el('td', { class: 'subtle small' }, [p.event_name || '—']),
-        el('td', {}, [statusPill(p.status)]),
+        el('td', {}, [statusPill(p.status, p)]),
         el('td', {}, [el('button', { class: 'btn btn--ghost btn--sm', onClick: () => detail(p.id) }, ['Open'])]),
       ])));
     }
@@ -161,7 +161,7 @@ export function renderRecords(ctx, params = {}) {
           el('h1', {}, [`${p.first_name} ${p.last_name}`]),
           el('p', { class: 'view-sub' }, [`${p.event ? p.event.name : ''} · ${languageLabel(p.language)}`]),
         ]),
-        statusPill(p.status),
+        statusPill(p.status, p),
       ]),
       incompleteBanner(p, {
         isAdmin: store.is('admin'),

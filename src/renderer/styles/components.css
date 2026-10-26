@@ -105,7 +105,7 @@
 .cond-none-row{ margin:6px 0 2px; }
 /* An unanswered question after Next: every one marked at once. */
 .tri-row.is-missing{ background:var(--danger-soft); box-shadow:inset 3px 0 0 var(--danger); padding-left:8px; }
-.field.is-missing{ outline:2px solid var(--danger-border); outline-offset:4px; border-radius:var(--radius-sm); }
+.field.is-missing, .agree-row.is-missing, .deemed-field.is-missing, .sigfield.is-missing, .span-2.is-missing{ outline:2px solid var(--danger-border); outline-offset:4px; border-radius:var(--radius-sm); }
 .field.is-missing > .field-label{ color:var(--danger); }
 
 /* ===== Tables ===== */
@@ -464,6 +464,7 @@
 .crm-chip--warn{ color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent); font-weight:var(--fw-semibold); }
 .crm-chip--prereg{ color:var(--info); background:color-mix(in srgb, var(--info) 14%, transparent); font-weight:var(--fw-semibold); }
 .crm-chip--left{ color:var(--success,#2f8f66); background:color-mix(in srgb, var(--success,#2f8f66) 16%, transparent); font-weight:var(--fw-semibold); }
+.crm-chip--wait{ color:var(--info); background:color-mix(in srgb, var(--info) 13%, transparent); font-weight:var(--fw-semibold); }
 .crm-chip--stage{ color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent); }
 
 /* Returning-patient lookup */
@@ -678,6 +679,16 @@
   box-shadow:var(--shadow-sm); max-width:420px;
 }
 .scan-box:focus-within{ box-shadow:var(--focus-ring); }
+/* Vitals: the next step stays at the foot of the screen while the EMT scrolls. */
+.chart-actions-bar{ position:sticky; bottom:0; z-index:5; display:flex; justify-content:flex-end; align-items:center; gap:var(--space-3); flex-wrap:wrap;
+  margin-top:var(--space-4); padding:12px 16px; background:var(--surface-raised); border:var(--border-line); border-radius:var(--radius-lg); box-shadow:0 -6px 18px rgba(16,24,32,.10); }
+.next-step-bar{ position:sticky; bottom:0; z-index:5; box-shadow:0 -6px 18px rgba(16,24,32,.10); }
+/* The review button wraps inside its card rather than running past its edge. */
+.history-review .btn{ white-space:normal; height:auto; min-height:var(--row-height-sm); text-align:left; max-width:100%; }
+.scan-picks{ margin-top:8px; border:var(--border-line); border-radius:var(--radius-md); background:var(--surface-raised); padding:6px; display:flex; flex-direction:column; gap:2px; }
+.scan-picks-head{ font-size:var(--fs-sm); color:var(--text-muted); padding:4px 8px 6px; }
+.scan-pick{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; text-align:left; padding:9px 10px; border:0; border-radius:var(--radius-sm); background:transparent; cursor:pointer; font:inherit; color:var(--text); }
+.scan-pick:hover, .scan-pick:focus-visible{ background:var(--surface-hover); outline:none; }
 .scan-icon{ display:flex; color:var(--cyan-deep); flex:none; }
 .scan-input{
   border:none; outline:none; background:transparent; flex:1; min-width:0;

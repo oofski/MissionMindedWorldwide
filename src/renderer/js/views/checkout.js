@@ -69,7 +69,7 @@ export function renderCheckout(ctx, params = {}) {
           if (needsSurvey) { const r = await takeSurvey(p); if (!r) return; }
           await dismiss(p);
         },
-      }, [icon(needsSurvey ? 'clipboard' : 'checkCircle', { size: 15 }), needsSurvey ? 'Survey' : 'Check out']);
+      }, [icon(needsSurvey ? 'clipboard' : 'checkCircle', { size: 15 }), needsSurvey ? 'Exit survey' : 'Check out']);
       return el('tr', { class: isDone ? 'row--done' : '', style: 'cursor:pointer', onClick: () => detail(p.id) }, [
         el('td', {}, [
           isDone ? el('span', { class: 'tick-done', title: 'Checked out' }, [icon('checkCircle', { size: 16 })]) : null,
@@ -77,14 +77,15 @@ export function renderCheckout(ctx, params = {}) {
         ]),
         el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
         el('td', {}, [p.complaint || '—']),
-        el('td', {}, [statusPill(p.status),
+        el('td', {}, [statusPill(p.status, p),
+          p.unsigned ? el('span', { class: 'pill pill--warning', style: 'margin-left:6px', title: 'Completed without the provider\'s signature' }, [el('span', { class: 'pill-dot' }), 'Not signed']) : null,
           // Green "Left" tag once the patient has actually been checked out.
           isDone && p.left_early_reason
             ? el('span', { class: 'pill pill--warning', style: 'margin-left:6px', title: `Checked out before the visit was finished — ${p.left_early_reason}` }, [el('span', { class: 'pill-dot' }), 'Left early'])
             : isDone ? el('span', { class: 'pill pill--success', style: 'margin-left:6px', title: 'Checked out — the patient has left' }, [el('span', { class: 'pill-dot' }), 'Left']) : null]),
         el('td', {}, [el('div', { class: 'inline-row', style: 'margin:0; justify-content:flex-end' }, [
           isDone ? null : tickBtn,
-          el('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); detail(p.id); } }, ['Review', icon('chevron', { size: 15 })]),
+          el('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); detail(p.id); } }, ['Open', icon('chevron', { size: 15 })]),
         ])]),
       ]);
     };
@@ -190,7 +191,7 @@ export function renderCheckout(ctx, params = {}) {
           el('h1', {}, [`${p.first_name} ${p.last_name}`]),
           el('p', { class: 'view-sub' }, [p.event ? p.event.name : '']),
         ]),
-        statusPill(p.status),
+        statusPill(p.status, p),
       ]),
       el('div', { class: 'split' }, [
         el('div', { class: 'col col--wide' }, [
@@ -209,7 +210,8 @@ export function renderCheckout(ctx, params = {}) {
               kv('Completed by', p.completed_by_name), kv('Dental notes', tx.clinical_notes ? 'Present' : '—'),
             ]),
             tx.clinical_notes ? el('div', { class: 'box', style: 'margin-top:8px' }, [el('span', { class: 'field-label' }, ['Dental notes']), el('p', {}, [tx.clinical_notes])]) : null,
-            tx.provider_signature ? el('img', { class: 'sig-locked', src: tx.provider_signature }) : null,
+            tx.provider_signature ? el('img', { class: 'sig-locked', src: tx.provider_signature })
+              : visitComplete ? el('div', { class: 'pill pill--warning', style: 'margin-top:8px' }, [el('span', { class: 'pill-dot' }), 'Not signed by the provider yet — completed to sign later']) : null,
           ]),
           ...recordPanels(p, id),
         ]),
@@ -225,7 +227,7 @@ export function renderCheckout(ctx, params = {}) {
                 el('button', {
                   class: 'btn btn--block ' + (surveyDone ? 'btn--ghost' : 'btn--primary'),
                   onClick: () => takeSurvey(p),
-                }, [icon('clipboard', { size: 16 }), surveyDone ? 'Review or change answers' : 'Hand tablet to patient']),
+                }, [icon('clipboard', { size: 16 }), surveyDone ? 'Exit survey — review or change answers' : 'Exit survey — hand the tablet to the patient']),
                 // The count comes from the survey itself, so this line cannot
                 // go stale again the way "12 questions" did when the survey
                 // moved back to check-out in one piece.
@@ -289,7 +291,8 @@ export function renderCheckout(ctx, params = {}) {
       note.textContent = [
         stageNote(p, ac),
         ac.fellBack ? `Prints in English: there is no ${langName(ac.requested)} version yet.` : ac.lang !== 'en' ? `Prints in ${langName(ac.lang)}, the patient’s language.` : '',
-        ac.status === 'draft' ? `Draft wording (${ac.version}) until MMW’s own templates replace it.` : '',
+        // Which template version printed is for the record (it is on the
+        // sheet's footer and in the export), not for the desk.
       ].filter(Boolean).join(' ');
       englishBtn.style.display = ac.lang !== 'en' ? '' : 'none';
       return ac;
@@ -467,9 +470,9 @@ export function renderCheckout(ctx, params = {}) {
     const again = () => detail(id);
     const lockCtl = p.lock && (p.lock.locked || p.lock.amending) ? null : adminLockButtons(p, { onChanged: again });
     return [
-      lockBanner(p, { onChanged: again }),
+      lockBanner(p, { onChanged: again, brief: true }),
       lockCtl ? el('div', { class: 'inline-row', style: 'margin-bottom:var(--space-4)' }, [lockCtl]) : null,
-      patientInfoPanel(p, { title: 'Patient information & history' }),
+      patientInfoPanel(p, { title: 'Patient information & history', hideEmpty: true }),
     ].filter(Boolean);
   }
 

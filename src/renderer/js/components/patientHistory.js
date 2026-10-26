@@ -45,9 +45,11 @@ const SERVICE_LABELS = { dental: 'Dental', medical: 'Medical', vision: 'Vision' 
 const listText = (arr, label) => (Array.isArray(arr) ? arr.filter(Boolean).map(label).join(', ') : '');
 
 /** The "Patient information" rows, shared by every screen that shows them. */
-export function demographicsRows(p) {
+// `hideEmpty` leaves out the rows with nothing in them (check-out, where a
+// column of "—" pushed the after-care and check-out controls down the page).
+export function demographicsRows(p, { hideEmpty = false } = {}) {
   const d = p.demographics || {};
-  return [
+  const rows = [
     kv('Date of birth', p.dob), kv('Age', p.age != null ? p.age : '—'),
     kv('Gender', genderLabel(p.gender)), kv('Marital status', maritalLabel(d.marital_status)),
     kv('Phone', p.phone), kv('Email', p.email),
@@ -61,6 +63,7 @@ export function demographicsRows(p) {
     // The band's number, so a torn band can be matched to the record by eye.
     kv('Wristband ID', p.patient_code),
   ];
+  return hideEmpty ? rows.filter((r) => r.querySelector('.kv-val').textContent !== '—') : rows;
 }
 
 /**
@@ -252,7 +255,7 @@ export function historyReviewText(p) {
 //                 a "Reviewed with patient — no changes" button
 //   medicalExtras nodes a screen adds to the medical card (Records: vitals and
 //                 the blood-thinner line)
-export function patientHistoryCards(p, priorVisits = [], { editable = null, onEdit = null, review = null, medicalExtras = [] } = {}) {
+export function patientHistoryCards(p, priorVisits = [], { editable = null, onEdit = null, review = null, medicalExtras = [], hideEmpty = false } = {}) {
   const editBtn = (section) => {
     const mode = editable && editable[section];
     if (!mode || mode === 'locked' || !onEdit) return null;
@@ -272,7 +275,7 @@ export function patientHistoryCards(p, priorVisits = [], { editable = null, onEd
 
   const out = [];
 
-  out.push(card('user', 'Patient information', 'demographics', el('div', { class: 'kv-grid' }, demographicsRows(p))));
+  out.push(card('user', 'Patient information', 'demographics', el('div', { class: 'kv-grid' }, demographicsRows(p, { hideEmpty }))));
 
   const med = medicalHistoryParts(p.medical_history);
   const tr = p.triage || {};
@@ -400,7 +403,7 @@ export function patientInfoPanel(p, { open = false, title = 'Patient health hist
  * `emptyConsents: true` says "No consents on file" rather than leaving the card
  * out.
  */
-export function patientInfoCards(p, { priorVisits = [], onSaved = null, review = false, medicalExtras = null, stack = false, emptyConsents = false } = {}) {
+export function patientInfoCards(p, { priorVisits = [], onSaved = null, review = false, medicalExtras = null, stack = false, emptyConsents = false, hideEmpty = false } = {}) {
   let current = p;
   const grid = el('div', { class: stack ? 'patient-info-stack' : 'history-grid' });
   const saved = (np) => { current = np; paint(); if (onSaved) onSaved(np); };
@@ -411,6 +414,7 @@ export function patientInfoCards(p, { priorVisits = [], onSaved = null, review =
       onEdit: (section) => openSectionEditor(current, section, { onSaved: saved }),
       review: review ? { onReviewed: () => markReviewed(current, saved) } : null,
       medicalExtras: typeof medicalExtras === 'function' ? medicalExtras(current) : (medicalExtras || []),
+      hideEmpty,
     }).forEach((c) => grid.append(c));
     if (emptyConsents && !(current.consents || []).length) {
       grid.append(el('div', { class: 'card' }, [

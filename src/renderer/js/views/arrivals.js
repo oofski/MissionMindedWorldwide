@@ -87,6 +87,17 @@ export function renderArrivals(ctx) {
     if (row.arrived_at) ctx.toast(`${p.first_name} ${p.last_name} has already been confirmed here.`, 'info');
   }
 
+  // A name typed into the scan box is a search of this list, in whichever tab
+  // holds the patient — it used to be refused as an unknown wristband.
+  function onName(text) {
+    query = text;
+    search.value = text;
+    scannedId = null;
+    const waitingIn = (pre) => latest.patients.some((p) => p.status === 'checked_in' && !!p.preregistered === pre && matches(p, text));
+    if (tab && !waitingIn(tab === 'prereg') && waitingIn(tab !== 'prereg')) tab = tab === 'prereg' ? 'walkin' : 'prereg';
+    paint();
+  }
+
   async function load() {
     const [event, patients] = await Promise.all([api.activeEvent(), api.listPatients({})]);
     store.setEvent(event);
@@ -235,10 +246,10 @@ export function renderArrivals(ctx) {
           el('button', { class: 'btn btn--ghost btn--sm', onClick: load }, [icon('refresh', { size: 15 }), 'Refresh']),
         ]),
       ]),
-      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: onScan })]),
+      el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: onScan, onName })]),
       el('div', { class: 'arrival-tabs' }, [
         ['prereg', 'Pre-registered online', 'People who filled the form in before they came'],
-        ['walkin', 'Registered at the desk', 'People checked in here at the clinic'],
+        ['walkin', 'Checked in here (kiosk or desk)', 'People who checked in at the clinic today — at the kiosk or with the front desk'],
       ].map(([key, label, hint]) => el('button', {
         class: 'arrival-tab' + (tab === key ? ' is-active' : ''),
         title: hint,

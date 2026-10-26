@@ -2280,7 +2280,7 @@ function hasVitalsRecorded(patientId) {
 }
 function requireVitals(patientId) {
   if (!hasVitalsRecorded(patientId)) {
-    throw new Error('Vitals have not been recorded yet. This patient must have their blood pressure or pulse taken at the vitals station before they can go to Dental Triage or the hygienist.');
+    throw new Error('Record a blood pressure or pulse first — vitals are needed before Dental Triage or the hygienist.');
   }
 }
 function routePatient(actor, patientId, route) {
@@ -2691,7 +2691,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
-    const tx = db.prepare('SELECT locked, unlocked_at, completed_at, provider_name, cleaning FROM treatments WHERE patient_id = ?').get(p.id);
+    const tx = db.prepare("SELECT locked, unlocked_at, completed_at, provider_name, cleaning, (provider_signature IS NOT NULL AND provider_signature != '') AS signed FROM treatments WHERE patient_id = ?").get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -2735,6 +2735,9 @@ function listPatients({ eventId, search } = {}) {
       treatment_waiting_at: tr ? tr.treatment_waiting_at : null,
       dismissed_at: pt.dismissed_at || null,
       left_early_reason: pt.left_early_reason || null,
+      // A finished visit nobody has signed off ("Complete — sign later"):
+      // the Dashboard and check-out say so until someone signs it.
+      unsigned: (pt.status === 'completed' || pt.status === 'dismissed') && !pt.left_early_reason && !!tx && !tx.signed,
       emt_signed_off: !!(tr && tr.emt_signed_off),
       blood_thinner: tr ? tr.blood_thinner : null,
       // Reconciled thinner signal so the QUEUES can't understate the risk: true if

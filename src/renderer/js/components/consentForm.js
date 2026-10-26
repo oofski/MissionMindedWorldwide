@@ -46,13 +46,19 @@ const raw = (lang, path) => path.split('.').reduce((o, k) => (o == null ? undefi
 const txt = (lang, path) => { const v = raw(lang, path); return v != null ? v : raw('en', path); };
 
 /**
- * Which text was signed. The general consent is v1 everywhere. The oral
- * surgery consent is v1 where the language carries the full wording (English)
- * and v2 where it signs the sections ending with consent.emergency, whose
- * number changed in v0.0.15.
+ * Which text was signed — a version names one wording, so a version whose
+ * wording changes gets a new number and is never reused:
+ *   general       v1 everywhere, but Spanish v2: since v0.0.20 the full MMW
+ *                 consent, translated (v1 was the shorter hold-harmless text).
+ *   oral_surgery  English v1 (the full wording). Spanish v3: the full wording,
+ *                 translated, since v0.0.20. Every other language v2: the
+ *                 sections ending with consent.emergency, whose number changed
+ *                 in v0.0.15 (v1 was the Oregon number).
+ * cloud/worker.js consentVersion mirrors this for the online form.
  */
 export function consentVersion(type, lang) {
-  if (type === 'general') return `mmw-general-${lang}-v1`;
+  if (type === 'general') return `mmw-general-${lang}-${lang === 'es' ? 'v2' : 'v1'}`;
+  if (lang === 'es') return 'oral_surgery-es-v3';
   return `oral_surgery-${lang}-${raw(lang, 'consent.oralSurgeryFull') ? 'v1' : 'v2'}`;
 }
 

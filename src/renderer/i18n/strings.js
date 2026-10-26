@@ -471,7 +471,7 @@ const en = {
     welcome: 'Welcome to Mission Minded', chooseLanguage: 'Please choose your language',
     start: 'Start', step: 'Step', of: 'of',
     s_language: 'Language', s_demographics: 'About You', s_medical: 'Medical History',
-    s_dental: 'Dental History', s_consent: 'Consent', s_surgery: 'Surgery Consent', s_review: 'Sign & Submit',
+    s_dental: 'Dental History', s_consent: 'Consent', s_surgery: 'Surgery Consent', s_review: 'Review & Submit',
     // demographics
     firstName: 'First name', lastName: 'Last name', dob: 'Date of birth', gender: 'Gender',
     genderM: 'Male', genderF: 'Female', genderO: 'Other',
@@ -504,7 +504,7 @@ const en = {
     postExtraction: 'History of bleeding after a tooth was pulled?',
     ortho: 'Have you had braces or orthodontics?', cosmetic: 'Interested in cosmetic improvements?',
     // review
-    reviewTitle: 'Review & sign', reviewHint: 'Please review your information, then sign below.',
+    reviewTitle: 'Review & submit', reviewHint: 'Please check your information, then tap Submit.',
     relationship: 'Relationship to patient (if signing for someone else)',
     signerName: 'Printed name of person signing',
     thanks: 'Thank you! Your check-in is complete.',
@@ -597,7 +597,7 @@ const es = {
     welcome: 'Bienvenido a Mission Minded', chooseLanguage: 'Por favor elija su idioma',
     start: 'Comenzar', step: 'Paso', of: 'de',
     s_language: 'Idioma', s_demographics: 'Sobre usted', s_medical: 'Historia médica',
-    s_dental: 'Historia dental', s_consent: 'Consentimiento', s_surgery: 'Consentimiento de cirugía', s_review: 'Firmar y enviar',
+    s_dental: 'Historia dental', s_consent: 'Consentimiento', s_surgery: 'Consentimiento de cirugía', s_review: 'Revisar y enviar',
     firstName: 'Nombre', lastName: 'Apellido', dob: 'Fecha de nacimiento', gender: 'Género',
     genderM: 'Masculino', genderF: 'Femenino', genderO: 'Otro',
     phone: 'Teléfono', email: 'Correo electrónico', address: 'Dirección', mailing: 'Dirección postal (si es diferente)',
@@ -623,7 +623,7 @@ const es = {
     jawInjury: '¿Lesión en cabeza, cuello o mandíbula?', grinding: '¿Aprieta o rechina los dientes?',
     postExtraction: '¿Historial de sangrado después de una extracción?',
     ortho: '¿Ha usado frenos u ortodoncia?', cosmetic: '¿Interesado en mejoras cosméticas?',
-    reviewTitle: 'Revisar y firmar', reviewHint: 'Por favor revise su información y firme abajo.',
+    reviewTitle: 'Revisar y enviar', reviewHint: 'Por favor revise su información y luego toque Enviar.',
     relationship: 'Relación con el paciente (si firma por otra persona)',
     signerName: 'Nombre en letra de molde de quien firma',
     thanks: '¡Gracias! Su registro está completo.',
@@ -631,8 +631,32 @@ const es = {
     done: 'Listo', minorNotice: 'Este paciente es menor de 18 — un padre o tutor debe firmar.',
   },
   consent: {
-    generalTitle: 'Consentimiento General para Tratamiento Dental',
+    // v0.0.20: the same consent the English speaker signs, in full — MMW's
+    // health-care application with both numbered HIV / Hepatitis paragraphs,
+    // and the full oral-surgery wording. The Spanish form used to be a
+    // different, shorter document (a hold-harmless paragraph, the HIV notice
+    // cut to one sentence). Translated for v0.0.20; the English stays the
+    // authoritative text, as the last clause says.
+    generalTitle: 'Solicitud del Paciente y Consentimiento para Atención Médica',
     generalIntro: 'Por favor lea lo siguiente. Puede tocar “Leer en voz alta” para escucharlo en su idioma.',
+    generalFull: [
+      'CONSENTIMIENTO DEL PACIENTE PARA ATENCIÓN PRIMARIA GENERAL — Por la presente autorizo a los médicos, enfermeros, dentistas y/u otros proveedores de atención médica de Mission Minded Worldwide (MMW), algunos de los cuales pueden ser estudiantes avanzados bajo estrecha supervisión, a examinarme y/o tratarme a mí y/o a mi dependiente nombrado arriba. Entiendo que es mi responsabilidad notificar a MMW cualquier cambio en mi información de contacto, como un cambio de dirección o un nuevo número de teléfono, cuando pueda ser necesario un seguimiento.',
+      'AVISO DE CONSENTIMIENTO PRESUNTO PARA LAS PRUEBAS DE VIH Y DE HEPATITIS B O C — Como proveedor de atención médica, ponemos a su disposición el siguiente aviso: 1. Si uno de nuestros profesionales de la salud, trabajadores o empleados quedara expuesto directamente a su sangre o a sus fluidos corporales de una manera que pueda transmitir una enfermedad, se le hará a su sangre una prueba de infección por el virus de la inmunodeficiencia humana (el virus del “SIDA”), Covid-19, así como de hepatitis B y C. Un médico u otro proveedor de atención médica le informará el resultado de la prueba. Al marcar “Sí” abajo, se considerará que usted ha dado su consentimiento para que los resultados de la prueba se entreguen a la persona expuesta.',
+      '2. Si usted quedara expuesto directamente a la sangre o a los fluidos corporales de uno de nuestros profesionales de la salud, trabajadores o empleados de una manera que pueda transmitir la enfermedad, se le hará a la sangre de esa persona una prueba de infección por el virus de la inmunodeficiencia humana (el virus del “SIDA”), Covid-19, así como de hepatitis B y C. Un médico u otro proveedor de atención médica les informará a usted y a esa persona los resultados de la prueba.',
+      'AVISO IMPORTANTE — MMW es una organización benéfica 501(c)3 sin voluntarios remunerados y NO forma parte de ningún programa del gobierno. Es posible que los voluntarios de MMW no puedan brindarle todos los servicios que usted necesita, pero si desea consultar con nuestro equipo de voluntarios y recibir el tipo de tratamiento que se ofrece hoy, lea con mucha atención la siguiente renuncia del paciente.',
+      'RENUNCIA DEL PACIENTE — Nota para los pacientes dentales: Aunque los higienistas, dentistas y cirujanos orales voluntarios ofrecen procedimientos de alta calidad con buen equipo, entiendo que, debido a la cantidad de personas que necesitan ser atendidas, es posible que no reciba varias extracciones o varios empastes. Entiendo que podría tener ciertas condiciones médicas que me impidan recibir el tipo de tratamiento que solicito. También entiendo que los proveedores de atención dental son voluntarios, algunos de fuera de la ciudad, y que no estarán disponibles para dar atención de seguimiento en caso de complicaciones. Acepto buscar cualquier atención de seguimiento que pueda necesitar con mi dentista local, el departamento de salud, mi médico de familia o la sala de emergencias de un hospital.',
+      'Otorgo a MMW y a sus representantes el derecho a usar mi imagen, mi voz y otras reproducciones de mi apariencia física en relación con la publicidad o la difusión de MMW y de sus actividades, en todo tipo de medios y a perpetuidad.',
+      'Yo, el paciente abajo firmante, doy mi consentimiento para que mis expedientes de paciente se entreguen a otros profesionales de la salud con licencia, según sea necesario. He leído, o me han leído, y entiendo y acepto todo lo anterior. (La versión en inglés es la versión legal autoritativa.)',
+    ],
+    oralSurgeryFull: [
+      'Se me ha explicado el procedimiento quirúrgico que se va a realizar y entiendo la naturaleza de mi condición y del tratamiento propuesto. También entiendo qué riesgos para la salud existen si no se realiza el procedimiento, como dolor, infección, caries, daño a otros dientes y una cirugía más difícil a medida que envejezca.',
+      'Acepto la administración de anestesia local y de otras medidas terapéuticas, según lo conversado, que puedan ser necesarias para mi comodidad, seguridad y bienestar.',
+      'Comprendo que ocasionalmente hay complicaciones con esta cirugía y con los medicamentos. Las complicaciones más comunes incluyen dolor, hinchazón, sangrado, alveolo seco, apertura limitada de la boca, infección, moretones y cambio de color de la piel, y adormecimiento y/u hormigueo temporal del labio, el mentón, los dientes o la lengua.',
+      'En algunos casos, aun con el mayor cuidado, puede haber dolor referido al oído o al cuello; rigidez del cuello y de los músculos faciales; cambios en la mordida y en la articulación temporomandibular (ATM); náuseas; reacciones alérgicas; fracturas óseas; lesión a los dientes vecinos; cicatrización lenta; y adormecimiento permanente de los nervios del área facial. Las complicaciones de los senos nasales, que pueden ocurrir al extraer dientes superiores, incluyen una punta de raíz o un diente dentro del seno o la formación de una abertura persistente entre la boca y el seno, lo que podría requerir tratamientos de los senos después de la cirugía. Entiendo que Mission Minded Worldwide (MMW) no proporciona ni paga ninguno de estos tratamientos adicionales.',
+      'Los medicamentos que se den durante o después de la cirugía pueden causar somnolencia y falta de atención y de coordinación, lo cual podría aumentar con el consumo de alcohol u otras drogas. Sé que no debo manejar ningún vehículo ni operar ningún aparato peligroso mientras tome esos medicamentos, durante al menos 24 horas después de tomarlos o hasta que se me pasen sus efectos.',
+      'Sé que algunas de las complicaciones mencionadas pueden evitarse o reducirse siguiendo con cuidado las instrucciones del dentista. He tenido la oportunidad de hacer preguntas sobre el procedimiento y los aspectos relacionados con él, y me las han respondido a mi satisfacción. Este es mi consentimiento para la cirugía en el/los número(s) de diente anotado(s) en este formulario.',
+      'Si la hinchazón se prolonga (aumenta de tamaño en 24–48 horas) o el dolor no se alivia: llame a MMW al (951) 317-4968. Deje un mensaje para Vinh Trinh. Él le devolverá la llamada y le dirá cómo recibir atención para su problema. Si tuvo que dejar un mensaje, tenga paciencia y espere a que le devuelva la llamada y le dé instrucciones. Esta atención posoperatoria es solo para el tratamiento recibido y no para continuar el tratamiento de otros dientes. Si tiene dificultad para respirar o tragar, debe ir a la sala de emergencias para recibir tratamiento inmediato. MMW no paga ningún tratamiento en la sala de emergencias; solo paga una consulta de seguimiento con un dentista local aprobado para tratar la infección, el dolor o la hinchazón relacionados con el tratamiento recibido en la clínica gratuita.',
+    ],
     oregon: 'Certifico que he leído este Consentimiento, o que me ha sido leído, y que entiendo lo anterior. Se me ha explicado la naturaleza y el propósito de tales operación(es), procedimiento(s), tratamiento(s) y/o servicios y las razones por las que se consideran necesarios o aconsejables. Por la presente eximo de responsabilidad a Mission Minded Worldwide, al Dentista Asociado y/o a dichos asistentes por la atención dental gratuita brindada. Los servicios se prestan sin compensación y la responsabilidad del proveedor es limitada y el proveedor no puede ser considerado responsable por ninguna lesión, muerte u otra pérdida que surja de la prestación de estos servicios, a menos que la lesión, muerte u otra pérdida resulte de negligencia grave. También soy consciente del riesgo de exposición al COVID durante un procedimiento dental y consiento participar en esta clínica bajo mi propio riesgo. (La versión en inglés es la versión legal autoritativa.)',
     clauses: [
       'Doy mi consentimiento voluntario para el examen y tratamiento dental por parte del equipo voluntario de Mission Minded Worldwide.',
@@ -645,7 +669,7 @@ const es = {
     ],
     covidTitle: 'Reconocimiento del Riesgo de COVID-19',
     covid: 'Entiendo que el tratamiento dental puede implicar contacto cercano y procedimientos que generan aerosoles, y que ningún entorno puede estar completamente libre del riesgo de exposición al COVID-19 u otra enfermedad contagiosa. Acepto este riesgo voluntariamente.',
-    surgeryTitle: 'Consentimiento de Cirugía Oral / Extracción',
+    surgeryTitle: 'Consentimiento para Cirugía Oral',
     surgeryIntro: 'Este consentimiento adicional es necesario porque hoy podría realizarse una extracción.',
     surgeryClauses: [
       'Consiento la extracción de uno o más dientes y el uso de anestesia local.',
@@ -677,7 +701,7 @@ const bzj = {
     welcome: 'Welkom to Mission Minded', chooseLanguage: 'Pleez pick di langwij yu waahn',
     start: 'Staat', step: 'Step', of: 'a',
     s_language: 'Langwij', s_demographics: 'Bowt Yu', s_medical: 'Medikal Histri',
-    s_dental: 'Dental Histri', s_consent: 'Kansent', s_surgery: 'Serjari Kansent', s_review: 'Sain & Send',
+    s_dental: 'Dental Histri', s_consent: 'Kansent', s_surgery: 'Serjari Kansent', s_review: 'Chek & Send',
     firstName: 'Fos naym', lastName: 'Laas naym', dob: 'Baatdeh', gender: 'Jenda',
     genderM: 'Man', genderF: 'Uman', genderO: 'Ada',
     phone: 'Fone numba', email: 'Email', address: 'Hoam adres', mailing: 'Mailin adres (if difrent)',
@@ -686,7 +710,7 @@ const bzj = {
     // No conditionsHint: "pick all that apply" no longer describes the list,
     // which is answered row by row since v0.0.15, so English shows until translated.
     conditionsTitle: 'Yu hav eni a dehnya kandishan?',
-    reviewTitle: 'Chek & sain', reviewHint: 'Pleez chek yu inafamayshan, den sain dong dehndeh.',
+    reviewTitle: 'Chek & send', reviewHint: 'Pleez chek yu inafamayshan, den tap Send.',
     signerName: 'Print naym a di persn weh di sain',
     thanks: 'Taanks! Yu chek-in don kompleet.', thanksSub: 'Pleez gi bak di divais to di frant desk.',
     done: 'Don', minorNotice: 'Dis payshent andah 18 — wahn payrent or gyaadyan haftu sain.',
@@ -716,7 +740,7 @@ const nya = {
     welcome: 'Takulandirani ku Mission Minded', chooseLanguage: 'Chonde sankhani chilankhulo chanu',
     start: 'Yambani', step: 'Sitepe', of: 'mwa',
     s_language: 'Chilankhulo', s_demographics: 'Za Inu', s_medical: 'Mbiri ya Thanzi',
-    s_dental: 'Mbiri ya Mano', s_consent: 'Chilolezo', s_surgery: 'Chilolezo cha Opaleshoni', s_review: 'Sayinani & Tumizani',
+    s_dental: 'Mbiri ya Mano', s_consent: 'Chilolezo', s_surgery: 'Chilolezo cha Opaleshoni', s_review: 'Wunikani & Tumizani',
     firstName: 'Dzina loyamba', lastName: 'Dzina lomaliza', dob: 'Tsiku lobadwa', gender: 'Amuna kapena akazi',
     genderM: 'Mwamuna', genderF: 'Mkazi', genderO: 'Zina',
     phone: 'Foni', email: 'Imelo', address: 'Adiresi ya kunyumba', mailing: 'Adiresi yotumizira (ngati ndi yosiyana)',
@@ -725,7 +749,7 @@ const nya = {
     // No conditionsHint: "choose all that apply" no longer describes the list,
     // which is answered row by row since v0.0.15, so English shows until translated.
     conditionsTitle: 'Kodi muli ndi imodzi mwa matenda awa?',
-    reviewTitle: 'Wunikani & sayinani', reviewHint: 'Chonde wunikani zambiri zanu, kenako sayinani pansipa.',
+    reviewTitle: 'Wunikani & tumizani', reviewHint: 'Chonde wunikani zambiri zanu, kenako dinani Tumizani.',
     signerName: 'Dzina losindikiza la amene akusayina',
     thanks: 'Zikomo! Kulembetsa kwanu kwatha.', thanksSub: 'Chonde bwezerani chipangizo ku desiki yakutsogolo.',
     done: 'Zatha', minorNotice: 'Wodwalayu ali ndi zaka zosakwana 18 — kholo kapena msamali ayenera kusayina.',
@@ -756,7 +780,7 @@ const ru = {
     welcome: 'Добро пожаловать в Mission Minded', chooseLanguage: 'Пожалуйста, выберите язык',
     start: 'Начать', step: 'Шаг', of: 'из',
     s_language: 'Язык', s_demographics: 'О вас', s_medical: 'История болезни',
-    s_dental: 'Стоматологическая история', s_consent: 'Согласие', s_surgery: 'Согласие на операцию', s_review: 'Подпись и отправка',
+    s_dental: 'Стоматологическая история', s_consent: 'Согласие', s_surgery: 'Согласие на операцию', s_review: 'Проверка и отправка',
     firstName: 'Имя', lastName: 'Фамилия', dob: 'Дата рождения', gender: 'Пол',
     genderM: 'Мужской', genderF: 'Женский', genderO: 'Другой',
     phone: 'Телефон', email: 'Эл. почта', address: 'Домашний адрес', mailing: 'Почтовый адрес (если отличается)',
@@ -778,7 +802,7 @@ const ru = {
     jawInjury: 'Травмы головы, шеи или челюсти?', grinding: 'Сжимаете или скрипите зубами?',
     postExtraction: 'Бывало ли кровотечение после удаления зуба?',
     ortho: 'Носили ли вы брекеты / ортодонтию?', cosmetic: 'Интересует косметическое улучшение?',
-    reviewTitle: 'Проверка и подпись', reviewHint: 'Пожалуйста, проверьте свои данные и подпишите ниже.',
+    reviewTitle: 'Проверка и отправка', reviewHint: 'Пожалуйста, проверьте свои данные и нажмите «Отправить».',
     relationship: 'Кем вы приходитесь пациенту (если подписываете за другого)',
     signerName: 'Печатными буквами имя подписавшего',
     thanks: 'Спасибо! Регистрация завершена.', thanksSub: 'Пожалуйста, верните устройство на стойку регистрации.',

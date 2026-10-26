@@ -170,10 +170,17 @@ export function Odontogram({ mode = 'adult', teeth = {}, selected = [], onChange
       b.type = 'button';
       b.className = 'odo-pop-opt odo-pop-opt--' + tx + (chosen === tx ? ' on' : '');
       b.textContent = label;
+      // Choosing a procedure IS the answer: the tooth is tagged and the
+      // popover closes in that one tap (it used to need Done as well). Tapping
+      // the procedure already chosen takes it off and leaves the popover open.
       b.onclick = () => {
-        chosen = chosen === tx ? null : tx;
-        pop.querySelectorAll('.odo-pop-opt').forEach((x) => x.classList.remove('on'));
-        if (chosen) b.classList.add('on');
+        if (chosen === tx) {
+          chosen = null;
+          pop.querySelectorAll('.odo-pop-opt').forEach((x) => x.classList.remove('on'));
+          return;
+        }
+        chosen = tx;
+        commit();
       };
       return b;
     };
@@ -198,11 +205,12 @@ export function Odontogram({ mode = 'adult', teeth = {}, selected = [], onChange
     const clearB = document.createElement('button'); clearB.className = 'btn btn--ghost btn--sm'; clearB.type = 'button'; clearB.textContent = 'Clear tooth';
     clearB.onclick = () => { const had = !!toothData[id]; delete toothData[id]; applyTooth(id); closePopover(); if (had) { emit(); if (onUntag) onUntag(id); } };
     const doneB = document.createElement('button'); doneB.className = 'btn btn--primary btn--sm'; doneB.type = 'button'; doneB.textContent = 'Done';
-    doneB.onclick = () => {
+    function commit() {
       toothData[id] = { tx: chosen || null, note: note.value.trim() };
       applyTooth(id); closePopover(); emit();
       if (onTag) onTag(id, toothData[id]);
-    };
+    }
+    doneB.onclick = commit;
     foot.append(clearB, doneB);
 
     pop.append(head, seg, note, foot);

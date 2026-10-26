@@ -385,7 +385,7 @@ async function getEventRow(env, uid) {
     // open after "Finish clinic" and kept taking sign-ups into a clinic that had
     // already been closed and had its records removed.
     const active = !(data.active === 0 || data.active === false || data.active === '0');
-    return { name: typeof data.name === 'string' && data.name ? data.name : 'the clinic', active, cities: eventCities(data.cities) };
+    return { name: typeof data.name === 'string' && data.name ? data.name : 'the clinic', active, cities: eventCities(data.cities), state: eventState(data.location) };
   } catch (_e) {
     return null;
   }
@@ -396,7 +396,7 @@ async function handleCheckinGet(eventUid, env, url) {
   if (!ev) return htmlResponse(checkinErrorPage(), 404);
   if (!ev.active) return htmlResponse(checkinClosedPage(ev.name), 410);
   const lang = (url && url.searchParams && url.searchParams.get('lang') === 'es') ? 'es' : 'en';
-  return htmlResponse(checkinFormPage(eventUid, ev.name, lang, ev.cities));
+  return htmlResponse(checkinFormPage(eventUid, ev.name, lang, ev.cities, ev.state));
 }
 
 async function handleCheckinPost(eventUid, request, env) {
@@ -470,6 +470,8 @@ async function handleCheckinPost(eventUid, request, env) {
   // refused here, exactly as the in-person check-in refuses to continue.
   const agreed = (v) => v === true || v === 'on' || v === 'true';
   const generalSig = sig(body.signature_png);
+  const deemed = body.deemed_consent === 'yes' || body.deemed_consent === 'no' ? body.deemed_consent : null;
+  if (!deemed) return json({ ok: false, error: L.errDeemed }, 400);
   if (!agreed(body.consent_agree)) return json({ ok: false, error: esErr ? 'Por favor lea y acepte el consentimiento para terminar.' : 'Please read and agree to the consent to finish.' }, 400);
   if (!generalSig) return json({ ok: false, error: esErr ? 'Por favor firme el consentimiento para terminar.' : 'Please sign the consent to finish.' }, 400);
   if (!String(body.signer_name || '').trim()) return json({ ok: false, error: esErr ? 'Por favor escriba su nombre para la firma.' : 'Please type your name for the signature.' }, 400);
@@ -507,14 +509,14 @@ async function handleCheckinPost(eventUid, request, env) {
   const rows = [
     { entity: 'patient', uid: patientUid, patient_uid: null, stamp: iso + '@prereg', data: patientData },
     { entity: 'consent', uid: crypto.randomUUID(), patient_uid: patientUid, stamp: iso + '@prereg-c1', data: {
-      type: 'general', version: 'general-oregon-' + lang + '-v1+covid', language: lang,
+      type: 'general', version: consentVersion('general', lang), language: lang,
       signer_name: signer, relationship: relationship, signature_png: generalSig, signed_at: iso,
-      tooth_numbers: null, amended_by: null, amended_at: null,
+      tooth_numbers: null, amended_by: null, amended_at: null, deemed_consent: deemed, signature_method: 'draw',
     } },
   ];
   if (extraction) {
     rows.push({ entity: 'consent', uid: crypto.randomUUID(), patient_uid: patientUid, stamp: iso + '@prereg-c2', data: {
-      type: 'oral_surgery', version: 'oral_surgery-' + lang + '-v1', language: lang,
+      type: 'oral_surgery', version: consentVersion('oral_surgery', lang), language: lang, signature_method: 'draw',
       signer_name: signer, relationship: relationship, signature_png: surgerySig, signed_at: iso,
       tooth_numbers: String(body.surgery_teeth || '').trim().slice(0, 60) || null, amended_by: null, amended_at: null,
     } });
@@ -725,7 +727,8 @@ const MED_OPTIONS = '<option value="Atorvastatin"></option><option value="Levoth
 // medical history and Step 3. Change it whenever the questions change shape, so
 // a page opened before the change is told to reload rather than refused for
 // answers it never asked.
-const FORM_VERSION = 2;
+// v0.0.20 is 3: the MMW consent, with its HIV / Hepatitis Yes or No.
+const FORM_VERSION = 3;
 
 // Mirrors US_STATES in src/renderer/i18n/strings.js. A dropdown here as well as
 // on the walk-in form, and validated server-side: this endpoint is reachable
@@ -733,6 +736,31 @@ const FORM_VERSION = 2;
 // city/state report as three different places.
 const US_STATE_CODES = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'PR', 'VI', 'GU', 'AS', 'MP'];
 const US_STATE_OPTIONS = '<option value="AL">Alabama (AL)</option><option value="AK">Alaska (AK)</option><option value="AZ">Arizona (AZ)</option><option value="AR">Arkansas (AR)</option><option value="CA">California (CA)</option><option value="CO">Colorado (CO)</option><option value="CT">Connecticut (CT)</option><option value="DE">Delaware (DE)</option><option value="DC">District of Columbia (DC)</option><option value="FL">Florida (FL)</option><option value="GA">Georgia (GA)</option><option value="HI">Hawaii (HI)</option><option value="ID">Idaho (ID)</option><option value="IL">Illinois (IL)</option><option value="IN">Indiana (IN)</option><option value="IA">Iowa (IA)</option><option value="KS">Kansas (KS)</option><option value="KY">Kentucky (KY)</option><option value="LA">Louisiana (LA)</option><option value="ME">Maine (ME)</option><option value="MD">Maryland (MD)</option><option value="MA">Massachusetts (MA)</option><option value="MI">Michigan (MI)</option><option value="MN">Minnesota (MN)</option><option value="MS">Mississippi (MS)</option><option value="MO">Missouri (MO)</option><option value="MT">Montana (MT)</option><option value="NE">Nebraska (NE)</option><option value="NV">Nevada (NV)</option><option value="NH">New Hampshire (NH)</option><option value="NJ">New Jersey (NJ)</option><option value="NM">New Mexico (NM)</option><option value="NY">New York (NY)</option><option value="NC">North Carolina (NC)</option><option value="ND">North Dakota (ND)</option><option value="OH">Ohio (OH)</option><option value="OK">Oklahoma (OK)</option><option value="OR">Oregon (OR)</option><option value="PA">Pennsylvania (PA)</option><option value="RI">Rhode Island (RI)</option><option value="SC">South Carolina (SC)</option><option value="SD">South Dakota (SD)</option><option value="TN">Tennessee (TN)</option><option value="TX">Texas (TX)</option><option value="UT">Utah (UT)</option><option value="VT">Vermont (VT)</option><option value="VA">Virginia (VA)</option><option value="WA">Washington (WA)</option><option value="WV">West Virginia (WV)</option><option value="WI">Wisconsin (WI)</option><option value="WY">Wyoming (WY)</option><option value="PR">Puerto Rico (PR)</option><option value="VI">U.S. Virgin Islands (VI)</option><option value="GU">Guam (GU)</option><option value="AS">American Samoa (AS)</option><option value="MP">Northern Mariana Islands (MP)</option>';
+// [code, name] for each state the form offers, read from the options above.
+const US_STATE_LIST = [...US_STATE_OPTIONS.matchAll(/<option value="([A-Z]{2})">([^<]*) \([A-Z]{2}\)<\/option>/g)].map((m) => [m[1], m[2]]);
+// The state an event is held in, from its location ("Sandy, OR", "Lowell,
+// Oregon"), as a code, or ''. Mirrors intakeSections.js eventState: the online
+// form, like the kiosk, lists it first and starts on it, rather than at the
+// top of a 56-entry list where a missed tap left "Alabama" on the record.
+function eventState(location) {
+  const codeOf = (v) => {
+    const up = String(v || '').trim().toUpperCase().replace(/\.$/, '');
+    const hit = up && US_STATE_LIST.find(([code, name]) => code === up || name.toUpperCase() === up);
+    return hit ? hit[0] : '';
+  };
+  const parts = String(location || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const code = codeOf(parts[i]) || codeOf(parts[i].split(/\s+/).pop());
+    if (code) return code;
+  }
+  return '';
+}
+function stateOptions(homeState) {
+  const hit = US_STATE_LIST.find(([code]) => code === homeState);
+  if (!hit) return US_STATE_OPTIONS;
+  const opt = '<option value="' + hit[0] + '">' + hit[1] + ' (' + hit[0] + ')</option>';
+  return opt.replace('<option ', '<option selected ') + US_STATE_OPTIONS.replace(opt, '');
+}
 
 // Dr. Trinh's medication-allergy list (v0.0.15), asked only when the answer to
 // "Do you have an allergy or serious reaction to any medication?" is Yes.
@@ -821,27 +849,38 @@ const FORM_DENTAL_YESNO = [
 ];
 // Consent wording (English authoritative) — mirrors renderer/i18n/strings.js so a
 // patient can read and sign remotely the SAME forms they would in person.
-const GENERAL_CONSENT_TITLE = 'Consent to Dental Procedures, Administration of Anesthetics, Sedatives, Rendering of Other Services, and Hold Harmless Clause';
+// Since v0.0.20 the very wording the kiosk shows (strings.js consent.generalFull
+// and oralSurgeryFull, en and es) — the online form used to carry an older
+// consent than the clinic, and no HIV / Hepatitis question. The harness pins
+// these to the app's catalog, so the two cannot drift apart again.
+const GENERAL_CONSENT_TITLE = 'Patient Application and Consent for Health Care';
 const GENERAL_CONSENT = [
-  'I hereby authorize Mission Minded Worldwide or Associate Dentist and/or such assistants as may be selected, to perform Routine Dental Care upon the above named and/or any other therapeutic procedure that his/her/their judgment may dictate to be advisable for the patient’s well-being.',
-  'The nature and purpose of the procedure and anesthetic, the risks involved, and the possibility of complications has been explained to me. I acknowledge that no guarantee or assurance has been made as to the results that may be obtained. The advantages and inherent risks of anesthesia and sedation have been explained to me and I authorize the administration of such anesthesia and sedation as may be considered necessary or desirable.',
-  'I authorize that any specimens, tissue or parts removed from the patient may be disposed of in accordance with established practice.',
-  'I further authorize the performance by any qualified person of any other services which are deemed to be necessary or advisable.',
-  'If in Mission Minded Worldwide/Associate Dentist’s opinion, further observation of the above named is indicated after an anesthetic or procedure, the above named agrees to be transported by ambulance at his/her personal expense to a mutually satisfactory hospital in the local area, and to be admitted for observation and any necessary treatment. Any and all medical treatment required after a dental procedure will be the financial responsibility of the patient or his/her family. Free services are limited to the services provided at the free dental clinic.',
-  'If in Mission Minded Worldwide/Associate Dentist’s opinion, the above named requires the services of a specialist, he/she agrees to accept the referral and will be responsible for any expense that may be incurred.',
-  'I certify that I have read this Consent, or that it has been read to me, and that I understand the above. The nature and purpose of such operation(s), procedure(s), treatment(s), and/or services and the reasons why the same is (are) considered necessary or advisable has been explained to me. I hereby hold Mission Minded Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence. I am also aware of the risk of exposure to COVID during a dental procedure and I consent to participate in this clinic at my own risk.',
+  'PATIENT CONSENT FOR GENERAL PRIMARY CARE — I hereby authorize the Physicians, Nurses, Dentists and/or other health care providers of Mission Minded Worldwide (MMW), some of whom might be closely supervised advanced students, to examine and/or treat me and/or my dependent as named above. I understand that it is my responsibility to notify MMW of any changes in contact information, such as change of address or new telephone number when follow-up may be necessary.',
+  'NOTICE OF DEEMED CONSENT FOR HIV, HEPATITIS B OR C TESTING — As a health care provider, we are making available to you the following notice: 1. If one of our health care professionals, workers or employees should be directly exposed to your blood or body fluids in a way that may transmit disease, your blood will be tested for infection with human immunodeficiency virus (the “AIDS” virus), Covid-19, as well as for Hepatitis B and C. A physician or other health care provider will tell you the result of the test. By checking “Yes” below, you are deemed to have consented to the release of the test results to the person exposed.',
+  '2. If you should be directly exposed to blood or body fluids of one of our health care professionals, workers or employees in a way that may transmit the disease, that person’s blood will be tested for infection with human immunodeficiency virus (the “AIDS” virus), Covid-19, as well as for Hepatitis B and C. A physician or other health care provider will tell you and that person the results of the test.',
+  'IMPORTANT NOTICE — MMW is a 501(c)3 charity with no paid volunteers and is NOT part of a government program. MMW volunteers may not be able to provide you with all the services you need, but if you would like to consult with our volunteer team and receive the type of treatment being offered today, please read the patient waiver below very carefully.',
+  'PATIENT WAIVER — Dental Patients Note: While the volunteer hygienists, dentists and oral surgeons offer high quality procedures with good equipment, I understand that because of the number of people needing to be seen, I might not receive multiple extractions or multiple fillings. I understand that I might have certain medical conditions which would keep me from having the type of treatment I am requesting. I also understand that the dental care providers are volunteers, some from out-of-town, and are not available for follow-up care in the event of complications. I agree to seek any follow-up care I might need from my local dentist, health department, family physician or a hospital emergency room.',
+  'I grant to MMW and their agents the right to use my picture, voice and other reproductions of my physical likeness in connection with advertising or publicizing MMW and their activities in all form of media in perpetuity.',
+  'I, the undersigned patient, consent to the release of my patient records to other licensed health care professionals as necessary. I have read, or had read to me, and understand and agree to all of the above.',
 ];
 const ORAL_SURGERY_TITLE = 'Consent for Oral Surgery';
 const ORAL_SURGERY_CONSENT = [
-  'The surgery procedure that is to be performed has been explained to me and I understand the nature of my condition and of the proposed treatment. I also understand what health risks exist if the procedure is not done, such as pain, infection, decay, damage to other teeth and a more difficult surgery as I get older.',
+  'The surgery procedure that is to be performed has been explained to me and I understand the nature of my condition and of the proposed treatment. I also understand what health risks exist if the procedure is not done, such as pain, infection, decay, damage to other teeth and a more difficult surgery, as I get older.',
   'I agree to the administration of local anesthesia and other therapeutic measures as discussed that may be necessary for my comfort, safety and well-being.',
   'I realize that occasionally there are complications with this surgery and the medications. The more common complications include pain, swelling, bleeding, dry sockets, limited mouth opening, infection, bruising and discoloration of the skin, and temporary numbness and/or tingling of the lip, chin, teeth, or tongue.',
-  'In some cases, even with the utmost care, there can be referred pain to the ear or neck; stiffness of the neck and facial muscles; changes in the bite and temporomandibular joint (TMJ); nausea; allergic reactions; bone fractures; injury to adjacent teeth; delayed healing; and permanent numbness of nerves in the facial area. Sinus complications, which may occur from the removal of upper teeth, include a root tip or tooth in the sinus or the development of a lingering opening into the sinus from the mouth, which could require sinus treatments following surgery. I understand Mission Minded Worldwide does not provide or pay for any of these additional treatments.',
+  'In some cases, even with the utmost care, there can be referred pain to the ear or neck; stiffness of the neck and facial muscles; changes in the bite and temporomandibular joint (TMJ); nausea; allergic reactions; bone fractures; injury to adjacent teeth; delayed healing; and permanent numbness of nerves in the facial area. Sinus complications, which may occur from the removal of upper teeth, include a root tip or tooth in the sinus or development of a lingering opening into the sinus from the mouth, which could require sinus treatments following surgery. I understand Mission Minded Worldwide (MMW) does not provide or pay for any of these additional treatments.',
   'Medications given during or after surgery may cause drowsiness and a lack of awareness and coordination, which could be increased by the use of alcohol or other drugs. I am aware that I should not operate any vehicle or hazardous device while taking such medications for at least 24 hours after taking them, or until recovered from their effects.',
   'I know that some of the above-mentioned complications can be avoided or reduced by carefully following dentist instructions. I have had an opportunity to ask questions about the procedure and aspects related to it and have had them answered to my satisfaction. This is my consent to surgery on the tooth number(s) recorded on this form.',
-  'For prolonged swelling (growing bigger in 24–48 hrs) or no relief from pain: Call MISSION MINDED WORLDWIDE at (951) 317-4968 and leave a message. Someone will call you back and tell you how to get attention for your problem. If you have had to leave a message, be patient and wait until someone calls back and gives you instructions. This post-op attention is only for treatment received and is not for continuing treatment on other teeth. If you experience difficulty breathing or swallowing, you should go to the Emergency Room for immediate treatment. Mission Minded Worldwide does not pay for any emergency room treatment, only for follow-up consultation with an approved local dentist to treat infection, pain, or swelling associated with treatment received at the free clinic.',
-  'I hereby hold Mission Minded Worldwide, Associate Dentist and/or such assistants harmless for the free dental care provided. Services are provided without compensation, and the provider’s liability is limited and the provider may not be held liable for any injury, death or other loss arising out of the provision of these services, unless the injury, death or other loss results from gross negligence.',
+  'For prolonged swelling (growing bigger in 24–48 hrs) or no relief from pain: Call MMW at (951) 317-4968. Leave a message for Vinh Trinh. He will call you back and tell you how to get attention for your problem. If you have had to leave a message, be patient and wait until he calls back and gives you instructions. This post-op attention is only for treatment received and is not for continuing treatment on other teeth. If you experience difficulty breathing or swallowing, you should go to the Emergency Room for immediate treatment. MMW does not pay for any emergency room treatment, only for follow-up consultation with an approved local dentist to treat infection, pain, or swelling associated with treatment received at the free clinic.',
 ];
+// Which consent text was signed. Mirrors consentForm.js consentVersion for the
+// online form's two languages: the general consent is v1, Spanish v2 (the full
+// MMW text, translated, since v0.0.20); the oral-surgery consent is English v1,
+// Spanish v3 (likewise).
+function consentVersion(type, lang) {
+  if (type === 'general') return 'mmw-general-' + lang + '-' + (lang === 'es' ? 'v2' : 'v1');
+  return lang === 'es' ? 'oral_surgery-es-v3' : 'oral_surgery-' + lang + '-v1';
+}
 const CONSENT_AGREE_TEXT = 'I have read and understand the above, and I consent.';
 
 // ---- Spanish (es) option labels + consent, mirroring the app's translations ----
@@ -907,13 +946,25 @@ const FORM_DENTAL_YESNO_ES = [
   ['pain_touch', '¿Siente dolor al tocar la zona?'], ['grinding_night', '¿Aprieta o rechina los dientes por la noche?'],
   ['jaw_pain_waking', '¿Se despierta con dolor de mandíbula?'], ['sores', '¿Nota algún bulto o llaga en la boca?'],
 ];
-const GENERAL_CONSENT_ES = ['Certifico que he leído este Consentimiento, o que me ha sido leído, y que entiendo lo anterior. Se me ha explicado la naturaleza y el propósito de tales operación(es), procedimiento(s), tratamiento(s) y/o servicios y las razones por las que se consideran necesarios o aconsejables. Por la presente eximo de responsabilidad a Mission Minded Worldwide, al Dentista Asociado y/o a dichos asistentes por la atención dental gratuita brindada. Los servicios se prestan sin compensación y la responsabilidad del proveedor es limitada y el proveedor no puede ser considerado responsable por ninguna lesión, muerte u otra pérdida que surja de la prestación de estos servicios, a menos que la lesión, muerte u otra pérdida resulte de negligencia grave. También soy consciente del riesgo de exposición al COVID durante un procedimiento dental y consiento participar en esta clínica bajo mi propio riesgo. (La versión en inglés es la versión legal autoritativa.)'];
+const GENERAL_CONSENT_TITLE_ES = 'Solicitud del Paciente y Consentimiento para Atención Médica';
+const GENERAL_CONSENT_ES = [
+  'CONSENTIMIENTO DEL PACIENTE PARA ATENCIÓN PRIMARIA GENERAL — Por la presente autorizo a los médicos, enfermeros, dentistas y/u otros proveedores de atención médica de Mission Minded Worldwide (MMW), algunos de los cuales pueden ser estudiantes avanzados bajo estrecha supervisión, a examinarme y/o tratarme a mí y/o a mi dependiente nombrado arriba. Entiendo que es mi responsabilidad notificar a MMW cualquier cambio en mi información de contacto, como un cambio de dirección o un nuevo número de teléfono, cuando pueda ser necesario un seguimiento.',
+  'AVISO DE CONSENTIMIENTO PRESUNTO PARA LAS PRUEBAS DE VIH Y DE HEPATITIS B O C — Como proveedor de atención médica, ponemos a su disposición el siguiente aviso: 1. Si uno de nuestros profesionales de la salud, trabajadores o empleados quedara expuesto directamente a su sangre o a sus fluidos corporales de una manera que pueda transmitir una enfermedad, se le hará a su sangre una prueba de infección por el virus de la inmunodeficiencia humana (el virus del “SIDA”), Covid-19, así como de hepatitis B y C. Un médico u otro proveedor de atención médica le informará el resultado de la prueba. Al marcar “Sí” abajo, se considerará que usted ha dado su consentimiento para que los resultados de la prueba se entreguen a la persona expuesta.',
+  '2. Si usted quedara expuesto directamente a la sangre o a los fluidos corporales de uno de nuestros profesionales de la salud, trabajadores o empleados de una manera que pueda transmitir la enfermedad, se le hará a la sangre de esa persona una prueba de infección por el virus de la inmunodeficiencia humana (el virus del “SIDA”), Covid-19, así como de hepatitis B y C. Un médico u otro proveedor de atención médica les informará a usted y a esa persona los resultados de la prueba.',
+  'AVISO IMPORTANTE — MMW es una organización benéfica 501(c)3 sin voluntarios remunerados y NO forma parte de ningún programa del gobierno. Es posible que los voluntarios de MMW no puedan brindarle todos los servicios que usted necesita, pero si desea consultar con nuestro equipo de voluntarios y recibir el tipo de tratamiento que se ofrece hoy, lea con mucha atención la siguiente renuncia del paciente.',
+  'RENUNCIA DEL PACIENTE — Nota para los pacientes dentales: Aunque los higienistas, dentistas y cirujanos orales voluntarios ofrecen procedimientos de alta calidad con buen equipo, entiendo que, debido a la cantidad de personas que necesitan ser atendidas, es posible que no reciba varias extracciones o varios empastes. Entiendo que podría tener ciertas condiciones médicas que me impidan recibir el tipo de tratamiento que solicito. También entiendo que los proveedores de atención dental son voluntarios, algunos de fuera de la ciudad, y que no estarán disponibles para dar atención de seguimiento en caso de complicaciones. Acepto buscar cualquier atención de seguimiento que pueda necesitar con mi dentista local, el departamento de salud, mi médico de familia o la sala de emergencias de un hospital.',
+  'Otorgo a MMW y a sus representantes el derecho a usar mi imagen, mi voz y otras reproducciones de mi apariencia física en relación con la publicidad o la difusión de MMW y de sus actividades, en todo tipo de medios y a perpetuidad.',
+  'Yo, el paciente abajo firmante, doy mi consentimiento para que mis expedientes de paciente se entreguen a otros profesionales de la salud con licencia, según sea necesario. He leído, o me han leído, y entiendo y acepto todo lo anterior. (La versión en inglés es la versión legal autoritativa.)',
+];
+const ORAL_SURGERY_TITLE_ES = 'Consentimiento para Cirugía Oral';
 const ORAL_SURGERY_ES = [
-  'Este consentimiento adicional es necesario porque hoy podría realizarse una extracción.',
-  'Consiento la extracción de uno o más dientes y el uso de anestesia local.',
-  'Entiendo que las complicaciones pueden incluir dolor, hinchazón, moretones, infección, alvéolo seco, sangrado, apertura limitada de la mandíbula, lesión a dientes u obturaciones cercanas, y entumecimiento del labio, lengua o mentón que suele ser temporal pero rara vez puede ser permanente.',
-  'Entiendo que un diente o la punta de la raíz puede romperse durante la extracción y que un pequeño fragmento puede quedar si extraerlo causara mayor daño.',
-  'He informado al equipo de todos los medicamentos y condiciones de salud que puedan afectar la cirugía o la recuperación.',
+  'Se me ha explicado el procedimiento quirúrgico que se va a realizar y entiendo la naturaleza de mi condición y del tratamiento propuesto. También entiendo qué riesgos para la salud existen si no se realiza el procedimiento, como dolor, infección, caries, daño a otros dientes y una cirugía más difícil a medida que envejezca.',
+  'Acepto la administración de anestesia local y de otras medidas terapéuticas, según lo conversado, que puedan ser necesarias para mi comodidad, seguridad y bienestar.',
+  'Comprendo que ocasionalmente hay complicaciones con esta cirugía y con los medicamentos. Las complicaciones más comunes incluyen dolor, hinchazón, sangrado, alveolo seco, apertura limitada de la boca, infección, moretones y cambio de color de la piel, y adormecimiento y/u hormigueo temporal del labio, el mentón, los dientes o la lengua.',
+  'En algunos casos, aun con el mayor cuidado, puede haber dolor referido al oído o al cuello; rigidez del cuello y de los músculos faciales; cambios en la mordida y en la articulación temporomandibular (ATM); náuseas; reacciones alérgicas; fracturas óseas; lesión a los dientes vecinos; cicatrización lenta; y adormecimiento permanente de los nervios del área facial. Las complicaciones de los senos nasales, que pueden ocurrir al extraer dientes superiores, incluyen una punta de raíz o un diente dentro del seno o la formación de una abertura persistente entre la boca y el seno, lo que podría requerir tratamientos de los senos después de la cirugía. Entiendo que Mission Minded Worldwide (MMW) no proporciona ni paga ninguno de estos tratamientos adicionales.',
+  'Los medicamentos que se den durante o después de la cirugía pueden causar somnolencia y falta de atención y de coordinación, lo cual podría aumentar con el consumo de alcohol u otras drogas. Sé que no debo manejar ningún vehículo ni operar ningún aparato peligroso mientras tome esos medicamentos, durante al menos 24 horas después de tomarlos o hasta que se me pasen sus efectos.',
+  'Sé que algunas de las complicaciones mencionadas pueden evitarse o reducirse siguiendo con cuidado las instrucciones del dentista. He tenido la oportunidad de hacer preguntas sobre el procedimiento y los aspectos relacionados con él, y me las han respondido a mi satisfacción. Este es mi consentimiento para la cirugía en el/los número(s) de diente anotado(s) en este formulario.',
+  'Si la hinchazón se prolonga (aumenta de tamaño en 24–48 horas) o el dolor no se alivia: llame a MMW al (951) 317-4968. Deje un mensaje para Vinh Trinh. Él le devolverá la llamada y le dirá cómo recibir atención para su problema. Si tuvo que dejar un mensaje, tenga paciencia y espere a que le devuelva la llamada y le dé instrucciones. Esta atención posoperatoria es solo para el tratamiento recibido y no para continuar el tratamiento de otros dientes. Si tiene dificultad para respirar o tragar, debe ir a la sala de emergencias para recibir tratamiento inmediato. MMW no paga ningún tratamiento en la sala de emergencias; solo paga una consulta de seguimiento con un dentista local aprobado para tratar la infección, el dolor o la hinchazón relacionados con el tratamiento recibido en la clínica gratuita.',
 ];
 
 // Bilingual dictionary — keys stay identical (they map to the app's data); only
@@ -950,6 +1001,8 @@ const I18N = {
     errEmName: 'Please enter an emergency contact name.', errEmPhone: 'Please enter an emergency contact phone number.',
     errServices: 'Please choose at least one service.',
     errMedical: 'Please answer every medical and dental history question.',
+    deemedQ: 'The deemed notice for HIV, Covid-19, Hepatitis B and C exposure has been explained to me and I understand it.',
+    errDeemed: 'Please answer Yes or No to the HIV / Hepatitis notice.',
     errVisit: 'Please choose what you need today.',
     errReload: 'This form was updated after you opened it. Please reload the page and fill it in again.',
     errConsent: 'Please read and agree to the consent to finish.', errSurgery: 'An extraction was selected — please read and agree to the Oral Surgery consent too.',
@@ -990,6 +1043,8 @@ const I18N = {
     errEmName: 'Por favor ingrese el nombre de un contacto de emergencia.', errEmPhone: 'Por favor ingrese el teléfono del contacto de emergencia.',
     errServices: 'Elija al menos un servicio.',
     errMedical: 'Por favor responda todas las preguntas del historial médico y dental.',
+    deemedQ: 'Se me ha explicado el aviso de consentimiento presunto para la exposición al VIH, Covid-19 y Hepatitis B y C, y lo entiendo.',
+    errDeemed: 'Responda Sí o No al aviso sobre VIH / Hepatitis.',
     errVisit: 'Por favor elija qué necesita hoy.',
     errReload: 'Este formulario se actualizó después de que lo abrió. Vuelva a cargar la página y complételo de nuevo.',
     errConsent: 'Por favor lea y acepte el consentimiento para terminar.', errSurgery: 'Se seleccionó una extracción — por favor lea y acepte también el consentimiento de cirugía oral.',
@@ -997,7 +1052,7 @@ const I18N = {
     netErr: 'Error de red. Por favor intente de nuevo.', genErr: 'Algo salió mal. Por favor intente de nuevo.',
     visits: FORM_VISITS_ES, allergyList: FORM_ALLERGIES_ES, conditionList: FORM_CONDITIONS_ES, medYesNo: FORM_MED_YESNO_ES, dentalYesNo: FORM_DENTAL_YESNO_ES,
     medChecklist: FORM_MED_CHECKLIST_ES, surgerySiteList: FORM_SURGERY_SITES_ES,
-    generalTitle: 'Consentimiento General para Tratamiento Dental', generalMode: 'p', general: GENERAL_CONSENT_ES, surgeryTitle: 'Consentimiento de Cirugía Oral / Extracción', surgeryText: ORAL_SURGERY_ES,
+    generalTitle: GENERAL_CONSENT_TITLE_ES, generalMode: 'ol', general: GENERAL_CONSENT_ES, surgeryTitle: ORAL_SURGERY_TITLE_ES, surgeryText: ORAL_SURGERY_ES,
   },
 };
 
@@ -1060,7 +1115,7 @@ function checkinShell(title, inner) {
     '.sigbar{display:flex;justify-content:space-between;align-items:center;margin-top:6px}.sigbar a{font-size:13px;color:var(--g);text-decoration:underline;cursor:pointer}' +
     '</style></head><body><div class="wrap">' + inner + '</div></body></html>';
 }
-function checkinFormPage(eventUid, eventName, lang, cities) {
+function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
   const L = I18N[lang] || I18N.en;
   const chip = (name, k, label) => '<label class="chip"><input type="checkbox" name="' + name + '" value="' + htmlEscape(k) + '">' + htmlEscape(label) + '</label>';
   const raceChips = L.raceList.map(([k, l]) => chip('race', k, l)).join('');
@@ -1102,7 +1157,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
   const genConsent = '<h3>' + htmlEscape(L.generalTitle) + '</h3>' + (L.generalMode === 'ol' ? ('<ol>' + L.general.map((c) => '<li>' + htmlEscape(c) + '</li>').join('') + '</ol>') : L.general.map((c) => '<p>' + htmlEscape(c) + '</p>').join(''));
   const surConsent = '<h3>' + htmlEscape(L.surgeryTitle) + '</h3>' + L.surgeryText.map((c) => '<p>' + htmlEscape(c) + '</p>').join('');
   const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh,
-    condNone: L.condNone, condNoneRest: L.condNoneRest, moreMarked: L.moreMarked };
+    condNone: L.condNone, condNoneRest: L.condNoneRest, moreMarked: L.moreMarked, errDeemed: L.errDeemed };
   // The wording each refusal quotes, keyed like firstMissingHistory's ids, so
   // the page names the question it wants exactly as the server would.
   const Q = { under_treatment: medQ('under_treatment'), major_surgery: medQ('major_surgery'), tobacco: medQ('tobacco'),
@@ -1126,7 +1181,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     '<div><label>' + htmlEscape(L.email) + '</label><input type="email" id="email" autocomplete="email"></div></div>' +
     '<label>' + htmlEscape(L.address) + '</label><input type="text" id="address" autocomplete="street-address">' +
     '<div class="row"><div><label>' + htmlEscape(L.city) + ' <span class="req">*</span></label>' + cityControl + '</div>' +
-    '<div><label>' + htmlEscape(L.state) + ' <span class="req">*</span></label><select id="state" autocomplete="address-level1"><option value="">' + htmlEscape(L.dash) + '</option>' + US_STATE_OPTIONS + '</select></div></div>' +
+    '<div><label>' + htmlEscape(L.state) + ' <span class="req">*</span></label><select id="state" autocomplete="address-level1"><option value="">' + htmlEscape(L.dash) + '</option>' + stateOptions(homeState) + '</select></div></div>' +
     cityOther +
     '<div class="row"><div><label>' + htmlEscape(L.emName) + ' <span class="req">*</span></label><input type="text" id="emergency_name"></div>' +
     '<div><label>' + htmlEscape(L.emPhone) + ' <span class="req">*</span></label><input type="tel" id="emergency_phone" inputmode="numeric"></div></div>' +
@@ -1170,9 +1225,12 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
       '</select>' + dentalYesNo + '</div>' +
 
     '<div class="card"><h2>' + htmlEscape(L.consent) + '</h2><div class="consent">' + genConsent + '</div>' +
+    // The Yes / No MMW's consent asks of its HIV / Hepatitis notice, right
+    // after the text, as at the kiosk: ticking "I agree" is not the same answer.
+    selRow('deemed', L.deemedQ, ['yes', 'no']) +
+    '<label class="agree"><input type="checkbox" id="cagree"><span>' + htmlEscape(L.agree) + '</span></label>' +
     '<div class="row" style="margin-top:10px"><div><label>' + htmlEscape(L.signName) + '</label><input type="text" id="signer"></div>' +
     '<div><label>' + htmlEscape(L.relationship) + '</label><input type="text" id="relationship" placeholder="' + htmlEscape(L.relPh) + '"></div></div>' +
-    '<label class="agree"><input type="checkbox" id="cagree"><span>' + htmlEscape(L.agree) + '</span></label>' +
     '<label style="margin-top:10px">' + htmlEscape(L.sigOpt) + ' <span class="req">*</span></label><canvas id="gsig" class="sig"></canvas>' +
     '<div class="sigbar"><span class="hint">' + htmlEscape(L.sigHint) + '</span><a id="gclear">' + htmlEscape(L.clear) + '</a></div></div>' +
 
@@ -1263,6 +1321,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     // Every unanswered one-tap question is marked at once, and counted.
     "var unans=[];document.querySelectorAll('.ynb').forEach(function(g){var y=g.closest('.yn');if(val(g.id)){y.classList.remove('miss');}else{y.classList.add('miss');unans.push(g.id);}});" +
     "if(miss){var more=unans.length-(unans.indexOf(miss[1]||miss[0])>=0?1:0);err.textContent=T.errMedical.replace(/\\.$/,'')+': '+Q[miss[0]]+(more>0?T.moreMarked.replace('{n}',more):'');var e2=el(miss[1]||miss[0]);if(e2){e2.scrollIntoView({block:'center'});if(e2.focus)e2.focus();}return;}" +
+    "if(!val('deemed')){err.textContent=T.errDeemed;var dq=el('deemed');dq.closest('.yn').classList.add('miss');dq.scrollIntoView({block:'center'});return;}" +
     "if(!el('cagree').checked){err.textContent=T.errConsent;return;}" +
     "if(!val('signer').trim()){err.textContent=T.errSigner;return;}" +
     "if(!gpad||!gpad.data()){err.textContent=T.errSign;el('gsig').scrollIntoView({block:'center'});return;}" +
@@ -1277,7 +1336,7 @@ function checkinFormPage(eventUid, eventName, lang, cities) {
     "major_surgery:val('major_surgery'),surgery_sites:checked('surgery_site'),tobacco:val('tobacco')," +
     "allergy_status:val('allergy_status'),allergies:checked('allergy'),allergies_other:val('allergies_other')," +
     "prior_dentist:val('prior_dentist')," +
-    "consent_agree:el('cagree').checked,signer_name:val('signer'),relationship:val('relationship'),signature_png:gpad?gpad.data():null," +
+    "deemed_consent:val('deemed'),consent_agree:el('cagree').checked,signer_name:val('signer'),relationship:val('relationship'),signature_png:gpad?gpad.data():null," +
     "surgery_agree:el('sagree')?el('sagree').checked:false,surgery_teeth:val('steeth'),surgery_signature_png:spad?spad.data():null};" +
     // The Step 3 answers are posted from the same list the page renders and
     // the server validates, so the three can never name different questions.

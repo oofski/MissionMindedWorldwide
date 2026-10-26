@@ -63,7 +63,7 @@ export function renderProvider(ctx, params = {}) {
     // the same in_treatment either way.
     const stagePill = (p, list) => (list === triageQueue && p.status === 'in_treatment'
       ? el('span', { class: 'pill pill--warning' }, [el('span', { class: 'pill-dot' }), 'Being examined'])
-      : statusPill(p.status));
+      : statusPill(p.status, p));
     const row = (p, list) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
         p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:8px' }, ['Blood thinner']) : null,
@@ -76,7 +76,7 @@ export function renderProvider(ctx, params = {}) {
         // lead balances fifteen chairs against.
         p.status === 'treatment_waiting' && p.treatment_waiting_at
           ? el('span', { class: 'subtle small', style: 'margin-left:6px' }, [waitedFor(p.treatment_waiting_at)]) : null]),
-      el('td', {}, [chevronBtn('Treat', () => detail(p.id))]),
+      el('td', {}, [chevronBtn('Open', () => detail(p.id))]),
     ]);
     const table = (list, emptyMsg) => el('div', { class: 'data-table-wrap' }, [
       el('table', { class: 'data-table' }, [
@@ -141,6 +141,10 @@ export function renderProvider(ctx, params = {}) {
     // sign-off panel offers the amendment and the re-lock instead of the
     // usual "finish the visit" actions.
     const amending = !!(p.lock && p.lock.amending);
+    // Where the patient is in the visit: at Dental Triage — waiting to be
+    // examined, or being examined — and not yet handed to a treatment chair;
+    // or at, or waiting for, a chair. It decides which action leads.
+    const atTriage = p.status === 'triaged' || (p.status === 'in_treatment' && !tr.treatment_waiting_at);
 
     /* ---------- EMT vitals + routing strip (read-only) ---------- */
     // Compact one-line summary of what the EMT station recorded before sending
@@ -307,6 +311,37 @@ export function renderProvider(ctx, params = {}) {
     (tx.fillings || []).forEach((f) => addFilling(f));
     if (!(tx.fillings || []).length && !locked) addFilling();
 
+    // "Add" read as "save this": a second tap added an empty row and said
+    // nothing. So the button says "another" once there is a row, an empty row
+    // is filled in before another is added, and the row just finished is
+    // named — noted on the chart, kept when the chart is saved.
+    const rowSummary = (kind, x) => `${kind} #${x.tooth}${kind === 'Filling' && x.surfaces.length ? ' ' + x.surfaces.join('') : ''}${kind === 'Extraction' && x.types.length ? ' (' + x.types.map((k) => (EXTRACTION_TYPES.find(([key]) => key === k) || [k, k])[1].toLowerCase()).join(', ') + ')' : ''}`;
+    function addAnother(kind, rowsEl, add) {
+      const rows = Array.from(rowsEl.children);
+      const last = rows[rows.length - 1];
+      const lastX = last ? last._get() : null;
+      if (last && !lastX.tooth) {
+        last._tooth.focus();
+        toast(`Enter the tooth # for this ${kind.toLowerCase()} first.`, 'info');
+        return;
+      }
+      add();
+      refreshMarks();
+      paintAddLabels();
+      if (lastX) toast(`${rowSummary(kind, lastX)} noted — enter the next one. Save to keep them.`, 'info');
+      const fresh = rowsEl.lastElementChild;
+      if (fresh && fresh._tooth) fresh._tooth.focus();
+    }
+    // Built once the extraction rows exist (below); until then a repaint is a no-op.
+    let addFillingBtn = null;
+    let addExtractionBtn = null;
+    function paintAddLabels() {
+      if (!addFillingBtn || !addExtractionBtn) return;
+      const label = (btn, rowsEl, noun) => btn.replaceChildren(icon('plus', { size: 15 }), rowsEl.children.length ? `Add another ${noun}` : `Add ${noun}`);
+      label(addFillingBtn, fillingRows, 'filling');
+      label(addExtractionBtn, extractRows, 'extraction');
+    }
+
     /* ---------- Extractions ---------- */
     const extractRows = el('div', { class: 'tx-rows' });
     function addExtraction(x = {}, auto = false) {
@@ -338,6 +373,9 @@ export function renderProvider(ctx, params = {}) {
       extractRows.append(row);
     }
     (tx.extractions || []).filter((x) => !x.other).forEach((x) => addExtraction(x));
+    addFillingBtn = softBtn('plus', 'Add filling', () => addAnother('Filling', fillingRows, () => addFilling()));
+    addExtractionBtn = softBtn('plus', 'Add extraction', () => addAnother('Extraction', extractRows, () => addExtraction()));
+    paintAddLabels();
     const otherExisting = (tx.extractions || []).find((x) => x.other) || {};
     const extOther = el('input', { class: 'input', placeholder: 'Other extraction (describe)', value: otherExisting.other || '', disabled: locked });
     const extOtherTooth = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: otherExisting.tooth || '', disabled: locked });
@@ -929,7 +967,7 @@ export function renderProvider(ctx, params = {}) {
       return m;
     }
     // Manual row edits reflect back onto the mouth (silent — no onTag loop).
-    function refreshMarks() { odo.setMarks(computeMarksLive()); }
+    function refreshMarks() { odo.setMarks(computeMarksLive()); paintAddLabels(); }
 
     function collectTreatment() {
       const extractions = Array.from(extractRows.children).map((r) => r._get()).filter((x) => x.tooth);
@@ -1001,10 +1039,17 @@ export function renderProvider(ctx, params = {}) {
     // was well. An extraction row always needs its tooth; a filling row once
     // anything is marked on it (the empty one the chart opens with is not a
     // filling).
-    function rowWithoutTooth() {
+    function rowWithoutTooth(mode) {
       const ext = Array.from(extractRows.children);
       for (let i = 0; i < ext.length; i++) {
-        if (!ext[i]._get().tooth) return { msg: `Extraction ${i + 1}: enter the tooth #, or remove the row with ✕.`, input: ext[i]._tooth };
+        const x = ext[i]._get();
+        if (!x.tooth) return { msg: `Extraction ${i + 1}: enter the tooth #, or remove the row with ✕.`, input: ext[i]._tooth };
+        // Finishing the visit prints the after-care, and a surgical extraction
+        // has instructions of its own — so by then each one needs its type.
+        // (At Dental Triage, planning, it may not be known yet.)
+        if ((mode === 'complete' || mode === 'lock') && !x.types.length) {
+          return { msg: `Extraction #${x.tooth}: choose its type (Simple, Surgical…) — the after-care sheet depends on it.`, input: ext[i].querySelector('.chip-btn, button') };
+        }
       }
       const fil = Array.from(fillingRows.children);
       for (let i = 0; i < fil.length; i++) {
@@ -1022,7 +1067,7 @@ export function renderProvider(ctx, params = {}) {
         toast('The general consent must be completed before documenting treatment — use the Consents panel above.', 'error');
         return;
       }
-      const noTooth = rowWithoutTooth();
+      const noTooth = rowWithoutTooth(mode);
       if (noTooth) {
         toast(noTooth.msg, 'error');
         if (noTooth.input) { noTooth.input.classList.add('input--invalid'); noTooth.input.focus(); }
@@ -1062,6 +1107,17 @@ export function renderProvider(ctx, params = {}) {
         toast('Enter the dentist’s printed name — a treatment note has to say who provided the care.', 'error');
         providerName.focus();
         return;
+      }
+      // Completing a visit unsigned is a choice made on purpose, not by a tap
+      // that skipped the pad: check-out and the Dashboard say it is unsigned
+      // until someone signs it.
+      if (mode === 'complete' && !payload.provider_signature) {
+        const ok = await modal({
+          title: 'Complete without a signature?',
+          body: 'Nobody has signed this visit off. Go back and sign in Provider sign-off, or complete it now and sign later — check-out and the Dashboard will show it as not signed until someone does.',
+          confirmText: 'Complete — sign later', cancelText: 'Go back and sign',
+        });
+        if (!ok) { sigPad.node.scrollIntoView && sigPad.node.scrollIntoView({ block: 'center' }); return; }
       }
       if (mode === 'lock') {
         // Re-signing an amended record is a new signature for what the record
@@ -1155,10 +1211,12 @@ export function renderProvider(ctx, params = {}) {
         el('div', {}, [
           backBtn(() => ctx.navigate('provider')),
           el('h1', {}, [`${p.first_name} ${p.last_name}`]),
-          el('p', { class: 'view-sub' }, [`${p.age != null ? p.age + ' yrs · ' : ''}${p.gender || ''} · ${p.language === 'es' ? 'Español' : 'English'} · Complaint: ${(tr.complaint) || p.dental_history.reason || '—'}`]),
+          // Joined from what is known, so a blank gender is not a stray "· ·".
+          el('p', { class: 'view-sub' }, [[p.age != null ? p.age + ' yrs' : null, p.gender || null, p.language === 'es' ? 'Español' : 'English',
+            `Complaint: ${(tr.complaint) || p.dental_history.reason || '—'}`].filter(Boolean).join(' · ')]),
         ]),
         el('div', { style: 'display:flex;align-items:center;gap:var(--space-3)' }, [
-          locked ? el('span', { class: 'pill pill--neutral' }, [icon('lock', { size: 12 }), 'Locked']) : statusPill(p.status),
+          locked ? el('span', { class: 'pill pill--neutral' }, [icon('lock', { size: 12 }), 'Locked']) : statusPill(p.status, p),
         ]),
       ]),
 
@@ -1235,10 +1293,10 @@ export function renderProvider(ctx, params = {}) {
       // happen here now that the triage station is gone).
       panel('pen', 'Fillings',
         fillingRows,
-        locked ? null : softBtn('plus', 'Add filling', () => { addFilling(); refreshMarks(); })),
+        locked ? null : addFillingBtn),
       panel('tooth', 'Extractions',
         extractRows,
-        locked ? null : softBtn('plus', 'Add extraction', () => { addExtraction(); refreshMarks(); }),
+        locked ? null : addExtractionBtn,
         el('div', { class: 'field-row', style: 'margin-top:10px' }, [
           el('label', { class: 'field', style: 'flex:1;margin:0' }, [el('span', { class: 'field-label' }, ['Other']), extOther]),
           el('label', { class: 'field', style: 'margin:0;max-width:90px' }, [el('span', { class: 'field-label' }, ['Tooth #']), extOtherTooth]),
@@ -1305,19 +1363,14 @@ export function renderProvider(ctx, params = {}) {
                 el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
               ])
           : el('div', { class: 'action-stack', style: 'margin-top:12px' }, [
-              // ONE clear primary action for the station; everything else is secondary.
-              primaryBtn('checkCircle', 'Mark visit complete', () => save('complete')),
-              // Dental Triage has examined the patient and hands them on to a
-              // treatment chair. Hidden once they are already waiting — saving
-              // progress is then the treating dentist taking them in.
-              p.status !== 'treatment_waiting'
-                ? el('button', { class: 'btn btn--soft btn--block', type: 'button', onClick: () => save('waiting') }, [icon('calendar', { size: 16 }), 'Move Patient to Treatment Waiting'])
-                : null,
-              el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save progress']),
-              // Less-common actions tucked away so the screen isn't a wall of buttons.
+              // Less-common actions tucked away so the screen isn't a wall of
+              // buttons; the station's own actions are in the bar at the foot.
               el('details', { class: 'collapse', style: 'margin-top:8px' }, [
                 el('summary', { style: 'font-size:var(--fs-base)' }, ['More options']),
                 el('div', { class: 'collapse-body action-stack' }, [
+                  // At Dental Triage, finishing the visit here (nothing that
+                  // needs a treatment chair) is the exception, not the default.
+                  atTriage ? el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark visit complete — no treatment chair needed']) : null,
                   el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: transferToHygienist }, [icon('sparkle', { size: 16 }), 'Transfer to hygienist']),
                   el('button', { class: 'btn btn--ghost btn--block', type: 'button', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Sign off & lock (make record read-only)']),
                   store.can('admin', 'doctor')
@@ -1329,6 +1382,23 @@ export function renderProvider(ctx, params = {}) {
                 ]),
               ]),
             ])),
+      // The station's actions, kept at the foot of the screen: the chart is
+      // several screens tall, and they used to be at the very bottom of it.
+      // Which one leads follows where the patient is. At Dental Triage the
+      // next step is a treatment chair, so "Move to Treatment Waiting" leads
+      // and completing the visit is under More options — it used to be the
+      // most prominent button, and sent untreated patients to check-out.
+      locked ? null : el('div', { class: 'chart-actions-bar' }, amending
+        ? [
+            el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save amendment']),
+            el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('lock') }, [icon('lock', { size: 16 }), 'Re-sign & lock']),
+          ]
+        : [
+            el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => save(false) }, [icon('save', { size: 16 }), 'Save progress']),
+            atTriage
+              ? el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('waiting') }, [icon('calendar', { size: 16 }), 'Move Patient to Treatment Waiting'])
+              : el('button', { class: 'btn btn--primary', type: 'button', onClick: () => save('complete') }, [icon('checkCircle', { size: 16 }), 'Mark visit complete']),
+          ]),
     );
     refreshMarks();
   }

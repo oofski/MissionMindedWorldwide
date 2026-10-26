@@ -4,7 +4,7 @@ import { t, tRaw, getLang, setLang, languageList, visitTypeLabel, speak, stopSpe
 import { textField } from '../forms.js';
 import { SignatureField } from '../components/signatureField.js';
 import { SIGN_HELP, SIGN_REQUIRED, DEEMED_NOTICE, DEEMED_REQUIRED, consentVersion } from '../components/consentForm.js';
-import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, matchCity } from '../components/intakeSections.js';
+import { demographicsSection, medicalHistorySection, dentalHistorySection, eventCities, eventState, matchCity, refuseGaps, clearMarksOnAnswer } from '../components/intakeSections.js';
 import { medicalDisplay } from '../medicalHistory.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
@@ -24,6 +24,7 @@ export function renderKiosk(ctx) {
   let started = false;
   let eventLangs = null; // CSV of language codes enabled for the active event
   let eventCityList = []; // the active event's City dropdown; empty = a text box
+  let eventStateCode = ''; // the state the event is held in, which State starts on
 
   // Step builders return { title, node, collect } — collect() validates and
   // writes into `data`, returning false to block navigation.
@@ -141,7 +142,7 @@ export function renderKiosk(ctx) {
     const sec = demographicsSection({
       first_name: data.first_name, last_name: data.last_name, dob: data.dob, gender: data.gender,
       phone: data.phone, email: data.email, demographics: data.demographics,
-    }, { cities: eventCityList });
+    }, { cities: eventCityList, defaultState: eventStateCode });
     return {
       title: t('intake.s_demographics'),
       node: sec.node,
@@ -264,31 +265,34 @@ export function renderKiosk(ctx) {
       deemedRow,
     ]);
 
+    const agreeRow = el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]);
     const node = el('div', { class: 'consent-screen' }, [
       minor ? el('div', { class: 'minor-banner' }, [icon('alert', { size: 16 }), ' ' + t('intake.minorNotice')]) : null,
       sections,
       deemedField,
-      el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]),
+      agreeRow,
       el('div', { class: 'form-grid' }, [signer.node, rel.node]),
       sigPad.node,
       el('p', { class: 'field-hint' }, [sigHelp]),
     ]);
+    clearMarksOnAnswer(node);
+    sigPad.node.addEventListener('pointerup', () => sigPad.node.classList.remove('is-missing'));
 
     return {
       title: t('intake.s_consent'),
       node,
       stash: () => { drafts.general = { agree: agree.checked, deemed, signer: signer.get(), rel: rel.get(), sig: sigPad.snapshot() }; },
       collect: () => {
-        if (!agree.checked) { toast(tickToContinue(), 'error'); return false; }
-        if (!deemed) {
-          toast(L(DEEMED_REQUIRED), 'error');
-          return false;
-        }
-        if (!signer.get()) { toast(t('common.required') + ': ' + t('intake.signerName'), 'error'); return false; }
-        // The front desk will not send a patient through on an unsigned
-        // consent, so the kiosk must not let one leave unsigned. Typing the
-        // name ("Type my name") is a signature, for a laptop with no touch.
-        if (sigPad.isEmpty()) { toast(L(SIGN_REQUIRED), 'error'); return false; }
+        // Every gap at once, in the order the step asks them. The front desk
+        // will not send a patient through on an unsigned consent, so the
+        // kiosk must not let one leave unsigned; typing the name ("Type my
+        // name") is a signature, for a laptop with no touch.
+        const gaps = [];
+        if (!deemed) gaps.push({ msg: L(DEEMED_REQUIRED), node: deemedField });
+        if (!agree.checked) gaps.push({ msg: tickToContinue(), node: agreeRow });
+        if (!signer.get()) gaps.push({ msg: t('common.required') + ': ' + t('intake.signerName'), node: signer.node });
+        if (sigPad.isEmpty()) gaps.push({ msg: L(SIGN_REQUIRED), node: sigPad.node });
+        if (!refuseGaps(node, gaps)) return false;
         upsertConsent('general', {
           signer_name: signer.get(), relationship: rel.get(),
           signature_png: sigPad.getDataUrl(),
@@ -328,6 +332,7 @@ export function renderKiosk(ctx) {
           consentSection({ title: t('consent.surgeryTitle'), intro: t('consent.surgeryIntro'), clauses: t('consent.surgeryClauses') }),
           consentSection({ title: t('consent.postOpTitle'), clauses: [t('consent.postOp')], extra: t('consent.emergency') }),
         ];
+    const agreeRow = el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]);
     const node = el('div', { class: 'consent-screen' }, [
       // Why there is one more step than before: the step count goes up by one
       // the moment an extraction is chosen, and nothing used to say why.
@@ -338,29 +343,30 @@ export function renderKiosk(ctx) {
       })]),
       ...surgerySections,
       el('div', { class: 'banner banner--info' }, [icon('flag', { size: 16 }), ' ' + toothNote]),
-      el('label', { class: 'agree-row' }, [agree, el('span', {}, [t('consent.agree')])]),
+      agreeRow,
       signer.node,
       sigPad.node,
       el('p', { class: 'field-hint' }, [sigHelp]),
     ]);
+    clearMarksOnAnswer(node);
+    sigPad.node.addEventListener('pointerup', () => sigPad.node.classList.remove('is-missing'));
 
     return {
       title: t('intake.s_surgery'),
       node,
       stash: () => { drafts.oral_surgery = { agree: agree.checked, signer: signer.get(), sig: sigPad.snapshot() }; },
       collect: () => {
-        if (!agree.checked) { toast(tickToContinue(), 'error'); return false; }
-        if (sigPad.isEmpty()) { toast(L(SIGN_REQUIRED), 'error'); return false; }
+        const gaps = [];
+        if (!agree.checked) gaps.push({ msg: tickToContinue(), node: agreeRow });
+        if (sigPad.isEmpty()) gaps.push({ msg: L(SIGN_REQUIRED), node: sigPad.node });
+        if (!refuseGaps(node, gaps)) return false;
         upsertConsent('oral_surgery', {
           signer_name: signer.get() || signerFromGeneral(),
           signature_png: sigPad.getDataUrl(),
           signature_method: sigPad.getMethod(),
-          // Which text was signed. A language without the full wording signs
-          // the sections above, which end with consent.emergency; its number
-          // changed in v0.0.15 (MMW's line replaced an Oregon one), so a row
-          // signed since then is v2. The full wording (English) did not
-          // change and stays v1.
-          version: `oral_surgery-${getLang()}-${surgeryFull ? 'v1' : 'v2'}`,
+          // Which text was signed (consentForm.consentVersion: one rule for
+          // the kiosk, the desk and, mirrored, the online form).
+          version: consentVersion('oral_surgery', getLang()),
         });
         return true;
       },
@@ -497,6 +503,7 @@ export function renderKiosk(ctx) {
   const eventLoaded = Promise.race([
     api.activeEvent().then((ev) => {
       eventCityList = eventCities(ev);
+      eventStateCode = eventState(ev);
       if (ev && ev.languages) { eventLangs = ev.languages; if (!started) renderGate(); }
     }).catch(() => {}),
     new Promise((resolve) => setTimeout(resolve, 1500)),

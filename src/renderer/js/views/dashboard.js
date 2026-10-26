@@ -15,7 +15,6 @@ import { openPatientInfo } from '../components/patientHistory.js';
 const STAGES = [
   { key: 'checkin', label: 'Checked in', color: 'var(--info)' },
   { key: 'vitals', label: 'Vitals', color: 'var(--accent)' },
-  { key: 'ready', label: STATUS_LABELS.triaged, color: 'var(--accent)' },
   { key: 'hygienist', label: 'Hygienist', color: 'var(--warning)' },
   { key: 'dentist', label: 'Dental Triage', color: 'var(--warning)' },
   { key: 'waiting', label: STATUS_LABELS.treatment_waiting, color: 'var(--info)' },
@@ -30,7 +29,10 @@ function stageOf(p) {
     // Taken from Treatment Waiting into a chair, or still being examined.
     return p.treatment_waiting_at ? 'treatment' : 'dentist';
   }
-  if (p.status === 'triaged') return 'ready';
+  // Waiting for a station sits in that station's column (a "Waiting" chip on
+  // the card), not in a "Waiting for provider" column of its own that left
+  // the Dental Triage and Hygienist columns empty while both had a queue.
+  if (p.status === 'triaged') return p.route === 'hygienist' ? 'hygienist' : 'dentist';
   return p.has_vitals ? 'vitals' : 'checkin'; // checked_in
 }
 // The KPI tile and journey step for status in_treatment (see statCards).
@@ -109,7 +111,7 @@ export function renderDashboard(ctx) {
     const statCards = [
       { label: t('dash.total'), value: stats.total, ic: 'users', kind: 'all' },
       { label: t('dash.waiting'), value: stats.waiting_triage, ic: 'syringe', warn: stats.waiting_triage > 0, kind: 'vitals' },
-      { label: t('dash.triaged'), value: stats.triaged, ic: 'clipboard', kind: 'ready' },
+      { label: 'Waiting for a station', value: stats.triaged, ic: 'clipboard', kind: 'ready' },
       // A stats payload from before v0.0.15 has no such count; show 0, not NaN.
       { label: STATUS_LABELS.treatment_waiting, value: stats.treatment_waiting || 0, ic: 'calendar', kind: 'waiting' },
       // Every patient whose status is in_treatment: being examined at Dental
@@ -127,8 +129,10 @@ export function renderDashboard(ctx) {
        sum to the patients currently in the clinic plus those already finished. */
     const journeySteps = [
       { name: 'Registered', n: stats.total, kind: 'all' },
-      { name: 'Clearance', n: stats.waiting_triage, kind: 'vitals' },
-      { name: STATUS_LABELS.triaged, n: stats.triaged, kind: 'ready' },
+      // The vitals station by the name the sidebar gives it ("Clearance" on
+      // MMW's paper forms, which nothing else on screen called it).
+      { name: t('nav.emt'), n: stats.waiting_triage, kind: 'vitals' },
+      { name: 'Waiting for a station', n: stats.triaged, kind: 'ready' },
       { name: STATUS_LABELS.treatment_waiting, n: stats.treatment_waiting || 0, kind: 'waiting' },
       { name: WITH_PROVIDER, n: stats.in_treatment, kind: 'treatment' },
       { name: 'Checked out', n: checkedOut, kind: 'done' },
@@ -301,6 +305,8 @@ export function renderDashboard(ctx) {
         }, [waitLabel(stage) + (sinceTriage ? ' since triage' : ' here')]));
       }
       if (p.on_thinner) foot.push(el('span', { class: 'crm-chip crm-chip--warn', title: 'On blood thinner — verify before extraction' }, ['Thinner']));
+      if (p.unsigned) foot.push(el('span', { class: 'crm-chip crm-chip--warn', title: 'Completed without the provider\'s signature — sign it on the chart' }, [icon('pen', { size: 10 }), 'Not signed']));
+      if (p.status === 'triaged') foot.unshift(el('span', { class: 'crm-chip crm-chip--wait', title: patientStatusLabel(p.status, p) }, ['Waiting']));
       return el('button', { class: 'crm-card', onClick: () => openByStatus(p) }, [
         el('div', { class: 'crm-card-top' }, [
           el('strong', { class: 'crm-card-name' }, [`${p.last_name}, ${p.first_name}`]),
@@ -377,7 +383,24 @@ export function renderDashboard(ctx) {
 }
 
 // Labels come from the one status map every screen and export shares.
-export function statusPill(status) {
+// Where the patient is, named by station. "Waiting for provider" covered both
+// the Dental Triage queue and the hygienist's, so the board and the queues
+// could not say which station a patient was waiting for. With the patient (a
+// list row or a full record) the label names it; without, the status's own.
+export function patientStatusLabel(status, p = null) {
+  const route = p ? (p.route || (p.triage && p.triage.route) || null) : null;
+  const waited = p ? (p.treatment_waiting_at || (p.triage && p.triage.treatment_waiting_at) || null) : null;
+  if (status === 'triaged' && route) {
+    return { dentist: 'Waiting for Dental Triage', hygienist: 'Waiting for the hygienist', both: 'Waiting for Dental Triage + hygienist' }[route] || STATUS_LABELS.triaged;
+  }
+  if (status === 'in_treatment' && route) {
+    if (route === 'hygienist') return 'With the hygienist';
+    return waited ? STATUS_LABELS.in_treatment : 'At Dental Triage';
+  }
+  return STATUS_LABELS[status] || status;
+}
+
+export function statusPill(status, p = null) {
   const cls = {
     checked_in: 'pill--info',
     triaged: 'pill--info',
@@ -386,6 +409,5 @@ export function statusPill(status) {
     completed: 'pill--success',
     dismissed: 'pill--neutral',
   }[status] || 'pill--neutral';
-  const label = STATUS_LABELS[status] || status;
-  return el('span', { class: `pill ${cls}` }, [el('span', { class: 'pill-dot' }), label]);
+  return el('span', { class: `pill ${cls}` }, [el('span', { class: 'pill-dot' }), patientStatusLabel(status, p)]);
 }

@@ -111,7 +111,7 @@ export function renderEmt(ctx, params = {}) {
         ? el('span', { class: 'pill pill--success' }, [el('span', { class: 'pill-dot' }), 'Vitals done'])
         : el('span', { class: 'subtle small' }, ['Needs vitals'])]),
       el('td', {}, [routePill(p.route)]),
-      el('td', {}, [statusPill(p.status)]),
+      el('td', {}, [statusPill(p.status, p)]),
       el('td', {}, [el('div', { style: 'display:flex;gap:var(--space-1);justify-content:flex-end;align-items:center' }, [
         // C3: export a summary PDF straight from the list, without opening the
         // row — offered only to the roles allowed to export (pdf:generate), so
@@ -358,10 +358,12 @@ export function renderEmt(ctx, params = {}) {
     function paintThinnerLine() {
       const bt = bloodThinnerText(p);
       const answered = tr.blood_thinner === 'yes' || tr.blood_thinner === 'no';
-      bloodThinnerLine.replaceChildren(bt.level === 'danger'
+      // replaceChildren() would write a null as the text "null", so the
+      // Change button is only passed when there is one.
+      bloodThinnerLine.replaceChildren(...[bt.level === 'danger'
         ? el('span', { class: 'pill pill--danger' }, [el('span', { class: 'pill-dot' }), bt.text])
         : el('span', { class: 'subtle small' }, [bt.text]),
-      answered && !readOnly ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-left:var(--space-2)', onClick: () => askBloodThinner() }, ['Change']) : null);
+      answered && !readOnly ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-left:var(--space-2)', onClick: () => askBloodThinner() }, ['Change']) : null].filter(Boolean));
     }
     paintThinnerLine();
 
@@ -378,32 +380,50 @@ export function renderEmt(ctx, params = {}) {
     const historyPanel = patientInfoPanel(p, {
       open: true,
       review: true,
-      onSaved: (np) => { p = np; paintThinnerBanner(); paintThinnerLine(); paintNextStep(); },
+      onSaved: (np) => {
+        p = np; paintThinnerBanner(); paintThinnerLine(); paintNextStep();
+        // Gone through with the patient: folded away, so sign-off is in reach.
+        if ((np.triage || {}).history_reviewed_at) historyPanel.open = false;
+      },
     });
     historyPanel.style.marginTop = 'var(--space-4)';
+    // Open until it has been reviewed at this visit; folded once it has.
+    historyPanel.open = !tr.history_reviewed_at;
 
     // Whatever is typed in the vitals fields right now — routing saves this
     // first so the vitals gate sees the reading the nurse just took.
     const pendingVitals = () => ({ bp_systolic: sys.value, bp_diastolic: dia.value, heart_rate: hr.value, glucose: glu.value, respiration: resp.value });
     const vitalsOnFile = tr.bp_systolic != null || tr.heart_rate != null;
 
+    // The sign-off buttons wait for a blood pressure or pulse — on file, or
+    // typed above (routing saves it first). They used to look ready and then
+    // refuse with a 30-word toast; now they are plainly not ready, with the
+    // reason beside them, until there is a reading.
+    const routeBtns = [];
+    const vitalsGateNote = el('p', {
+      class: 'subtle small',
+      style: 'margin-top:var(--space-2); color:var(--warning)',
+    }, ['Enter a blood pressure or pulse above to sign off.']);
+    function gateRouteBtns() {
+      const ready = vitalsOnFile || !!sys.value.trim() || !!hr.value.trim();
+      routeBtns.forEach((b) => { b.disabled = !ready; });
+      vitalsGateNote.style.display = ready ? 'none' : '';
+    }
+    const routeBtn = (attrs, kids) => { const b = el('button', attrs, kids); routeBtns.push(b); return b; };
+
     // Next-step card (B2): sign-off defaults to the provider the patient picked
     // at check-in (tr.route). Routing is the sign-off — it moves them onward.
-    const inlineRouteBtn = (route) => el('button', {
+    const inlineRouteBtn = (route) => routeBtn({
       class: 'btn btn--primary btn--sm',
       onClick: () => doRoute(id, route, pendingVitals()),
     }, [icon(ROUTES[route].ic, { size: 15 }), ROUTES[route].choice]);
-
-    // Say up front why sign-off will be refused, rather than only on the tap.
-    const vitalsGateNote = vitalsOnFile ? null : el('p', {
-      class: 'subtle small',
-      style: 'margin-top:var(--space-2); color:var(--warning)',
-    }, ['Record a blood pressure or pulse above first — a patient can’t go to Dental Triage or the hygienist without vitals.']);
+    const INSTEAD = { dentist: 'Send to Dental Triage instead', hygienist: 'Send to the hygienist instead' };
 
     // Built from the record as it now stands (`p`), so a re-route by an edit on
     // this screen shows at once.
     function nextStepBodyFor() {
       const tr = p.triage || {};
+      routeBtns.length = 0;
       let nextStepBody;
       if (tr.emt_signed_off && tr.route && ROUTES[tr.route]) {
         const other = OTHER[tr.route];
@@ -428,17 +448,17 @@ export function renderEmt(ctx, params = {}) {
             el('span', { class: 'subtle small' }, ['Routed automatically to:']),
             routePill(tr.route),
           ]),
-          el('button', {
+          routeBtn({
             class: 'btn btn--primary btn--block',
             style: 'margin-top:var(--space-3)',
             onClick: () => doRoute(id, tr.route, pendingVitals()),
           }, [icon(ROUTES[tr.route].ic, { size: 16 }), `Sign off & send to ${ROUTES[tr.route].label}`]),
           vitalsGateNote,
-          other ? el('button', {
+          other ? routeBtn({
             class: 'btn btn--ghost btn--sm btn--block',
             style: 'margin-top:var(--space-2)',
             onClick: () => doRoute(id, other, pendingVitals()),
-          }, [`Send to the ${ROUTES[other].label} instead`]) : null,
+          }, [INSTEAD[other]]) : null,
         ]);
       } else {
         nextStepBody = el('div', {}, [
@@ -465,9 +485,12 @@ export function renderEmt(ctx, params = {}) {
       return nextStepBody;
     }
     const nextStepSlot = el('div', {});
-    function paintNextStep() { nextStepSlot.replaceChildren(nextStepBodyFor()); }
+    function paintNextStep() { nextStepSlot.replaceChildren(nextStepBodyFor()); gateRouteBtns(); }
     paintNextStep();
-    const nextStep = el('div', { class: 'card', style: 'margin-top:var(--space-4)' }, [
+    [sys, hr].forEach((inp) => inp.addEventListener('input', gateRouteBtns));
+    // Kept in reach at the foot of the screen: sign-off used to sit some
+    // 1,700px down, past the whole health history.
+    const nextStep = el('div', { class: 'card next-step-bar', style: 'margin-top:var(--space-4)' }, [
       el('div', { class: 'card-title' }, [icon('checkCircle', { size: 15 }), 'Next step']),
       nextStepSlot,
     ]);
@@ -483,7 +506,7 @@ export function renderEmt(ctx, params = {}) {
             [p.age != null ? `${p.age} yrs` : null, p.gender || null].filter(Boolean).join(' · ') || '—',
           ]),
         ]),
-        statusPill(p.status),
+        statusPill(p.status, p),
       ]),
 
       thinnerSlot,

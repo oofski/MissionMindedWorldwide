@@ -76,7 +76,7 @@ export function renderManagement(ctx) {
     const rows = list.map((p) => el('tr', {}, [
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]), p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:6px' }, ['Blood thinner']) : el('span')]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
-      el('td', {}, [statusPill(p.status),
+      el('td', {}, [statusPill(p.status, p),
         // The record lock at a glance: a signed-off record, or one an
         // administrator unlocked to amend and has not locked again yet.
         p.locked ? el('span', { class: 'pill pill--neutral', style: 'margin-left:6px', title: 'Signed off and locked' }, [icon('lock', { size: 11 }), 'Locked']) : null,

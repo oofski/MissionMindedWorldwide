@@ -60,7 +60,7 @@ export function renderHygienist(ctx, params = {}) {
         routedToHygienist(p) ? el('span', { class: 'pill pill--teal' }, [icon('sparkle', { size: 12 }), 'Cleaning']) : el('span', { class: 'subtle small' }, ['—']),
         cleaningOnChart(p) ? el('span', { class: 'pill pill--warning', style: 'margin-left:6px' }, [icon('alert', { size: 12 }), 'Cleaning on chart — check before starting']) : null,
       ]),
-      el('td', {}, [statusPill(p.status)]),
+      el('td', {}, [statusPill(p.status, p)]),
       el('td', {}, [el('button', { class: 'btn btn--primary btn--sm', onClick: (e) => { e.stopPropagation(); detail(p.id); } }, ['Open', icon('chevron', { size: 15 })])]),
     ]));
     clear(root);
@@ -212,6 +212,16 @@ export function renderHygienist(ctx, params = {}) {
         hygName.focus();
         return;
       }
+      // As at the dentist's chart: completing unsigned is a deliberate "sign
+      // later", and check-out and the Dashboard show it as unsigned.
+      if (mode === 'complete' && !payload.provider_signature) {
+        const ok = await modal({
+          title: 'Complete without a signature?',
+          body: 'Nobody has signed this cleaning off. Go back and sign, or complete it now and sign later — check-out and the Dashboard will show it as not signed until someone does.',
+          confirmText: 'Complete — sign later', cancelText: 'Go back and sign',
+        });
+        if (!ok) { sigPad.node.scrollIntoView && sigPad.node.scrollIntoView({ block: 'center' }); return; }
+      }
       if (mode === 'lock') {
         // A re-sign after an amendment is a new signature, never the one on
         // file from before the correction (see the Dental Triage screen).
@@ -275,7 +285,7 @@ export function renderHygienist(ctx, params = {}) {
           // Not while the record is locked, or unlocked only to correct a
           // finished visit — neither is a patient waiting to be moved on.
           locked || amending ? null : el('button', { class: 'btn btn--soft btn--sm', onClick: transferToDentist, title: 'Send to Dental Triage for restorative work' }, [icon('tooth', { size: 15 }), 'Transfer to Dental Triage']),
-          statusPill(p.status),
+          statusPill(p.status, p),
         ]),
       ]),
 

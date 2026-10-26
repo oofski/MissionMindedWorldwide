@@ -127,7 +127,7 @@ export function adminLockButtons(p, { onChanged, size = 'sm', block = false } = 
  * Unlock for an administrator) or for one being amended (who unlocked it, when
  * and why, with Lock). `lockedText` is the station's own first sentence.
  */
-export function lockBanner(p, { onChanged, lockedText = 'This record is signed off and locked.' } = {}) {
+export function lockBanner(p, { onChanged, lockedText = 'This record is signed off and locked.', brief = false } = {}) {
   const l = lockOf(p);
   if (l.locked) {
     return el('div', { class: 'banner banner--locked lock-banner' }, [
@@ -137,9 +137,12 @@ export function lockBanner(p, { onChanged, lockedText = 'This record is signed o
     ]);
   }
   if (l.amending) {
+    // `brief`: a screen handed to the patient (check-out) says only that the
+    // record is being corrected — who unlocked it and why is the clinic's
+    // audit trail, kept in the record and on the clinical screens.
     return el('div', { class: 'banner banner--warn lock-banner' }, [
       icon('unlock', { size: 16 }),
-      el('div', {}, [amendingText(p)]),
+      el('div', {}, [brief ? 'The provider is correcting this record; it is signed again when the correction is done.' : amendingText(p)]),
       adminLockButtons(p, { onChanged }),
     ]);
   }

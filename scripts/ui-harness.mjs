@@ -271,6 +271,15 @@ function answered(node) {
 const fieldByLabel = (root, label) => Array.from(root.querySelectorAll('.field'))
   .find((l) => { const f = l.querySelector(':scope > .field-label'); return f && f.textContent.replace(/\s*\*\s*$/, '').trim() === label; });
 
+// Completing a visit nobody has signed asks first (v0.0.20); this answers it
+// "Complete — sign later". Returns whether the question was asked.
+function signLater() {
+  const ov = Array.from(document.querySelectorAll('.modal-overlay')).pop();
+  const b = ov && Array.from(ov.querySelectorAll('button')).find((x) => /Complete — sign later/.test(x.textContent));
+  if (b) b.click();
+  return !!b;
+}
+
 // A reason for checking out a patient whose visit is not finished (required
 // since v0.0.19); ignored for a finished visit.
 const LEFT_EARLY = { reason: 'Could not wait any longer' };
@@ -529,13 +538,13 @@ async function main() {
 
   // "Step 5 — remove entire step" (v0.0.15): registration asks no survey
   // question any more; the whole grant survey is asked at check-out. So the
-  // consent step leads straight to Sign & Submit, and a Filling visit is five
-  // steps: About You, Medical, Dental, Consent, Sign & Submit.
+  // consent step leads straight to Review & Submit, and a Filling visit is five
+  // steps: About You, Medical, Dental, Consent, Review & Submit.
   log(!$('.survey-inline') && !$('.kiosk-body .survey-q'), 'registration no longer carries a survey step');
   // Now should be Review (may_need_extraction was not 'yes')
   const onReview = /Sign|Review|Firmar|Send|Submit/i.test($('.kiosk-step-label') ? $('.kiosk-step-label').textContent : '');
   log(!!$('.review') || onReview, 'reached review/sign step');
-  log(/Step 5 of 5/.test($('.kiosk-step-label').textContent), 'the consent step leads straight to Sign & Submit (5 steps on a filling visit)');
+  log(/Step 5 of 5/.test($('.kiosk-step-label').textContent), 'the consent step leads straight to Review & Submit (5 steps on a filling visit)');
   const reviewTxt = $('.review') ? $('.review').textContent : '';
   log(!/Community questions/.test(reviewTxt), 'the review no longer reports "community questions"');
   log(/Penicillin/.test(reviewTxt) && /Latex gloves/.test(reviewTxt), 'the review reads back the allergies, a typed-in one included');
@@ -848,8 +857,15 @@ async function main() {
       'MMW general (7) + oral-surgery (7) consent wording present in English');
     i18nMod.setLang('en');
     log(Array.isArray(i18nMod.tRaw('consent.generalFull')), 'v1.4.7: English defines the full consent text (tRaw)');
-    i18nMod.setLang('es');
-    log(i18nMod.tRaw('consent.generalFull') === undefined && Array.isArray(i18nMod.t('consent.generalFull')), 'v1.4.7: other languages keep their own consent (tRaw undefined; t falls back to English)');
+    i18nMod.setLang('ru');
+    log(i18nMod.tRaw('consent.generalFull') === undefined && Array.isArray(i18nMod.t('consent.generalFull')), 'v1.4.7: a language without the full text keeps its own consent (tRaw undefined; t falls back to English)');
+    // v0.0.20: Spanish carries the full text — the same seven clauses, with
+    // both numbered HIV / Hepatitis paragraphs — and the full surgery wording.
+    const enC = CATALOG.en.consent, esC = CATALOG.es.consent;
+    log(esC.generalFull.length === enC.generalFull.length && esC.oralSurgeryFull.length === enC.oralSurgeryFull.length
+      && /^AVISO DE CONSENTIMIENTO PRESUNTO PARA LAS PRUEBAS DE VIH/.test(esC.generalFull[1]) && /^2\. Si usted quedara expuesto/.test(esC.generalFull[2])
+      && /^RENUNCIA DEL PACIENTE/.test(esC.generalFull[4]) && /501\(c\)3/.test(esC.generalFull[3]) && esC.oralSurgeryFull[6].includes('(951) 317-4968'),
+      'v0.0.20: the Spanish consent is the English one, clause for clause — both HIV / Hepatitis paragraphs, the waiver, and the full oral-surgery text');
     i18nMod.setLang('en');
 
     currentUser = signInAdmin();
@@ -897,6 +913,8 @@ async function main() {
     const completeBtn2 = $all('button', provWithConsent).find((b) => /Mark visit complete/i.test(b.textContent));
     if (completeBtn2) completeBtn2.click();
     await tick(); await tick();
+    signLater();
+    for (let i = 0; i < 6; i++) await tick();
     log(db.getPatient(cp.id).status === 'completed', 'v1.4.7: once the general consent is signed, the dentist can document + complete the visit');
   }
 
@@ -945,10 +963,12 @@ async function main() {
     const dash = (await import('../src/renderer/js/views/dashboard.js')).renderDashboard(ctx14);
     document.body.append(dash); await tick(); await tick();
     const txt = dash.textContent;
-    // v0.0.15: the dentist's station is Dental Triage, 'triaged' reads "Waiting
-    // for provider", and the queue for a treatment chair has its own columns.
+    // v0.0.15: the dentist's station is Dental Triage, and the queue for a
+    // treatment chair has its own columns. v0.0.20: a patient waiting for a
+    // station is in that station's column — there is no "Waiting for provider"
+    // column leaving the Dental Triage and Hygienist columns empty.
     const boardCols = Array.from(dash.querySelectorAll('.crm-col-label')).map((n) => n.textContent);
-    log(JSON.stringify(boardCols) === JSON.stringify(['Checked in', 'Vitals', 'Waiting for provider', 'Hygienist', 'Dental Triage', 'Treatment waiting', 'In treatment', 'Checked out']),
+    log(JSON.stringify(boardCols) === JSON.stringify(['Checked in', 'Vitals', 'Hygienist', 'Dental Triage', 'Treatment waiting', 'In treatment', 'Checked out']),
       'v1.5.14: dashboard shows the live stage board with every stage as a column, Dental Triage and Treatment waiting included');
     log(/Aa, Al/.test(txt) && /Bb, Bo/.test(txt) && /Cc, Cy/.test(txt), 'v1.5.14: patients appear as cards on the board');
     log(/Start patient check-in/i.test(txt) && /Live/.test(txt), 'v1.5.14: check-in moved to the header and the board is marked Live');
@@ -1359,7 +1379,7 @@ async function main() {
       if (b) b.click();
       return b;
     };
-    pickTab(arrivals, 'Registered at the desk'); await tick();
+    pickTab(arrivals, 'Checked in here'); await tick();
     const atxt = arrivals.textContent;
     log(/Arrivals/.test(atxt) && /Waiting to be confirmed/.test(atxt) && /Confirmed here/.test(atxt),
       'v1.5.24: the Arrivals screen lists who is waiting and who is confirmed');
@@ -1384,7 +1404,7 @@ async function main() {
     });
     const arr2 = (await import('../src/renderer/js/views/arrivals.js')).renderArrivals(ctx24);
     document.body.append(arr2); await tick(); await tick();
-    pickTab(arr2, 'Registered at the desk'); await tick();
+    pickTab(arr2, 'Checked in here'); await tick();
     const box = arr2.querySelector('input[type="search"]');
     log(!!box, 'v1.5.25: the arrivals screen has a search box');
     const rowsFor = () => Array.from(arr2.querySelectorAll('.arrival-row')).map((r) => r.textContent);
@@ -1506,8 +1526,8 @@ async function main() {
     document.body.append(view); await tick(); await tick();
 
     const tabs = Array.from(view.querySelectorAll('.arrival-tab')).map((b) => b.textContent);
-    log(tabs.length === 2 && /Pre-registered/i.test(tabs[0]) && /Registered at the desk/i.test(tabs[1]),
-      'v1.5.26: arrivals is split into "Pre-registered online" and "Registered at the desk" tabs');
+    log(tabs.length === 2 && /Pre-registered/i.test(tabs[0]) && /Checked in here/i.test(tabs[1]),
+      'v1.5.26: arrivals is split into "Pre-registered online" and "Checked in here" tabs');
     const surnames = () => Array.from(view.querySelectorAll('.arrival-row strong')).map((e) => e.textContent.split(',')[0]);
     const click = (label) => {
       const b = Array.from(view.querySelectorAll('.arrival-tab')).find((x) => new RegExp(label, 'i').test(x.textContent));
@@ -1520,7 +1540,7 @@ async function main() {
       'v1.5.26: the pre-registered tab shows only patients who registered online');
     log(JSON.stringify(pre) === JSON.stringify([...pre].sort()), 'v1.5.26: the pre-registered list is in A–Z order by surname');
 
-    click('Registered at the desk'); await tick();
+    click('Checked in here'); await tick();
     const desk = surnames();
     log(desk.includes('Abbott') && desk.includes('Zimmerman') && !desk.includes('Yardley'),
       'v1.5.26: the desk tab shows only patients registered here');
@@ -3082,7 +3102,7 @@ async function main() {
     i18nV.setLang('en');
 
     // ---- a Spanish-speaking patient checks in at the kiosk, start to finish ----
-    // The Sign & Submit review reads back what they ticked in their own
+    // The Review & Submit review reads back what they ticked in their own
     // language, while the record stores the canonical English name.
     try {
       const kes = renderKiosk({ navigate: () => {} }); document.body.append(kes);
@@ -3197,8 +3217,8 @@ async function main() {
     log(!fd.querySelector('#conditions select') && fd.querySelectorAll('#conditions .ynb').length === 25
       && fd.querySelectorAll('#cond_pregnant input').length === 4 && fd.querySelectorAll('#allergy_status input').length === 3
       && !fd.querySelector('#under_treatment').closest('.yn').classList.contains('miss')
-      && markedOnline === 25 + 3 + 8 && /\(and 35 more, marked in red\)/.test(firstRefusal),
-      'online form (real page): the history questions are one-tap rows, and a refused submit marks all 36 unanswered at once');
+      && markedOnline === 25 + 3 + 8 + 1 && /\(and 36 more, marked in red\)/.test(firstRefusal),
+      'online form (real page): the history questions are one-tap rows, and a refused submit marks all 37 unanswered (the consent\'s Yes / No too) at once');
     fset('cond_diabetes', 'yes'); fset('cond_pregnant', 'na');
     const noneBtnO = fd.getElementById('condnone');
     const noneTxtO = noneBtnO.textContent;
@@ -3227,12 +3247,28 @@ async function main() {
       && chipText(esPage, 'med') === st.CATALOG.es.common.other && chipText(esPage, 'allergy') === st.CATALOG.es.common.other
       && !!allergyOtherLabel && allergyOtherLabel.textContent.startsWith(st.CATALOG.en.intake.allergyOther),
     'online form (real page): "Other" and the typed-allergy label read exactly as at the kiosk, in English and Spanish');
+    // v0.0.20: the online form asks the patient to sign the very consent the
+    // kiosk shows, in either language — it carried an older text before.
+    const esFull = new JSDOM(await (await workerV.fetch(new Request('https://sync.example/checkin/evt-online?lang=es'), envV, {})).text()).window.document;
+    const consentOf = (doc) => Array.from(doc.querySelectorAll('.consent li, .consent p')).map((x) => x.textContent);
+    const sameText = (doc, lang) => {
+      const c = st.CATALOG[lang].consent;
+      const got = consentOf(doc);
+      return JSON.stringify(got) === JSON.stringify([...c.generalFull, ...c.oralSurgeryFull])
+        && doc.body.textContent.includes(c.generalTitle) && doc.body.textContent.includes(c.surgeryTitle);
+    };
+    log(sameText(fd, 'en') && sameText(esFull, 'es'),
+      'v0.0.20 online form: the consent signed online is the kiosk\'s, word for word, in English and in Spanish');
     fset('major_surgery', 'no'); fset('tobacco', 'no'); fset('allergy_status', 'yes'); ftick('input[name=allergy][value=penicillin]');
     fset('prior_dentist', 'never');
     st.DENTAL_QUESTIONS.forEach((q) => fset(q.key, 'no'));
+    const noDeemedRefusal = fsubmit();
+    log(noDeemedRefusal === 'Please answer Yes or No to the HIV / Hepatitis notice.' && fd.getElementById('deemed').closest('.yn').classList.contains('miss'),
+      'v0.0.20 online form (real page): the HIV / Hepatitis Yes or No is asked, as at the kiosk, and refused unanswered');
+    fset('deemed', 'yes');
     ftick('#cagree'); fset('signer', 'Olivia Online');
     const pdE = new fw.Event('pointerdown', { bubbles: true }); pdE.clientX = 1; pdE.clientY = 1; fd.getElementById('gsig').dispatchEvent(pdE);
-    log(fsubmit() === '' && !!fw.__posted && fw.__posted.form_version === 2, 'online form (real page): a complete form submits');
+    log(fsubmit() === '' && !!fw.__posted && fw.__posted.form_version === 3 && fw.__posted.deemed_consent === 'yes', 'online form (real page): a complete form submits');
     const postRes = await workerV.fetch(new Request('https://sync.example/checkin/evt-online', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fw.__posted) }), envV, {});
     const patRow = rowsV.find((r) => r[1] === 'patient');
     const onlineData = patRow ? JSON.parse(patRow[6]) : null;
@@ -7382,7 +7418,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const rvStored = db.getPatient(rvP.id);
     const signAfterBtn = btnIn(emtR, /^Sign off & send to/);
     log(/Hygienist/.test(signBefore) && rvStored.dental_history.visit_type === 'extraction_pain' && rvStored.triage.route === 'dentist'
-      && !!signAfterBtn && /Dental Triage/.test(signAfterBtn.textContent) && !!btnIn(emtR, /^Send to the Hygienist instead$/)
+      && !!signAfterBtn && /Dental Triage/.test(signAfterBtn.textContent) && !!btnIn(emtR, /^Send to the hygienist instead$/)
       && /Routed automatically to:\s*Dental Triage/.test(emtR.textContent),
       'Vitals: a dental edit that changes the visit type updates the "Sign off & send to …" target on the screen');
     signAfterBtn.click(); await settle();
@@ -8609,8 +8645,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const chipKeysA = Array.from(coA.querySelectorAll('.aftercare-chips [data-key]')).map((x) => x.dataset.key);
     log(same(chipKeysA, ['extraction', 'extraction_surgical', 'anesthetic', 'general']),
       'check-out: the After-care block lists the sections for what was done');
-    log(/After a tooth extraction/.test(coA.textContent) && /Prints in Spanish/.test(coA.textContent) && /Draft wording/.test(coA.textContent),
-      'check-out: the desk sees the sections in English, which language it prints in, and that the wording is a draft');
+    log(/After a tooth extraction/.test(coA.textContent) && /Prints in Spanish/.test(coA.textContent) && !/Draft wording|mmw-aftercare/.test(coA.textContent),
+      'check-out: the desk sees the sections in English and which language it prints in — not the template\'s version (v0.0.20: that is on the printed sheet)');
     const btnA = (re) => Array.from(coA.querySelectorAll('button')).find((b) => re.test(b.textContent));
     // Asked on the fresh screen, before anything is printed or previewed — a
     // dismissal held until a print would fail here.
@@ -9193,6 +9229,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     chipIn('Oral hygiene instruction').click();
     btnIn2('Mark cleaning complete').click();
     await settle();
+    signLater();
+    await settle();
     const gTwice = db.getPatient(pTwice.id);
     vTwice.remove();
     log(tessMid.status === 'in_treatment' && tessMid.treatment.cleaning.adult_prophy === true
@@ -9305,6 +9343,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const completeF = Array.from(provF.querySelectorAll('button')).find((b) => /Mark visit complete/.test(b.textContent));
     if (completeF) completeF.click();
     await settle(14);
+    signLater();
+    await settle(14);
     provF.remove();
     const gWandaDone = db.getPatient(pWanda.id);
     log(molarName === 'Dr. Molar' && !!completeF && gWandaDone.status === 'completed'
@@ -9366,8 +9406,12 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       }
     };
     const esK = await signSurgery(/Español/, 'Firmaes');
-    log(esK.onSurgery === true && esK.text.includes('Para emergencias fuera de horario llame al (951) 317-4968.') && esK.version === 'oral_surgery-es-v2',
-      `fix pass: a Spanish patient signs the original emergency sentence with MMW's number, stored as oral_surgery-es-v2${esK.error ? ' — ' + esK.error : ''}`);
+    // v0.0.20: Spanish signs the full oral-surgery wording, translated — the
+    // English text's seven paragraphs, MMW's number and who to ask for —
+    // stored under a version of its own (v3; v1 and v2 named the shorter text).
+    log(esK.onSurgery === true && esK.text.includes('llame a MMW al (951) 317-4968. Deje un mensaje para Vinh Trinh.')
+      && esK.text.includes('articulación temporomandibular (ATM)') && esK.version === 'oral_surgery-es-v3',
+      `v0.0.20: a Spanish patient signs the full oral-surgery consent, translated, stored as oral_surgery-es-v3${esK.error ? ' — ' + esK.error : ''}`);
     const enK = await signSurgery(/English/, 'Signsen');
     log(enK.onSurgery === true && enK.text.includes('(951) 317-4968') && enK.version === 'oral_surgery-en-v1',
       `fix pass: English signs the unchanged full oral-surgery wording, and keeps oral_surgery-en-v1${enK.error ? ' — ' + enK.error : ''}`);
@@ -9680,7 +9724,7 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     const hit = arr.querySelector('.arrival-row--scanned');
     log(!!hit && /Walkin, Wanda/.test(hit.textContent),
       'scanning a band marks that patient\u2019s own row on Arrivals');
-    log(/Registered at the desk/.test(((arr.querySelector('.arrival-tab.is-active') || {}).textContent || '')),
+    log(/Checked in here/.test(((arr.querySelector('.arrival-tab.is-active') || {}).textContent || '')),
       'the scan switches to the tab the patient is actually in, so the row is on screen');
     log(arr.querySelector('input[type="search"]').value === '',
       'the scan clears a search that would otherwise hide the scanned patient');
@@ -11167,7 +11211,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       const dp = db.createPatient(currentUser, {
         first_name: 'Rosa', last_name: 'Deskeighteen', dob: '1975-05-05', language: 'es',
         demographics: {}, medical_history: {}, dental_history: { visit_type: 'extraction_pain' },
-        consents: [{ type: 'general', signer_name: 'Rosa Deskeighteen', signature_png: null, deemed_consent: 'yes', version: 'mmw-general-es-v1', language: 'es' }],
+        consents: [{ type: 'general', signer_name: 'Rosa Deskeighteen', signature_png: null, deemed_consent: 'yes', version: 'mmw-general-es-v2', language: 'es' }],
       });
       const dl0 = db.listPatients({}).find((x) => x.id === dp.id);
       log(dl0 && dl0.consents_ok === false && JSON.stringify(dl0.consents_missing) === '["general","oral_surgery"]' && dl0.language === 'es',
@@ -11176,7 +11220,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       await window.api.authLogin({ username: 'desk18', password: 'x' });
       store18.setUser(currentUser);
       const av = await view18('arrivals.js', 'renderArrivals');
-      btn18(av, /^Registered at the desk/).click();
+      btn18(av, /^Checked in here/).click();
       await settle18(2);
       setInput(av.querySelector('input[type="search"]'), 'Deskeighteen');
       await settle18(2);
@@ -11218,8 +11262,8 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       const gNew = dpA.consents.filter((c) => c.type === 'general' && c.signature_png);
       const sNew = dpA.consents.find((c) => c.type === 'oral_surgery');
       log(!document.body.contains(ov) && gNew.length === 1 && gNew[0].signature_method === 'draw' && gNew[0].deemed_consent === 'yes'
-        && gNew[0].language === 'es' && gNew[0].version === 'mmw-general-es-v1'
-        && !!sNew && sNew.signature_method === 'type' && /^data:image\/png/.test(sNew.signature_png) && sNew.version === 'oral_surgery-es-v2'
+        && gNew[0].language === 'es' && gNew[0].version === 'mmw-general-es-v2'
+        && !!sNew && sNew.signature_method === 'type' && /^data:image\/png/.test(sNew.signature_png) && sNew.version === 'oral_surgery-es-v3'
         && !sNew.tooth_numbers && db.patientAudit(dp.id).some((a) => a.action === 'consent_add'),
         'v0.0.18 desk: both consents are saved signed, in Spanish, with the kiosk\'s versions, and audited');
       dRow = rowOf();
@@ -11319,7 +11363,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       await asRole19('registration');
       const wb = mk19('Wanda', 'Bandnineteen');
       const av = await view19('arrivals.js', 'renderArrivals');
-      btn19(av, /^Registered at the desk/).click(); await settle19(2);
+      btn19(av, /^Checked in here/).click(); await settle19(2);
       setInput(av.querySelector('input[type="search"]'), 'Bandnineteen'); await settle19(2);
       const wRow = $all('.arrival-row', av).find((r) => /Bandnineteen, Wanda/.test(r.textContent));
       btn19(wRow, /^Print wristband$/).click(); await settle19(6);
@@ -11650,6 +11694,300 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       $all('.modal-overlay, .survey-overlay').forEach((o) => o.remove());
       currentUser = signed19; store19.setUser(signed19);
       i18n19.setLang('en');
+    }
+  }
+
+  /* ===== v0.0.20 — the rest of the usability walk-through =====
+     The kiosk's remaining one-gap-per-Next steps, State, the "Sign & Submit"
+     step with nothing to sign; Arrivals' tab and scan box; the Vitals page's
+     buried sign-off; the dental chart's actions; station names; check-out's
+     staff and audit text; and the Spanish consent. */
+  {
+    const signed20 = currentUser;
+    const settle20 = async (n = 16) => { for (let i = 0; i < n; i++) await tick(); };
+    const store20 = (await import('../src/renderer/js/store.js')).store;
+    const i18n20 = await import('../src/renderer/js/i18n.js');
+    const st20 = await import('../src/renderer/i18n/strings.js');
+    const ctx20 = { navigate: () => {}, toast: () => {}, store: store20, setDetail: () => {} };
+    const view20 = async (file, fn, params = {}) => {
+      const node = (await import(`../src/renderer/js/views/${file}`))[fn](ctx20, params);
+      document.body.append(node); await settle20(); return node;
+    };
+    const lastToast20 = () => { const all = $all('#toast-host .toast'); return all.length ? all[all.length - 1].textContent : ''; };
+    const btn20 = (root, re) => $all('button', root).find((b) => re.test(b.textContent.trim()));
+    const asRole20 = async (role) => {
+      const u = 'v20_' + role;
+      if (!db.listUsers().some((x) => x.username === u)) db.createUser(signInAdmin(), { username: u, full_name: 'V20 ' + role, role, password: 'x' });
+      await window.api.authLogin({ username: u, password: 'x' });
+      store20.setUser(currentUser);
+    };
+    const GEN20 = [{ type: 'general', signer_name: 'Pat', signature_png: 'data:image/png;base64,AAAA' }];
+    const mk20 = (first, last, extra = {}) => db.createPatient(signInAdmin(), {
+      first_name: first, last_name: last, dob: '1981-03-03', demographics: {}, medical_history: {},
+      dental_history: { visit_type: 'cleaning' }, consents: GEN20, ...extra,
+    });
+    const vitals20 = (p) => db.saveVitals(signInAdmin(), p.id, { bp_systolic: '120', bp_diastolic: '80', heart_rate: '70' });
+    const scanType = async (root, text) => {
+      const inp = root.querySelector('.scan-input');
+      inp.value = text;
+      inp.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await settle20(10);
+    };
+    const prevEv20 = db.getActiveEvent();
+    const ev20 = db.createEvent(signInAdmin(), { name: 'V20 Sandy', location: 'Sandy, Oregon' });
+    db.setActiveEvent(signInAdmin(), ev20.id);
+    try {
+      // ---- the kiosk ----
+      currentUser = null; store20.setUser(null);
+      {
+        const k = (await import('../src/renderer/js/views/kiosk.js')).renderKiosk({ navigate: () => {} });
+        document.body.append(k); await settle20(4);
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => /English/.test(c.textContent)).click(); await settle20(6);
+        const T = i18n20.t;
+        const body = () => k.querySelector('.kiosk-body');
+        const put = (label, v) => answer(fieldByLabel(body(), label), v);
+        const next = async () => { clickText(T('common.next'), k); await settle20(3); };
+        const stateSel = fieldByLabel(body(), T('intake.state')).querySelector('select');
+        log(stateSel.value === 'OR' && stateSel.options[1].value === 'OR',
+          'v0.0.20 kiosk: State starts on the event\'s own state (Oregon, from "Sandy, Oregon") and lists it first');
+        await next();
+        const marked1 = $all('.is-missing', body()).length;
+        log(marked1 === 8 && /^Required: First name \/ Last name — and 7 more, marked in red$/.test(lastToast20())
+          && fieldByLabel(body(), T('intake.phone')).classList.contains('is-missing'),
+          'v0.0.20 kiosk: a refused Next on About You marks every missing answer at once (names, birth date, gender, city, phone, emergency contact) and counts them');
+        put(T('intake.firstName'), 'Rae'); put(T('intake.lastName'), 'Review'); put(T('intake.dob'), '1980-01-01');
+        log(!fieldByLabel(body(), T('intake.firstName')).classList.contains('is-missing'), 'v0.0.20 kiosk: typing in a marked field clears its mark');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        put(T('intake.city'), 'Sandy'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        put(T('intake.underTreatment'), 'no'); btn20(k, /^I have none of these/).click();
+        k.querySelector('.chip-select[data-key="none"]').click();
+        put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        await next();
+        setInput(k.querySelector('.kiosk-body select'), 'never');
+        k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[3].click();
+        await next();
+        await next();
+        const markedC = $all('.is-missing', body());
+        log(markedC.length === 4 && markedC.some((n) => n.classList.contains('deemed-field')) && markedC.some((n) => n.classList.contains('agree-row'))
+          && markedC.some((n) => n.classList.contains('sigfield')) && /— and 3 more, marked in red$/.test(lastToast20()),
+          'v0.0.20 kiosk: the consent marks everything still to do at once — the HIV / Hepatitis answer, "I agree", the printed name and the signature');
+        const ag = k.querySelector('.big-check'); ag.checked = true; ag.dispatchEvent(new window.Event('change', { bubbles: true }));
+        k.querySelector('.deemed-field .chip-btn').click();
+        put(T('intake.signerName'), 'Rae Review'); drawSig(k);
+        await next();
+        const label = k.querySelector('.kiosk-step-label').textContent;
+        const rv = body().textContent;
+        log(/Review & Submit/.test(label) && !/Sign & Submit/.test(label) && /then tap Submit/.test(rv) && !/sign below/i.test(rv)
+          && !body().querySelector('.sigfield'),
+          'v0.0.20 kiosk: the last step is "Review & Submit" and asks for nothing it does not show — no "then sign below"');
+        k.remove(); i18n20.setLang('en');
+      }
+      // ---- the Spanish consent, signed at the kiosk ----
+      {
+        const k = (await import('../src/renderer/js/views/kiosk.js')).renderKiosk({ navigate: () => {} });
+        document.body.append(k); await settle20(4);
+        Array.from(k.querySelectorAll('.lang-card')).find((c) => /Español/.test(c.textContent)).click(); await settle20(6);
+        const T = i18n20.t;
+        const body = () => k.querySelector('.kiosk-body');
+        const put = (label, v) => answer(fieldByLabel(body(), label), v);
+        const next = async () => { clickText(T('common.next'), k); await settle20(3); };
+        put(T('intake.firstName'), 'Eva'); put(T('intake.lastName'), 'Espanolveinte'); put(T('intake.dob'), '1980-01-01');
+        put(T('intake.gender'), 'female'); put(T('intake.phone'), '5035550123');
+        put(T('intake.city'), 'Sandy'); put(T('intake.emergencyName'), 'Ana'); put(T('intake.emergencyPhone'), '5035550124');
+        await next();
+        put(T('intake.underTreatment'), 'no'); btn20(k, /^No tengo ninguna/).click();
+        k.querySelector('.chip-select[data-key="none"]').click();
+        put(T('intake.majorSurgery'), 'no'); put(T('intake.tobacco'), 'no'); put(T('intake.allergyQuestion'), 'nkda');
+        await next();
+        setInput(k.querySelector('.kiosk-body select'), 'never');
+        k.querySelectorAll('.kiosk-body .choice-row').forEach((r) => answer(r, 'no'));
+        k.querySelectorAll('.kiosk-body .highlight-field button')[3].click();
+        await next();
+        const items = $all('.consent-list li', body()).map((x) => x.textContent);
+        log(JSON.stringify(items) === JSON.stringify(st20.CATALOG.es.consent.generalFull) && body().textContent.includes(st20.CATALOG.es.consent.generalTitle),
+          'v0.0.20 kiosk: a Spanish speaker reads the same consent as an English speaker — all seven clauses, both HIV / Hepatitis paragraphs');
+        const ag = k.querySelector('.big-check'); ag.checked = true; ag.dispatchEvent(new window.Event('change', { bubbles: true }));
+        k.querySelector('.deemed-field .chip-btn').click();
+        put(T('intake.signerName'), 'Eva Espanolveinte'); drawSig(k);
+        await next();
+        $all('.kiosk-nav button', k).pop().click(); await settle20(8);
+        k.remove(); i18n20.setLang('en');
+        const ep = db.listPatients({}).find((x) => x.last_name === 'Espanolveinte');
+        const ec = ep ? db.getPatient(ep.id).consents.find((c) => c.type === 'general') : null;
+        log(!!ec && ec.version === 'mmw-general-es-v2' && ec.deemed_consent === 'yes',
+          'v0.0.20 kiosk: and it is stored as mmw-general-es-v2 — a new version for the new wording, never v1\'s');
+      }
+
+      // ---- Arrivals: the tab, and a name typed into the scan box ----
+      await asRole20('registration');
+      mk20('Nora', 'Namescan');
+      const av = await view20('arrivals.js', 'renderArrivals');
+      const tabsTxt = $all('.arrival-tab', av).map((b) => b.textContent);
+      btn20(av, /^Pre-registered online/).click(); await settle20(2);
+      await scanType(av, 'nora namescan');
+      const shown = $all('.arrival-row', av).map((r) => r.textContent);
+      log(tabsTxt.some((t) => /^Checked in here \(kiosk or desk\)/.test(t)) && !tabsTxt.some((t) => /Registered at the desk/.test(t))
+        && av.querySelector('input[type="search"]').value === 'nora namescan' && shown.length === 1 && /Namescan, Nora/.test(shown[0])
+        && /is-active/.test(av.querySelector('.arrival-tab:nth-child(2)').className) && !/No patient found/.test(lastToast20()),
+        'v0.0.20 Arrivals: kiosk check-ins are "Checked in here (kiosk or desk)", and a name typed into the scan box finds them — in whichever tab they are');
+      av.remove();
+      await asRole20('emt');
+      const one = mk20('Solo', 'Scanone');
+      mk20('Tia', 'Scanpair'); mk20('Ty', 'Scanpair');
+      let ev = await view20('emt.js', 'renderEmt');
+      await scanType(ev, 'solo scanone');
+      const openedOne = /Solo Scanone/.test(ev.textContent) && !!btn20(ev, /^Save vitals$/);
+      ev.remove();
+      ev = await view20('emt.js', 'renderEmt');
+      await scanType(ev, 'scanpair');
+      const picks = $all('.scan-pick', ev);
+      const picksTxt = ev.querySelector('.scan-picks') ? ev.querySelector('.scan-picks').textContent : '';
+      if (picks[0]) picks[0].click(); await settle20(10);
+      log(openedOne && picks.length === 2 && /2 patients match “scanpair”/.test(picksTxt) && /T\w+ Scanpair/.test(ev.querySelector('h1').textContent) && !!btn20(ev, /^Save vitals$/),
+        'v0.0.20 stations: a name in the scan box opens the one patient it matches, or offers the matches to choose from');
+      ev.remove();
+      void one;
+
+      // ---- Vitals: sign-off in reach, and only once there is a reading ----
+      const MH20 = (await import('../src/renderer/js/medicalHistory.js'));
+      const vh = mk20('Vee', 'Signoff', { medical_history: {
+        under_treatment: 'no', condition_answers: Object.fromEntries(MH20.INTAKE_CONDITIONS.map((k) => [k, k === 'pregnant' ? 'na' : 'no'])),
+        medications_none: true, major_surgery: 'no', surgery_sites: [], tobacco: 'no', allergy_status: 'nkda', allergies: [],
+      } });
+      ev = await view20('emt.js', 'renderEmt', { id: vh.id });
+      const sign = () => btn20(ev, /^Sign off & send to/);
+      const gateNote = () => $all('p', ev).find((x) => /Enter a blood pressure or pulse above to sign off/.test(x.textContent));
+      const beforeDisabled = sign().disabled && gateNote().style.display !== 'none';
+      setInput($all('.vitals-grid input', ev)[0], '128');
+      log(beforeDisabled && !sign().disabled && gateNote().style.display === 'none' && !!btn20(ev, /^Send to Dental Triage instead$/)
+        && !!ev.querySelector('.next-step-bar') && ev.querySelector('.next-step-bar').contains(sign()),
+        'v0.0.20 Vitals: sign-off waits for a blood pressure or pulse, says so beside it, reads "Send to Dental Triage instead", and sits in a bar kept at the foot of the screen');
+      log(!/not askednull|null$/.test(($all('p', ev).find((x) => /Blood thinners:/.test(x.textContent)) || {}).textContent || 'x'),
+        'v0.0.20 Vitals: the blood-thinner line reads "Blood thinners: not asked", with no stray "null" after it');
+      const panelOpen = ev.querySelector('details.patient-info').open;
+      btn20(ev, /^Reviewed with patient — no changes$/).click(); await settle20(8);
+      log(panelOpen === true && ev.querySelector('details.patient-info').open === false,
+        'v0.0.20 Vitals: the health history opens for review and folds away once reviewed, bringing sign-off into reach');
+      ev.remove();
+      let gateErr = '';
+      try { db.routePatient(signInAdmin(), mk20('No', 'Vitalsyet').id, 'hygienist'); } catch (e) { gateErr = e.message; }
+      log(gateErr === 'Record a blood pressure or pulse first — vitals are needed before Dental Triage or the hygienist.',
+        'v0.0.20 Vitals: the vitals refusal is one short sentence');
+
+      // ---- Station names, the board, and one word per action ----
+      const wd = mk20('Wes', 'Waitdental', { dental_history: { visit_type: 'filling' } }); vitals20(wd); db.routePatient(signInAdmin(), wd.id, 'dentist');
+      const wh = mk20('Hal', 'Waithyg'); vitals20(wh); db.routePatient(signInAdmin(), wh.id, 'hygienist');
+      await asRole20('doctor');
+      const pq = await view20('provider.js', 'renderProvider');
+      const wdRow = $all('tr', pq).find((r) => /Waitdental, Wes/.test(r.textContent));
+      log(!!wdRow && /Waiting for Dental Triage/.test(wdRow.textContent) && !!btn20(wdRow, /^Open/) && !btn20(pq, /^Treat/),
+        'v0.0.20: the Dental Triage queue says who is waiting for Dental Triage, and opens a record with "Open" like every station');
+      pq.remove();
+      await asRole20('hygienist');
+      const hq = await view20('hygienist.js', 'renderHygienist');
+      const whRow = $all('tr', hq).find((r) => /Waithyg, Hal/.test(r.textContent));
+      log(!!whRow && /Waiting for the hygienist/.test(whRow.textContent) && !/Waiting for provider/.test(hq.textContent),
+        'v0.0.20: the hygienist\'s queue says "Waiting for the hygienist", not "Waiting for provider"');
+      hq.remove();
+      currentUser = signInAdmin(); store20.setUser(currentUser);
+      const dash = await view20('dashboard.js', 'renderDashboard');
+      const colOf = (name) => $all('.crm-col', dash).find((c) => c.querySelector('.crm-col-label').textContent === name);
+      log(/Waithyg, Hal/.test(colOf('Hygienist').textContent) && /Waitdental, Wes/.test(colOf('Dental Triage').textContent)
+        && /Waiting/.test($all('.crm-card', colOf('Hygienist')).find((c) => /Waithyg/.test(c.textContent)).textContent)
+        && !$all('.crm-col-label', dash).some((l) => l.textContent === 'Waiting for provider')
+        && !/Clearance/.test(dash.textContent) && $all('.step-name', dash).some((x) => x.textContent === 'Vitals'),
+        'v0.0.20 Dashboard: a waiting patient is in their station\'s column, marked "Waiting"; the journey says "Vitals", not "Clearance"');
+      dash.remove();
+
+      // ---- The dental chart ----
+      await asRole20('doctor');
+      const tp = mk20('Tom', 'Triagestage', { dental_history: { visit_type: 'filling' } }); vitals20(tp); db.routePatient(signInAdmin(), tp.id, 'dentist');
+      let pv = await view20('provider.js', 'renderProvider', { id: tp.id });
+      const barTxt = (v) => $all('.chart-actions-bar button', v).map((b) => b.textContent.trim());
+      log(JSON.stringify(barTxt(pv)) === JSON.stringify(['Save progress', 'Move Patient to Treatment Waiting'])
+        && !!$all('details.collapse', pv).find((d) => /More options/.test(d.querySelector('summary').textContent) && btn20(d, /^Mark visit complete — no treatment chair needed$/)),
+        'v0.0.20 chart: at Dental Triage the bar leads with "Move Patient to Treatment Waiting"; completing the visit there is under More options, said for what it is');
+      // Fillings: an empty row is filled before another; the finished one is named.
+      const fillRows = () => $all('.filling-row', pv);
+      btn20(pv, /^Add another filling$/).click(); await settle20(2);
+      const emptyAsk = lastToast20();
+      setInput(fillRows()[0].querySelector('input'), '19');
+      fillRows()[0].querySelector('.surf-chip').click();
+      btn20(pv, /^Add another filling$/).click(); await settle20(2);
+      log(/^Enter the tooth # for this filling first\.$/.test(emptyAsk) && fillRows().length === 2
+        && /^Filling #19 M noted — enter the next one\. Save to keep them\.$/.test(lastToast20()),
+        'v0.0.20 chart: "Add another filling" asks for the empty row\'s tooth first, then names the filling it noted');
+      // The tooth chart: a procedure tapped in the popover tags the tooth and closes it.
+      const tooth3 = pv.querySelector('.odo-tooth[data-id="3"]');
+      tooth3.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await settle20(2);
+      const pop = pv.querySelector('.odo-pop');
+      Array.from(pop.querySelectorAll('.odo-pop-opt')).find((b) => /Extraction/.test(b.textContent)).click(); await settle20(4);
+      log(!pv.querySelector('.odo-pop') && $all('.ext-row', pv).some((r) => r.querySelector('input').value === '3'),
+        'v0.0.20 chart: tapping Extraction on a tooth tags it and closes the popover in one tap, adding the extraction row');
+      pv.remove();
+      const cp = mk20('Cal', 'Chairstage', { dental_history: { visit_type: 'filling' } }); vitals20(cp); db.routePatient(signInAdmin(), cp.id, 'dentist');
+      db.saveTreatment(signInAdmin(), cp.id, { fillings: [{ tooth: '3', surfaces: ['O'] }] }, 'waiting');
+      pv = await view20('provider.js', 'renderProvider', { id: cp.id });
+      const barCp = barTxt(pv);
+      btn20(pv.querySelector('.chart-actions-bar'), /^Mark visit complete$/).click(); await settle20(6);
+      let mdl = $all('.modal-overlay').pop();
+      const askTxt = mdl ? mdl.textContent : '';
+      if (mdl) btn20(mdl, /^Go back and sign$/).click(); await settle20(6);
+      const stillWaiting = db.getPatient(cp.id).status === 'treatment_waiting';
+      btn20(pv.querySelector('.chart-actions-bar'), /^Mark visit complete$/).click(); await settle20(6);
+      mdl = $all('.modal-overlay').pop();
+      if (mdl) btn20(mdl, /^Complete — sign later$/).click(); await settle20(12);
+      const cpA = db.getPatient(cp.id);
+      log(JSON.stringify(barCp) === JSON.stringify(['Save progress', 'Mark visit complete']) && /Complete without a signature\?/.test(askTxt)
+        && stillWaiting && cpA.status === 'completed' && !cpA.treatment.provider_signature
+        && db.listPatients({}).find((x) => x.id === cp.id).unsigned === true,
+        'v0.0.20 chart: at a treatment chair "Mark visit complete" leads; completing unsigned is asked first — "Go back and sign" saves nothing, "sign later" completes it marked unsigned');
+      pv.remove();
+      const xp = mk20('Xan', 'Typeless', { dental_history: { visit_type: 'extraction_pain' } }); vitals20(xp); db.routePatient(signInAdmin(), xp.id, 'dentist');
+      db.saveTreatment(signInAdmin(), xp.id, { extractions: [{ tooth: '30', types: [] }] }, 'waiting');
+      pv = await view20('provider.js', 'renderProvider', { id: xp.id });
+      btn20(pv.querySelector('.chart-actions-bar'), /^Mark visit complete$/).click(); await settle20(6);
+      log(/^Extraction #30: choose its type \(Simple, Surgical…\) — the after-care sheet depends on it\.$/.test(lastToast20())
+        && db.getPatient(xp.id).status === 'treatment_waiting' && !$all('.modal-overlay').some((o) => /Complete without a signature/.test(o.textContent)),
+        'v0.0.20 chart: finishing a visit asks each extraction\'s type first — the after-care sheet depends on it');
+      pv.remove();
+      $all('.modal-overlay').forEach((o) => o.remove());
+
+      // ---- Check-out: what the desk and the patient see ----
+      await asRole20('checkout');
+      db.saveExitSurvey(signInAdmin(), cp.id, { declined: true, stage: 'exit' });
+      const coQ = await view20('checkout.js', 'renderCheckout');
+      const cpRow = $all('tr', coQ).find((r) => /Chairstage, Cal/.test(r.textContent));
+      log(!!cpRow && /Not signed/.test(cpRow.textContent) && !!btn20(cpRow, /^Open/) && !btn20(coQ, /^Review/),
+        'v0.0.20 check-out: a visit completed unsigned says "Not signed" in the queue; records open with "Open"');
+      coQ.remove();
+      const co = await view20('checkout.js', 'renderCheckout', { id: cp.id });
+      const coTxt = co.textContent;
+      const infoKv = $all('details.patient-info .kv', co).map((r) => r.textContent);
+      log(/Not signed by the provider yet — completed to sign later/.test(coTxt) && !/Draft wording|mmw-aftercare-v1/.test(coTxt)
+        && !infoKv.some((t) => /^Marital status—$|^Email—$|^Mailing address—$/.test(t)) && infoKv.some((t) => /^Wristband ID/.test(t))
+        && /Exit survey — review or change answers/.test(coTxt),
+        'v0.0.20 check-out: the record says it is unsigned, leaves out the template version and the empty fields, and names the survey button as the survey');
+      co.remove();
+      // An administrator amending a finished visit: check-out says only that.
+      db.lockRecord(signInAdmin(), cp.id);
+      db.unlockRecord(signInAdmin(), cp.id, 'Wrong tooth on the filling');
+      const coA = await view20('checkout.js', 'renderCheckout', { id: cp.id });
+      log(/The provider is correcting this record/.test(coA.textContent) && !/Wrong tooth on the filling/.test(coA.textContent) && !/Amending a signed-off record/.test(coA.textContent),
+        'v0.0.20 check-out: a record being amended says the provider is correcting it — the reason stays in the record, not on the patient\'s hand-off');
+      coA.remove();
+      currentUser = signInAdmin(); store20.setUser(currentUser);
+      const dash2 = await view20('dashboard.js', 'renderDashboard');
+      const xsCard = $all('.crm-card', dash2).find((c) => /Chairstage, Cal/.test(c.textContent));
+      log(!!xsCard && /Not signed/.test(xsCard.textContent), 'v0.0.20 Dashboard: an unsigned finished visit is flagged "Not signed"');
+      dash2.remove();
+    } finally {
+      $all('.modal-overlay, .survey-overlay').forEach((o) => o.remove());
+      if (prevEv20) db.setActiveEvent(signInAdmin(), prevEv20.id);
+      currentUser = signed20; store20.setUser(signed20);
+      i18n20.setLang('en');
     }
   }
 
