@@ -55,26 +55,15 @@ function makeFakeD1() {
       },
       async first() {
         const s = this._sql;
-        // Push: the stored row's stamp and deletion flag — and, for an entity
-        // whose older builds omit columns, its entity and data in the same read.
-        const lookup = /^SELECT updated_at(, deleted)?(, entity, data)? FROM sync_rows WHERE uid = \?$/.exec(s);
-        if (lookup) {
-          const uid = this._binds[0];
-          const row = store.get(uid);
-          if (!row) return null;
-          const out = { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 };
-          if (lookup[2]) Object.assign(out, { entity: row.entity, data: row.data });
-          return out;
-        }
         // Pre-registration: look up an event row by uid (must exist, not deleted).
         if (/SELECT data FROM sync_rows WHERE uid = \? AND entity = 'event' AND deleted = 0/.test(s)) {
           const uid = this._binds[0];
           const row = store.get(uid);
           return row && row.entity === 'event' && !row.deleted ? { data: row.data } : null;
         }
-        // v1.5.0 delivery counter: reserve the next sequence number.
-        if (/INSERT INTO sync_seq .*ON CONFLICT\(id\) DO UPDATE SET v = v \+ 1 RETURNING v/.test(s)) {
-          seq += 1;
+        // v1.8.0 delivery counter: reserve the next n sequence numbers.
+        if (/^INSERT INTO sync_seq \(id, v\) VALUES \(1, \?\) ON CONFLICT\(id\) DO UPDATE SET v = v \+ excluded\.v RETURNING v$/.test(s)) {
+          seq += Number(this._binds[0]);
           return { v: seq };
         }
         throw new Error('fake D1: unsupported first() SQL: ' + s);
@@ -97,7 +86,15 @@ function makeFakeD1() {
         if (/^\s*INSERT INTO sync_seq \(id, v\) SELECT 1/.test(s)) {
           return { success: true, meta: { changes: 0 } };
         }
-        if (/INSERT OR REPLACE INTO sync_rows/.test(s)) {
+        // v1.8.0: a batch of rows in one JSON parameter.
+        if (/^INSERT OR REPLACE INTO sync_rows \(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\) SELECT json_extract\(value, '\$\[0\]'\).* FROM json_each\(\?\)$/.test(s)) {
+          const list = JSON.parse(this._binds[0]);
+          for (const [uid, entity, event_uid, patient_uid, deleted, updated_at, data, rowSeq] of list) {
+            store.set(uid, { uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq: rowSeq != null ? rowSeq : null });
+          }
+          return { success: true, meta: { changes: list.length } };
+        }
+        if (/^INSERT OR REPLACE INTO sync_rows \(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\) VALUES/.test(s)) {
           const [uid, entity, event_uid, patient_uid, deleted, updated_at, data, rowSeq] =
             this._binds;
           store.set(uid, {
@@ -116,8 +113,38 @@ function makeFakeD1() {
       },
       async all() {
         const s = this._sql;
-        const bySeq = /IFNULL\(seq, 0\) > \?/.test(s);
-        if (bySeq || /SELECT .* FROM sync_rows WHERE updated_at > \?/.test(s)) {
+        // Push: the stored rows' stamps and deletion flags, a batch of uids at
+        // a time — and, for entities whose older builds omit columns, their
+        // entity and data in the same read.
+        const lookup = /^SELECT uid, updated_at, deleted(, entity, data)? FROM sync_rows WHERE uid IN \(SELECT value FROM json_each\(\?\)\)$/.exec(s);
+        if (lookup) {
+          const results = [];
+          for (const uid of JSON.parse(this._binds[0])) {
+            const row = store.get(uid);
+            if (!row) continue;
+            const out = { uid, updated_at: row.updated_at, deleted: row.deleted ? 1 : 0 };
+            if (lookup[1]) Object.assign(out, { entity: row.entity, data: row.data });
+            results.push(out);
+          }
+          return { results };
+        }
+        // Pull, v1.8.0: the next rows' sizes, then the rows up to a seq.
+        const sized = /^SELECT seq, length\(data\) AS n FROM sync_rows WHERE seq > \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
+        const ranged = /^SELECT uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq FROM sync_rows WHERE seq > \? AND seq <= \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
+        if (sized || ranged) {
+          const b = [...this._binds];
+          const since = Number(b.shift());
+          const upTo = ranged ? Number(b.shift()) : Infinity;
+          const eventUid = (sized || ranged)[1] ? b.shift() : undefined;
+          const limit = b.shift();
+          const rows = Array.from(store.values())
+            .filter((r) => r.seq != null && Number(r.seq) > since && Number(r.seq) <= upTo && (eventUid === undefined || r.event_uid === eventUid))
+            .sort((a, b2) => (Number(a.seq) - Number(b2.seq)) || (a.uid < b2.uid ? -1 : a.uid > b2.uid ? 1 : 0))
+            .slice(0, limit);
+          return { results: rows.map((r) => (sized ? { seq: r.seq, n: r.data == null ? null : String(r.data).length } : { ...r })) };
+        }
+        // Pull from an older app: the legacy timestamp cursor.
+        if (/SELECT .* FROM sync_rows WHERE updated_at > \?/.test(s)) {
           const hasEvent = /event_uid = \?/.test(s);
           let since, eventUid, limit;
           if (hasEvent) {
@@ -125,17 +152,11 @@ function makeFakeD1() {
           } else {
             [since, limit] = this._binds;
           }
-          let rows = Array.from(store.values()).filter((r) =>
-            bySeq
-              ? Number(r.seq || 0) > Number(since)
-              : String(r.updated_at) > String(since)
-          );
+          let rows = Array.from(store.values()).filter((r) => String(r.updated_at) > String(since));
           if (hasEvent) rows = rows.filter((r) => r.event_uid === eventUid);
-          const key = (r) => (bySeq ? Number(r.seq || 0) : r.updated_at);
           rows.sort((a, b) => {
-            const ka = key(a), kb = key(b);
-            if (ka < kb) return -1;
-            if (ka > kb) return 1;
+            if (a.updated_at < b.updated_at) return -1;
+            if (a.updated_at > b.updated_at) return 1;
             return a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0;
           });
           rows = rows.slice(0, limit);
@@ -213,7 +234,7 @@ async function main() {
       h.data &&
       h.data.ok === true &&
       h.data.service === 'mmw-sync' &&
-      h.data.version === '1.7.0' &&
+      h.data.version === '1.8.0' &&
       h.data.seq === true &&
       typeof h.data.time === 'string'
   );
@@ -1193,6 +1214,102 @@ async function main() {
       closedPost.status === 410 && closedPost.data.ok === false && /closed/i.test(closedPost.data.error));
   }
 
+  // --- v1.8.0: a push fits Cloudflare's per-request query allowance ---
+  // D1 allows 50 queries a request on the free plan. A push read, numbered
+  // and wrote one row at a time — three queries a row — so a laptop with a
+  // backlog failed every push, and on the free plan never got past its first
+  // forty or so rows.
+  {
+    const envQ = { CLINIC_KEY, DB: await makeD1() };
+    const push = (rows) => call(envQ, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: 'q', rows } });
+    const queriesOf = async (fn) => { const from = envQ.DB._log.length; const res = await fn(); return { res, queries: envQ.DB._log.length - from }; };
+    const pullAll = async (since = '0') => {
+      const got = []; let cursor = since; let pages = 0; let biggest = 0;
+      for (;;) {
+        const r = await call(envQ, 'GET', `/v1/pull?since=${cursor}&limit=400`, { auth: CLINIC_KEY });
+        pages++; got.push(...r.data.rows); biggest = Math.max(biggest, r.data.rows.length);
+        cursor = r.data.cursor;
+        if (!r.data.more) break;
+        if (pages > 100) break;
+      }
+      return { got, cursor, pages, biggest };
+    };
+    await push([{ entity: 'event', uid: 'ev-q', event_uid: 'ev-q', updated_at: '2026-10-01T00:00:00.000Z@q', data: { name: 'Q' } }]);
+    const ENT = ['patient', 'consent', 'triage', 'treatment', 'survey'];
+    const many = [];
+    for (let i = 0; i < 400; i++) {
+      const entity = ENT[i % ENT.length];
+      many.push({ entity, uid: `q-${entity}-${i}`, event_uid: 'ev-q', patient_uid: `qp-${i}`, updated_at: `2026-10-01T01:00:00.${String(i).padStart(3, '0')}Z@q`, data: { n: i, note: 'x'.repeat(300) } });
+    }
+    const big = await queriesOf(() => push(many));
+    const after = await pullAll('0');
+    const qRows = after.got.filter((r) => r.uid.startsWith('q-'));
+    check('v1.8.0: a push of 400 rows is stored whole in a handful of queries, not three a row (the free plan allows 50 a request)',
+      big.res.status === 200 && big.res.data.ok === true && big.res.data.applied === 400 && big.queries <= 6 && qRows.length === 400);
+
+    const again = await queriesOf(() => push(many));
+    check('v1.8.0: the same 400 rows pushed again are all skipped — read in a batch, nothing written',
+      again.res.data.ok === true && again.res.data.applied === 0 && again.res.data.skipped === 400 && again.queries <= 2);
+
+    const idle = await queriesOf(() => call(envQ, 'GET', `/v1/pull?since=${after.cursor}&limit=400`, { auth: CLINIC_KEY }));
+    check('v1.8.0: a check for news with nothing new is one query, and says there is no more',
+      idle.res.data.ok === true && idle.res.data.rows.length === 0 && idle.res.data.more === false && idle.res.data.cursor === after.cursor && idle.queries === 1);
+
+    // The same row twice in one push: decided in order, written once as it
+    // stands last.
+    const twice = await push([
+      { entity: 'patient', uid: 'q-twice', event_uid: 'ev-q', updated_at: '2026-10-01T02:00:00.000Z@q', data: { first_name: 'First' } },
+      { entity: 'patient', uid: 'q-twice', event_uid: 'ev-q', updated_at: '2026-10-01T02:00:01.000Z@q', data: { first_name: 'Second' } },
+      { entity: 'patient', uid: 'q-twice', event_uid: 'ev-q', updated_at: '2026-10-01T02:00:00.500Z@q', data: { first_name: 'Older' } },
+    ]);
+    const twiceRows = (await pullAll(after.cursor)).got.filter((r) => r.uid === 'q-twice');
+    check('v1.8.0: one row sent twice in a push is applied in order and stored once, as the newer copy; an older third copy is skipped',
+      twice.data.applied === 2 && twice.data.skipped === 1 && twiceRows.length === 1 && twiceRows[0].data.first_name === 'Second');
+
+    // D1 refuses a row over 2,000,000 bytes. Such a row is refused on its
+    // own; the rest of the push is stored.
+    const huge = 'data:image/jpeg;base64,' + 'A'.repeat(2000000);
+    const tooBig = await push([
+      { entity: 'xray', uid: 'q-xray-huge', event_uid: 'ev-q', patient_uid: 'qp-1', updated_at: '2026-10-01T03:00:00.000Z@q', data: { image_png: huge } },
+      { entity: 'survey', uid: 'q-after-huge', event_uid: 'ev-q', patient_uid: 'qp-1', updated_at: '2026-10-01T03:00:01.000Z@q', data: { ok: 1 } },
+    ]);
+    const storedQ = envQ.DB._store;
+    check('v1.8.0: a row too big for the database is refused on its own, named in the answer, and the rest of the push is stored',
+      tooBig.status === 200 && tooBig.data.ok === true && tooBig.data.applied === 1 && Array.isArray(tooBig.data.refused)
+      && tooBig.data.refused.length === 1 && tooBig.data.refused[0].uid === 'q-xray-huge' && storedQ.has('q-after-huge') && !storedQ.has('q-xray-huge'));
+
+    // More than one request's allowance of writing: forty X-rays of about
+    // 1 MB, one statement each. The first push saves what fits and asks for
+    // the rest; the same push again skips what was saved and finishes.
+    const mb = 'data:image/jpeg;base64,' + 'B'.repeat(1000000);
+    const xrays = [];
+    for (let i = 0; i < 40; i++) xrays.push({ entity: 'xray', uid: `q-xr-${i}`, event_uid: 'ev-q', patient_uid: `qp-${i}`, updated_at: `2026-10-01T04:00:00.${String(i).padStart(3, '0')}Z@q`, data: { image_png: mb, n: i } });
+    const tries = [];
+    for (let t = 0; t < 5; t++) {
+      const r = await queriesOf(() => push(xrays));
+      tries.push(r);
+      if (r.res.data.ok) break;
+    }
+    const firstTry = tries[0].res;
+    const xrStored = [...envQ.DB._store.values()].filter((r) => r.uid.startsWith('q-xr-'));
+    check('v1.8.0: a push bigger than one request\'s query allowance saves what fits, says how far it got, and finishes on the next try',
+      firstTry.status === 503 && firstTry.data.ok === false && firstTry.data.partial === true && firstTry.data.written > 0 && firstTry.data.written < 40
+      && /saved \d+ of the 40 changes/.test(firstTry.data.error)
+      && tries.length === 2 && tries[1].res.data.ok === true && tries.every((x) => x.queries <= 32) && xrStored.length === 40);
+
+    // Pulled back in pages of about 4 MB at most, every row once.
+    const xrPull = await pullAll(after.cursor);
+    const xrGot = xrPull.got.filter((r) => r.uid.startsWith('q-xr-'));
+    check('v1.8.0: a backlog of X-rays comes down in pages of about 4 MB, every row exactly once and in delivery order',
+      xrGot.length === 40 && new Set(xrGot.map((r) => r.uid)).size === 40 && xrPull.biggest <= 5 && xrPull.pages >= 10
+      && xrGot.every((r) => r.data.image_png.length === mb.length));
+
+    // Every row stored above, batch-written or not, has a number of its own.
+    const seqs = [...envQ.DB._store.values()].map((r) => Number(r.seq));
+    check('v1.8.0: every stored row has its own delivery number',
+      seqs.every((n) => Number.isFinite(n) && n > 0) && new Set(seqs).size === seqs.length);
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,7 +1328,7 @@ async function hubChecks() {
     const h = await req('/health');
     const hj = JSON.parse(h.text);
     check('clinic network hub: /health over HTTPS is this worker.js\'s own answer (service, version, seq)',
-      h.status === 200 && hj.ok === true && hj.service === 'mmw-sync' && hj.version === '1.7.0' && hj.seq === true);
+      h.status === 200 && hj.ok === true && hj.service === 'mmw-sync' && hj.version === '1.8.0' && hj.seq === true);
     check('clinic network hub: the key is one the host made — long, and plain letters, numbers and dashes',
       /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(id.key) && id.key !== CLINIC_KEY);
     const ev = { entity: 'event', uid: 'evt-hub', event_uid: null, updated_at: '2026-10-01T00:00:00.000Z@h', data: { name: 'Hub Clinic', active: 1 } };

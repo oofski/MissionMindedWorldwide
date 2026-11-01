@@ -3172,7 +3172,7 @@ async function main() {
     const rowsV = [];
     const envV = { DB: { prepare(sql) { return { bind(...a) { this.a = a; return this; },
       async first() { if (/entity = 'event'/.test(sql)) return { data: JSON.stringify({ name: 'Online', active: 1, cities: JSON.stringify(['Sandy', 'Boring']) }) }; return { v: rowsV.length + 1 }; },
-      async run() { if (/INSERT OR REPLACE/.test(sql)) rowsV.push(this.a); return {}; } }; } } };
+      async run() { if (/INSERT OR REPLACE/.test(sql)) { if (/json_each/.test(sql)) rowsV.push(...JSON.parse(this.a[0])); else rowsV.push(this.a); } return {}; } }; } } };
     const pageHtml = await (await workerV.fetch(new Request('https://sync.example/checkin/evt-online'), envV, {})).text();
     const formDom = new JSDOM(pageHtml, { runScripts: 'dangerously', url: 'https://sync.example/checkin/evt-online', pretendToBeVisual: true,
       beforeParse(w) {
@@ -3953,11 +3953,12 @@ const raw=(d,f)=>{const h=new B(path.join(d,'mission-minded.db'));try{return f(h
   /* --- two laptops, one server, a deletion recorded for a refused delete --- */
   const mkDB=()=>{const rows=new Map();let seq=0;
   return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
-    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
-    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const put=([uid,entity,event_uid,patient_uid,deleted,updated_at,data,s])=>rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});if(sql.includes('json_each'))JSON.parse(this.b[0]).forEach(put);else put(this.b);}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:(seq+=Number(this.b[0]||1))};const r=rows.get(this.b[0]);
       if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
       if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
-    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+    async all(){if(sql.includes('WHERE uid IN')){const keep=sql.includes('entity, data');return{results:JSON.parse(this.b[0]).map((u)=>rows.get(u)).filter(Boolean).map((r)=>keep?{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted})};}
+      if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
       return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
   const KEY='right horse battery 42',URL_A='https://mmw-sync.clinic.workers.dev';let DB=null;
   globalThis.fetch=async(url,init)=>worker.fetch(new Request(url,init),{CLINIC_KEY:KEY,DB},{});
@@ -5487,11 +5488,12 @@ const done=(o)=>process.stdout.write('\\n@@K@@'+JSON.stringify(o),()=>process.ex
   // One clinic server: the real Worker over a small in-memory D1.
   const mkDB=()=>{const rows=new Map();let seq=0;
   return {prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
-    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
-    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const put=([uid,entity,event_uid,patient_uid,deleted,updated_at,data,s])=>rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});if(sql.includes('json_each'))JSON.parse(this.b[0]).forEach(put);else put(this.b);}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:(seq+=Number(this.b[0]||1))};const r=rows.get(this.b[0]);
       if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
       if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
-    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+    async all(){if(sql.includes('WHERE uid IN')){const keep=sql.includes('entity, data');return{results:JSON.parse(this.b[0]).map((u)=>rows.get(u)).filter(Boolean).map((r)=>keep?{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted})};}
+      if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
       return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
   const DB=mkDB();
   const SERVERS={'mmw-sync.clinic.workers.dev':{CLINIC_KEY:'right horse battery 42',DB},'nodb.clinic.workers.dev':{CLINIC_KEY:'k'},
@@ -5785,11 +5787,12 @@ const done=(o)=>process.stdout.write('\\n@@V@@'+JSON.stringify(o),()=>process.ex
   const worker=(await import(pathToFileURL(workerPath).href)).default;
   const mkDB=()=>{const rows=new Map();let seq=0;
   return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
-    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
-    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const put=([uid,entity,event_uid,patient_uid,deleted,updated_at,data,s])=>rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});if(sql.includes('json_each'))JSON.parse(this.b[0]).forEach(put);else put(this.b);}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:(seq+=Number(this.b[0]||1))};const r=rows.get(this.b[0]);
       if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
       if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
-    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+    async all(){if(sql.includes('WHERE uid IN')){const keep=sql.includes('entity, data');return{results:JSON.parse(this.b[0]).map((u)=>rows.get(u)).filter(Boolean).map((r)=>keep?{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted})};}
+      if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
       return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
   const CURLY='it\\u2019s our clinic';
   const SERVERS={};
@@ -6114,11 +6117,12 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
   const worker=(await import(pathToFileURL(workerPath).href)).default;
   const mkDB=()=>{const rows=new Map();let seq=0;
   return {rows,prepare(sql){return{b:[],bind(...a){this.b=a;return this;},
-    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const [uid,entity,event_uid,patient_uid,deleted,updated_at,data,s]=this.b;rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});}return{success:true};},
-    async first(){if(sql.includes('RETURNING v'))return{v:++seq};const r=rows.get(this.b[0]);
+    async run(){if(sql.startsWith('INSERT OR REPLACE INTO sync_rows')){const put=([uid,entity,event_uid,patient_uid,deleted,updated_at,data,s])=>rows.set(uid,{uid,entity,event_uid,patient_uid,deleted,updated_at,data,seq:s});if(sql.includes('json_each'))JSON.parse(this.b[0]).forEach(put);else put(this.b);}return{success:true};},
+    async first(){if(sql.includes('RETURNING v'))return{v:(seq+=Number(this.b[0]||1))};const r=rows.get(this.b[0]);
       if(sql.startsWith('SELECT updated_at'))return r?{updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:null;
       if(sql.startsWith('SELECT data FROM sync_rows'))return r&&r.entity==='event'&&!r.deleted?{data:r.data}:null;return null;},
-    async all(){if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
+    async all(){if(sql.includes('WHERE uid IN')){const keep=sql.includes('entity, data');return{results:JSON.parse(this.b[0]).map((u)=>rows.get(u)).filter(Boolean).map((r)=>keep?{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted,entity:r.entity,data:r.data}:{uid:r.uid,updated_at:r.updated_at,deleted:r.deleted})};}
+      if(sql.includes('IFNULL(seq, 0) > ?')||sql.includes('WHERE seq > ?')){const since=Number(this.b[0]),limit=this.b[this.b.length-1];
       return{results:[...rows.values()].filter((r)=>r.seq>since).sort((a,b)=>a.seq-b.seq).slice(0,limit)};}return{results:[]};}};}};};
   const SERVERS={};
   const srv=(h,k)=>{SERVERS[h+'.mmw.workers.dev']={CLINIC_KEY:k,DB:mkDB()};return 'https://'+h+'.mmw.workers.dev';};
@@ -12064,6 +12068,39 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       currentUser = signed20; store20.setUser(signed20);
       i18n20.setLang('en');
     }
+  }
+
+  /* ================= v0.0.21: what a laptop sends fits the sync server ================= */
+  {
+    const a21 = signInAdmin();
+    // Everything already on this laptop counts as sent, so only what is added
+    // below goes. (Last block of the harness: nothing after it needs it unsent.)
+    for (let i = 0; i < 200; i++) { const { rows, mark } = db.collectSyncRows(400); if (!rows.length) break; db.markSynced(mark); }
+    const p21 = db.createPatient(a21, { first_name: 'Xena', last_name: 'Xrays', dob: '1981-03-03', phone: '5035550100',
+      demographics: { city: 'Sandy', state: 'OR', emergency_name: 'Kin', emergency_phone: '5035550101', services: ['dental'] },
+      medical_history: {}, dental_history: { visit_type: 'filling' }, consents: [{ type: 'general', signer_name: 'Xena', signature_png: 'data:image/png;base64,AAAA' }] });
+    for (let i = 0; i < 7; i++) db.addXray(a21, p21.id, { station: '', image_png: 'data:image/jpeg;base64,' + 'X'.repeat(1000000 + i), note: `x${i}.jpg`, tooth: '3' });
+    db.addXray(a21, p21.id, { station: '', image_png: 'data:image/jpeg;base64,' + 'Y'.repeat(3500000), note: 'big.jpg', tooth: '4' });
+    const batches = [];
+    for (let i = 0; i < 50; i++) {
+      const { rows, mark } = db.collectSyncRows(400);
+      if (!rows.length) break;
+      batches.push(rows.map((r) => ({ uid: r.uid, entity: r.entity, size: JSON.stringify(r.data).length })));
+      db.markSynced(mark);
+    }
+    const sent = batches.flat();
+    const xr = sent.filter((r) => r.entity === 'xray');
+    log(batches.length >= 4 && batches.every((bt) => bt.length === 1 || bt.reduce((n, r) => n + r.size, 0) <= 3000000)
+      && xr.length === 8 && new Set(xr.map((r) => r.uid)).size === 8 && batches.some((bt) => bt.length === 1 && bt[0].size > 3000000)
+      && sent.some((r) => r.entity === 'patient') && db.collectSyncRows(400).rows.length === 0,
+      'v0.0.21: a push carries about 3 MB of records at most (one bigger record alone), so a day of X-rays goes over several pushes, each record once — not hundreds of MB in one request the sync server cannot take');
+    // The X-ray kept is always small enough for the server to store.
+    const provSrc21 = fs.readFileSync(new URL('../src/renderer/js/views/provider.js', import.meta.url), 'utf8');
+    const workerSrc21 = fs.readFileSync(new URL('../cloud/worker.js', import.meta.url), 'utf8');
+    const xMax = Number((/const XRAY_MAX_CHARS = (\d+);/.exec(provSrc21) || [])[1]);
+    const rowMax = Number((/const ROW_DATA_MAX = (\d+);/.exec(workerSrc21) || [])[1]);
+    log(xMax > 0 && rowMax > 0 && xMax + 50000 < rowMax && /dataUrl\.length <= XRAY_MAX_CHARS/.test(provSrc21),
+      'v0.0.21: an X-ray is shrunk to fit before it is saved, under the largest record the sync server stores (with room for the rest of the record)');
   }
 
   await tick();

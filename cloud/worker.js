@@ -1,4 +1,4 @@
-// Mission Minded Worldwide — Cloud Sync Worker (v1.7.0)
+// Mission Minded Worldwide — Cloud Sync Worker (v1.8.0)
 // =============================================================================
 // NO INSTALLS NEEDED. To deploy: create a Worker in the Cloudflare dashboard,
 // paste THIS ENTIRE FILE into its code editor, then:
@@ -15,7 +15,7 @@
 // See ./SYNC_CONTRACT.md for the exact API + schema this implements.
 
 const SERVICE = 'mmw-sync';
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
 
@@ -58,6 +58,16 @@ const MIGRATION_STATEMENTS = [
 let schemaReady = false;
 async function ensureSchema(env) {
   if (schemaReady || !env || !env.DB) return;
+  // v1.8.0: one read when everything is already in place — every server after
+  // its first request. The ten statements below each count against the
+  // request's query allowance (see PUSH_QUERY_BUDGET), on every new Worker
+  // instance Cloudflare starts.
+  try {
+    const have = await env.DB
+      .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('sync_rows', 'sync_seq', 'idx_sync_seq')")
+      .first();
+    if (have && Number(have.n) === 3) { schemaReady = true; return; }
+  } catch (_e) { /* create them below */ }
   for (const sql of SCHEMA_STATEMENTS) {
     await env.DB.prepare(sql).run();
   }
@@ -67,13 +77,84 @@ async function ensureSchema(env) {
   schemaReady = true;
 }
 
-// Reserve the next delivery number. A single atomic upsert, so two laptops
-// pushing at the same moment can never be handed the same value.
-async function nextSeq(env) {
+// Reserve the next n delivery numbers: they are top - n + 1 … top, for the
+// returned top. A single atomic upsert, so two laptops pushing at the same
+// moment can never be handed the same value.
+async function reserveSeq(env, n) {
   const row = await env.DB
-    .prepare('INSERT INTO sync_seq (id, v) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET v = v + 1 RETURNING v')
+    .prepare('INSERT INTO sync_seq (id, v) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET v = v + excluded.v RETURNING v')
+    .bind(n)
     .first();
-  return row && row.v != null ? Number(row.v) : null;
+  if (!row || row.v == null) throw new Error('The server could not number the changes it received.');
+  return Number(row.v);
+}
+
+// What Cloudflare's D1 allows, which a push has to fit whatever a laptop sends.
+//  - Queries per request: 50 on the free plan (1,000 paid). Read, numbered and
+//    written one row at a time, a push was three queries a row: 400 rows (one
+//    push from a laptop with a backlog) was 1,200. It failed part way, and the
+//    laptop sent the same rows again every few seconds — on the free plan
+//    never getting past the first forty or so, so it stopped syncing both
+//    ways. Rows are now read, numbered and written a batch at a time (one
+//    JSON parameter, opened with json_each), and a push stops at
+//    PUSH_QUERY_BUDGET and asks for the rest again; what it wrote is skipped
+//    then, so every try gets further.
+//  - A row, and a bound value, of at most 2,000,000 bytes. A row bigger than
+//    that (a large X-ray) can never be stored; it is refused on its own, named
+//    in the answer's `refused`, instead of failing every push it is in.
+const PUSH_QUERY_BUDGET = 30;
+const ROW_DATA_MAX = 1950000;
+const PARAM_MAX = 1900000;
+// A pull page holds about this much row data at most (and always one row), so
+// a laptop catching up on a day of X-rays is not sent them in one answer the
+// Worker has no memory for.
+const PULL_PAGE_BYTES = 4000000;
+
+const SYNC_COLS_SQL = 'uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq';
+const INSERT_ONE_SQL = 'INSERT OR REPLACE INTO sync_rows (' + SYNC_COLS_SQL + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+const INSERT_MANY_SQL = 'INSERT OR REPLACE INTO sync_rows (' + SYNC_COLS_SQL + ') SELECT ' +
+  [0, 1, 2, 3, 4, 5, 6, 7].map((i) => "json_extract(value, '$[" + i + "]')").join(', ') +
+  ' FROM json_each(?)';
+
+const UTF8 = new TextEncoder();
+function byteLength(str) {
+  return UTF8.encode(str).length;
+}
+
+// Splits encoded items into runs whose JSON array fits one bound parameter.
+// An item too big for one on its own is a run of its own.
+function runsByBytes(sizes, max) {
+  const runs = [];
+  let start = 0;
+  while (start < sizes.length) {
+    let end = start + 1;
+    let total = 2 + sizes[start];
+    while (end < sizes.length && total + 1 + sizes[end] <= max) { total += 1 + sizes[end]; end++; }
+    runs.push([start, end]);
+    start = end;
+  }
+  return runs;
+}
+
+// Writes rows — each [uid, entity, event_uid, patient_uid, deleted,
+// updated_at, data, seq] — as few statements as their size allows, no more
+// than maxQueries of them. Returns how many rows were written.
+async function writeRows(env, entries, maxQueries) {
+  const encoded = entries.map((e) => JSON.stringify(e));
+  const sizes = encoded.map(byteLength);
+  let written = 0;
+  let used = 0;
+  for (const [start, end] of runsByBytes(sizes, PARAM_MAX)) {
+    if (used >= maxQueries) break;
+    if (end - start === 1 && sizes[start] + 2 > PARAM_MAX) {
+      await env.DB.prepare(INSERT_ONE_SQL).bind(...entries[start]).run();
+    } else {
+      await env.DB.prepare(INSERT_MANY_SQL).bind('[' + encoded.slice(start, end).join(',') + ']').run();
+    }
+    used++;
+    written += end - start;
+  }
+  return written;
 }
 
 export default {
@@ -169,28 +250,44 @@ async function handlePush(request, env) {
   const rows = body && Array.isArray(body.rows) ? body.rows : [];
   let applied = 0;
   let skipped = 0;
+  const refused = [];
+  let queries = 0;
 
-  for (const row of rows) {
-    if (!isValidRow(row)) {
-      skipped++;
-      continue;
+  const valid = rows.filter(isValidRow);
+  skipped += rows.length - valid.length;
+
+  // What the server holds for these rows, read a batch at a time. For an
+  // entity an older build may push without some columns, the stored copy's
+  // data comes back in the same read, for keepOmittedKeys below; every other
+  // row (x-ray images and consent signatures among them) is never read back.
+  const keepUids = new Set(valid.filter((r) => KEEPS_OMITTED_KEYS.has(r.entity)).map((r) => r.uid));
+  const plainUids = new Set(valid.map((r) => r.uid).filter((u) => !keepUids.has(u)));
+  const stored = new Map();
+  for (const [uids, cols] of [[keepUids, 'uid, updated_at, deleted, entity, data'], [plainUids, 'uid, updated_at, deleted']]) {
+    const list = [...uids].map((u) => JSON.stringify(u));
+    for (const [a, b] of runsByBytes(list.map(byteLength), PARAM_MAX)) {
+      const res = await env.DB
+        .prepare('SELECT ' + cols + ' FROM sync_rows WHERE uid IN (SELECT value FROM json_each(?))')
+        .bind('[' + list.slice(a, b).join(',') + ']')
+        .all();
+      queries++;
+      for (const r of (res && res.results) || []) stored.set(r.uid, r);
     }
+  }
 
-    // Last-Write-Wins: read the stored updated_at first, and only overwrite
-    // only when the incoming updated_at is STRICTLY newer than the stored one.
-    // updated_at is a globally-unique, totally-ordered stamp (monotonic ISO time
-    // + device id), so this tie-break ("skip on <=") is identical to the client's
-    // apply rule ("apply only when env > local") — server and client can never
-    // diverge on an equal-timestamp tie.
-    // For an entity an older build may push without some columns, the stored
-    // copy's data comes back in the same read, for keepOmittedKeys below.
-    const existing = await env.DB
-      .prepare(KEEPS_OMITTED_KEYS.has(row.entity)
-        ? 'SELECT updated_at, deleted, entity, data FROM sync_rows WHERE uid = ?'
-        : 'SELECT updated_at, deleted FROM sync_rows WHERE uid = ?')
-      .bind(row.uid)
-      .first();
+  // The rows to write, decided in the order they came, each against what the
+  // server holds by then (an earlier row of this push included). The same row
+  // twice in one push is written once, as it stands last.
+  const writes = new Map();
+  for (const row of valid) {
+    const existing = stored.get(row.uid) || null;
 
+    // Last-Write-Wins: overwrite only when the incoming updated_at is STRICTLY
+    // newer than the stored one. updated_at is a globally-unique,
+    // totally-ordered stamp (monotonic ISO time + device id), so this
+    // tie-break ("skip on <=") is identical to the client's apply rule ("apply
+    // only when env > local") — server and client can never diverge on an
+    // equal-timestamp tie.
     if (existing && String(row.updated_at) <= String(existing.updated_at)) {
       skipped++;
       continue;
@@ -222,33 +319,50 @@ async function handlePush(request, env) {
     const dataStr =
       typeof data === 'string' ? data : JSON.stringify(data);
 
-    // Take the next delivery number. A row that is written LATE (a laptop that
-    // was offline, or one whose clock is behind) still lands at the END of the
-    // delivery order, so every device that hasn't reached it yet still gets it.
-    const seq = await nextSeq(env);
+    if (byteLength(dataStr) > ROW_DATA_MAX) {
+      skipped++;
+      refused.push({ uid: row.uid, entity: row.entity, reason: 'too large' });
+      continue;
+    }
 
-    await env.DB
-      .prepare(
-        'INSERT OR REPLACE INTO sync_rows ' +
-          '(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq) ' +
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      )
-      .bind(
-        row.uid,
-        row.entity,
-        row.event_uid != null ? row.event_uid : null,
-        row.patient_uid != null ? row.patient_uid : null,
-        row.deleted ? 1 : 0,
-        row.updated_at,
-        dataStr,
-        seq
-      )
-      .run();
-
+    writes.delete(row.uid);
+    writes.set(row.uid, [
+      row.uid,
+      row.entity,
+      row.event_uid != null ? row.event_uid : null,
+      row.patient_uid != null ? row.patient_uid : null,
+      row.deleted ? 1 : 0,
+      row.updated_at,
+      dataStr,
+    ]);
+    stored.set(row.uid, { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0, entity: row.entity, data: dataStr });
     applied++;
   }
 
-  return json({ ok: true, applied, skipped, time: nowIso() });
+  if (writes.size) {
+    // Delivery numbers, in the order the rows were decided. A row that is
+    // written LATE (a laptop that was offline, or one whose clock is behind)
+    // still lands at the END of the delivery order, so every device that
+    // hasn't reached it yet still gets it.
+    const entries = [...writes.values()];
+    const top = await reserveSeq(env, entries.length);
+    queries++;
+    entries.forEach((e, i) => e.push(top - entries.length + 1 + i));
+
+    const written = await writeRows(env, entries, PUSH_QUERY_BUDGET - queries);
+    if (written < entries.length) {
+      // Not an error the laptop has to act on: it sends the same rows again,
+      // the written ones are skipped, and the next try gets further.
+      return json({
+        ok: false,
+        partial: true,
+        written,
+        error: `The server saved ${written} of the ${entries.length} changes this laptop sent; the rest go on the next try.`,
+      }, 503);
+    }
+  }
+
+  return json({ ok: true, applied, skipped, refused, time: nowIso() });
 }
 
 // The entities a newer build has added columns to, so that a push from an
@@ -286,23 +400,50 @@ async function handlePull(url, env) {
   //   time (older app)   — the legacy "<ISO>@<device>" stamp. Served exactly as
   //                        before so an un-updated laptop keeps working.
   const seqMode = since === '' || /^\d+$/.test(since);
-  const columns =
-    'uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq';
-
-  const orderCol = seqMode ? 'seq' : 'updated_at';
   const sinceVal = seqMode ? Number(since || 0) : since;
-  let sql =
-    'SELECT ' + columns + ' FROM sync_rows WHERE ' +
-    // A row written before this column existed and never re-pushed would have a
-    // NULL seq; the backfill fills them, and IFNULL keeps it safe regardless.
-    (seqMode ? 'IFNULL(seq, 0) > ?' : 'updated_at > ?');
-  const binds = [sinceVal];
-  if (eventUid) { sql += ' AND event_uid = ?'; binds.push(eventUid); }
-  sql += ' ORDER BY ' + orderCol + ' ASC, uid ASC LIMIT ?';
-  binds.push(limit);
+  const eventSql = eventUid ? ' AND event_uid = ?' : '';
+  const eventBind = eventUid ? [eventUid] : [];
 
-  const result = await env.DB.prepare(sql).bind(...binds).all();
-  const dbRows = result && Array.isArray(result.results) ? result.results : [];
+  let dbRows;
+  let more;
+  if (seqMode) {
+    // v1.8.0: the bare column, so the filter seeks idx_sync_seq. Wrapped in
+    // IFNULL it could not, and every check for news read every row the server
+    // holds (D1 bills rows read). The rows returned are the same: every write
+    // takes a delivery number (reserveSeq), the backfill gives one to any row
+    // from before the column existed, and a NULL never passed
+    // IFNULL(seq, 0) > a cursor of 0 or more anyway.
+    // First how big the next rows are — nothing more when there is no news —
+    // then as many of them as fit PULL_PAGE_BYTES, and always one.
+    const sized = await env.DB
+      .prepare('SELECT seq, length(data) AS n FROM sync_rows WHERE seq > ?' + eventSql + ' ORDER BY seq ASC, uid ASC LIMIT ?')
+      .bind(sinceVal, ...eventBind, limit)
+      .all();
+    const sizes = sized && Array.isArray(sized.results) ? sized.results : [];
+    if (!sizes.length) {
+      return json({ ok: true, rows: [], cursor: String(sinceVal), more: false, mode: 'seq' });
+    }
+    let take = 1;
+    let total = Number(sizes[0].n) || 0;
+    while (take < sizes.length && total + (Number(sizes[take].n) || 0) <= PULL_PAGE_BYTES) {
+      total += Number(sizes[take].n) || 0;
+      take++;
+    }
+    const upTo = sizes[take - 1].seq;
+    const result = await env.DB
+      .prepare('SELECT ' + SYNC_COLS_SQL + ' FROM sync_rows WHERE seq > ? AND seq <= ?' + eventSql + ' ORDER BY seq ASC, uid ASC LIMIT ?')
+      .bind(sinceVal, upTo, ...eventBind, limit)
+      .all();
+    dbRows = result && Array.isArray(result.results) ? result.results : [];
+    more = take < sizes.length || sizes.length === limit;
+  } else {
+    const result = await env.DB
+      .prepare('SELECT ' + SYNC_COLS_SQL + ' FROM sync_rows WHERE updated_at > ?' + eventSql + ' ORDER BY updated_at ASC, uid ASC LIMIT ?')
+      .bind(sinceVal, ...eventBind, limit)
+      .all();
+    dbRows = result && Array.isArray(result.results) ? result.results : [];
+    more = dbRows.length === limit;
+  }
 
   const rows = dbRows.map((r) => ({
     entity: r.entity,
@@ -318,7 +459,6 @@ async function handlePull(url, env) {
   const cursor = !last
     ? (seqMode ? String(sinceVal) : since)
     : (seqMode ? String(last.seq != null ? last.seq : sinceVal) : last.updated_at);
-  const more = rows.length === limit;
 
   // `mode` tells the app which dialect this server speaks, so a v1.5.0+ app can
   // tell a seq-capable server from an older deployment and store the right kind
@@ -525,14 +665,11 @@ async function handleCheckinPost(eventUid, request, env) {
   // No survey row: registration asks no survey question since v0.0.15. The
   // whole grant survey is asked at check-out, which files the row itself.
 
-  for (const r of rows) {
-    // Same delivery-number rule as a push: a pre-registration is queued at the
-    // end of the order, so every laptop picks it up regardless of its clock.
-    const seq = await nextSeq(env);
-    await env.DB.prepare(
-      'INSERT OR REPLACE INTO sync_rows (uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).bind(r.uid, r.entity, eventUid, r.patient_uid, 0, r.stamp, JSON.stringify(r.data), seq).run();
-  }
+  // Same delivery-number rule as a push: a pre-registration is queued at the
+  // end of the order, so every laptop picks it up regardless of its clock.
+  const top = await reserveSeq(env, rows.length);
+  const entries = rows.map((r, i) => [r.uid, r.entity, eventUid, r.patient_uid, 0, r.stamp, JSON.stringify(r.data), top - rows.length + 1 + i]);
+  if (await writeRows(env, entries, PUSH_QUERY_BUDGET) < entries.length) throw new Error('The sign-up could not be saved. Please try again.');
 
   return json({ ok: true });
 }

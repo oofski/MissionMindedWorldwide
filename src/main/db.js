@@ -4768,19 +4768,30 @@ function ensureUids() {
 // Local-change cursor: gather dirty rows (content sig != synced_rev) as sync
 // envelopes. Stamps updated_at only when the content actually changed (tracked
 // by content_rev) so an offline edit keeps its original timestamp for fair LWW.
-function collectSyncRows(max = 400) {
+// v0.0.21: also no more than about maxBytes of row data a push (always one
+// row). Counted only in rows, a laptop with a day of X-rays behind it sent
+// hundreds of megabytes in one request — more than a Cloudflare Worker may
+// receive, or has memory for — and sent it again every few seconds. What is
+// left goes with the next push.
+const PUSH_BYTES = 3000000;
+function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
   ensureUids();
   const rows = [];
   const mark = [];
+  let bytes = 0;
+  let full = false;
   for (const entity of APPLY_ORDER) {
-    if (rows.length >= max) break;
+    if (rows.length >= max || full) break;
     const table = ENTITY_TABLE[entity];
     const all = db.prepare(`SELECT * FROM ${table}`).all();
     for (const row of all) {
       if (rows.length >= max) break;
       const data = buildData(entity, row);
-      const s = sig(data);
+      const json = JSON.stringify(data);
+      const s = crypto.createHash('sha256').update(json).digest('hex'); // sig(data)
       if (s === row.synced_rev) continue; // clean
+      if (rows.length && bytes + json.length > maxBytes) { full = true; break; }
+      bytes += json.length;
       // Stamp updated_at only when the content is different from what it was
       // last stamped for (content_rev), keeping timestamps stable across retries.
       let updatedAt = row.updated_at;
@@ -4835,7 +4846,7 @@ function collectSyncRows(max = 400) {
   // new device id and its own deletions went without it.
   const ownStamp = '@' + (getSetting('cloud_device_id') || '0');
   for (const tomb of db.prepare('SELECT * FROM tombstones WHERE synced_rev IS NULL').all()) {
-    if (rows.length >= max) break;
+    if (rows.length >= max || full) break;
     const done = tomb.entity === 'user' && (!!tomb.carried_out
       || (tomb.carried_out == null && String(tomb.updated_at || '').endsWith(ownStamp)));
     rows.push({

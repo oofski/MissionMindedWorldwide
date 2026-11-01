@@ -17,6 +17,9 @@ import {
   SURFACES, LEGACY_SURFACE_COUNTS, surfaceList, toothList, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY,
 } from '../../i18n/dentalLists.js';
 
+// The largest X-ray image kept, as a data URL (see toJpegDataUrl).
+const XRAY_MAX_CHARS = 1400000;
+
 const QUADRANTS = [['UR', 'UR'], ['UL', 'UL'], ['LR', 'LR'], ['LL', 'LL']];
 const fmtWhen = (ts) => { if (!ts) return ''; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
 
@@ -630,19 +633,32 @@ export function renderProvider(ctx, params = {}) {
     // Re-encode any renderable image to a JPEG data URL (canvas). Already-JPEG
     // images pass through untouched; PNG/BMP and images extracted from a .dex are
     // converted so the chart always stores a .jpg, as requested.
+    // v0.0.21: and no bigger than XRAY_MAX_CHARS. The clinic's sync server
+    // (Cloudflare's database) holds a record of up to 2 MB: a larger image —
+    // a panoramic film, a phone photo — never reached the other laptops. Only
+    // an image over the limit is re-encoded: first at lower JPEG quality, then
+    // smaller. A sensor's X-ray, a few hundred KB, is saved as it came.
     function toJpegDataUrl(dataUrl) {
-      if (/^data:image\/jpe?g/i.test(dataUrl || '')) return Promise.resolve(dataUrl);
+      if (/^data:image\/jpe?g/i.test(dataUrl || '') && dataUrl.length <= XRAY_MAX_CHARS) return Promise.resolve(dataUrl);
       return new Promise((resolve) => {
         const img = new Image();
         img.onload = () => {
           try {
-            const c = document.createElement('canvas');
-            c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
-            if (!c.width || !c.height) { resolve(dataUrl); return; }
-            const cx = c.getContext('2d');
-            cx.fillStyle = '#000'; cx.fillRect(0, 0, c.width, c.height);
-            cx.drawImage(img, 0, 0);
-            resolve(c.toDataURL('image/jpeg', 0.92));
+            const w = img.naturalWidth || img.width;
+            const h = img.naturalHeight || img.height;
+            if (!w || !h) { resolve(dataUrl); return; }
+            const encode = (scale, quality) => {
+              const c = document.createElement('canvas');
+              c.width = Math.max(1, Math.round(w * scale)); c.height = Math.max(1, Math.round(h * scale));
+              const cx = c.getContext('2d');
+              cx.fillStyle = '#000'; cx.fillRect(0, 0, c.width, c.height);
+              cx.drawImage(img, 0, 0, c.width, c.height);
+              return c.toDataURL('image/jpeg', quality);
+            };
+            let out = encode(1, 0.92);
+            for (const q of [0.85, 0.75]) { if (out.length <= XRAY_MAX_CHARS) break; out = encode(1, q); }
+            for (let scale = 0.8; out.length > XRAY_MAX_CHARS && scale > 0.1; scale *= 0.8) out = encode(scale, 0.8);
+            resolve(out);
           } catch (_) { resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);

@@ -236,83 +236,40 @@ jobs:
 
             ### New in this build
 
-            The rest of the fixes from the clinic walk-through.
+            Getting the clinic's online sync server (Cloudflare) ready for
+            real clinic days.
 
-            **Check-in kiosk**
-            - Every missing answer on *About You* and on the consent is marked
-              in red at once. Before, Next named one missing answer per tap.
-            - **State** starts on the clinic's own state, taken from the
-              event's location (for example "Sandy, Oregon" or "Sandy, OR
-              97055"), and that state is listed first. The online form does the same.
-            - The last step is **Review & Submit**. It no longer says "then sign
-              below" when there is nothing to sign there.
+            **Update the sync server as well:** in Cloudflare open the
+            Worker, **Edit code**, replace everything with the new
+            `cloud/worker.js`, and **Deploy**. Its `/health` page then says
+            version 1.8.0. Laptops on 0.0.20 keep working with it, but update
+            them all to this version.
 
-            **The same consent in every language and online**
-            - Spanish speakers now read and sign the same consent as English
-              speakers. That covers all seven clauses of MMW's health-care
-              consent (including both HIV / Hepatitis paragraphs) and the full
-              Oral Surgery consent. Before, they signed a shorter document.
-            - The online pre-registration form now uses the clinic's consent
-              too, in English and Spanish, and asks the same HIV / Hepatitis
-              Yes or No.
-            - Each signed consent records which wording was signed (new
-              version names for the Spanish texts).
-            - *Have a fluent Spanish speaker check the new Spanish consent
-              before the next clinic.*
-
-            **Front desk and scanning**
-            - The Arrivals tab is now **Checked in here (kiosk or desk)**.
-            - Typing a name into any scan box looks the patient up by name. At
-              Arrivals it filters the list. At other stations it opens the
-              patient when exactly one full name matches; otherwise it lists
-              the matches to pick from. Before, a name was
-              refused as an unknown wristband.
-
-            **Vitals**
-            - Sign-off sits in a bar that stays at the bottom of the screen.
-            - Sign-off stays greyed out, with the reason beside it, until a
-              blood pressure or pulse is entered.
-            - The health history folds away once it is reviewed.
-
-            **Dental chart**
-            - The station's actions sit in a bar that stays at the bottom of
-              the screen, and the main action follows where the patient is.
-              At Dental Triage it is **Move Patient to Treatment Waiting**; at a
-              treatment chair it is **Mark visit complete**. (Completing the
-              visit at Dental Triage is under *More options*, and so is **Move
-              back to Treatment Waiting** once a patient is in the chair.)
-            - Messages pop up above the bottom bar, so they never cover its
-              buttons.
-            - Completing a visit or cleaning that nobody has signed now asks
-              first: **Go back and sign** or **Complete — sign later**. An
-              unsigned visit is marked **Not signed** at check-out and on the
-              Dashboard until a provider opens it and taps **Sign the visit**
-              (or **Sign the cleaning** at the hygienist). Signing later does not
-              move the patient.
-            - Completing a visit needs each extraction's type (Simple,
-              Surgical…), because the after-care sheet depends on it.
-            - **Add another filling** asks for the empty row's tooth first, and
-              names the filling it just noted.
-            - Tapping a procedure on a tooth tags it in one tap; you no longer
-              have to press Done.
-
-            **Statuses and the Dashboard**
-            - Queues and pills name the station: "Waiting for Dental Triage",
-              "Waiting for the hygienist", "At Dental Triage".
-            - On the Dashboard, a waiting patient sits in their station's
-              column with a **Waiting** tag, and the journey says **Vitals**
-              instead of "Clearance".
-            - Opening a record is **Open** at every station.
-
-            **Check-out**
-            - The internal after-care template note is no longer shown.
-            - A record being corrected says only that the provider is
-              correcting it. The unlock reason stays in the clinic's records.
-            - Empty fields are hidden from the patient's information.
-
-            **Update the sync server** (Edit code → paste the new
-            `cloud/worker.js` → Deploy) for the online form changes. An online
-            form a patient already has open is asked to reload.
+            - **Checking for news is cheap now.** Each laptop asks the server
+              for news every 4 seconds. The server used to read every record
+              it held each time — for a 400-patient clinic, 3,200 rows every 4
+              seconds per laptop — which used up Cloudflare's free daily
+              allowance in under half an hour and stopped sync until
+              midnight UTC. It now reads about 2.
+            - **A laptop with a backlog no longer gets stuck.** Cloudflare
+              allows 50 database queries per request on the free plan, and the
+              server used three for every record it received. A laptop
+              connecting for the first time, or catching up after a day
+              offline, failed every time and stopped syncing both ways. The
+              server now saves a whole batch in a few queries, and finishes
+              a batch that runs over on the next try.
+            - **X-rays fit.** Cloudflare's database holds a record of up to
+              2 MB. An X-ray larger than about 1.4 MB (a panoramic film, a
+              phone photo) is now shrunk to fit when it is added to a chart;
+              a sensor's X-ray is saved as it came. One added earlier that is
+              still too large stays on the laptop it was added on instead of
+              stopping that laptop's sync.
+            - **Big catch-ups go in pieces.** A laptop sends and receives about
+              3 to 4 MB of records at a time, so a day of X-rays never arrives
+              as one request the server has no memory for.
+            - The setup guide (`docs/CLOUD_SETUP.md`) has the current
+              Cloudflare steps and measured costs. For clinic days, use
+              Cloudflare's **Workers Paid** plan ($5 a month).
 
             ### Signing in
             Every install now comes with an administrator already set up:

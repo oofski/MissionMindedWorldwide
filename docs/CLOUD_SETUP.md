@@ -61,8 +61,11 @@ Go to **https://dash.cloudflare.com/sign-up**, create an account and sign in.
 
 ### 3. Create the server (a "Worker")
 1. In the left menu open **Compute (Workers) → Workers & Pages**.
-2. Click **Create**, choose to create a **Worker** (start from "Hello World"),
-   name it **`mmw-sync`**, and click **Deploy**. This makes a placeholder.
+2. Click **Create application** (or **Create**), choose the **Hello World**
+   starter, name it **`mmw-sync`**, and click **Deploy**. This makes a
+   placeholder. On a new account Cloudflare may first ask you to choose a
+   `workers.dev` subdomain — any name will do; it becomes part of the
+   server's address.
 3. Click **Edit code**.
 4. Select **all** of the placeholder code and delete it.
 5. Paste in the **entire** contents of the file **`cloud/worker.js`** from the
@@ -72,11 +75,12 @@ Go to **https://dash.cloudflare.com/sign-up**, create an account and sign in.
 6. Click **Deploy**.
 
 ### 4. Connect the database to the server
-1. On the Worker's page open **Settings → Bindings**.
-2. **Add** a binding of type **D1 database**.
+1. On the Worker's page open the **Bindings** tab (on some versions of the
+   dashboard it is under **Settings → Bindings**).
+2. Click **Add binding** and choose **D1 database**.
 3. **Variable name:** `DB` — exactly that, in capitals.
 4. **D1 database:** choose `mmw`.
-5. Save, and **Deploy** if asked.
+5. Click **Add binding**, and **Deploy** if asked.
 
 ### 5. Set the clinic key
 The clinic key is the one password every laptop uses to talk to this server.
@@ -105,7 +109,7 @@ Open the address with `/health` added to the end, for example
 `https://mmw-sync.<your-subdomain>.workers.dev/health`. You should see:
 
 ```json
-{ "ok": true, "service": "mmw-sync", "version": "1.7.0", "seq": true, "time": "2026-10-19T14:02:11.512Z" }
+{ "ok": true, "service": "mmw-sync", "version": "1.8.0", "seq": true, "time": "2026-10-19T14:02:11.512Z" }
 ```
 
 That only proves the server is up — it does not look at the key or the
@@ -525,39 +529,52 @@ laptop. Keep making backups under **Backup & Export**.
   the change stop working.
 
 ## Cost
-Cloudflare's free plan is enough to **try the cloud out**. For real clinic
-days with several laptops, plan on Cloudflare's paid plan, because of how this
-version of the sync server reads its database.
+Cloudflare's free plan is enough to **try the cloud out** with a few test
+patients. **For real clinic days, use Cloudflare's Workers Paid plan** — at
+the time of writing $5 a month for the account.
 
-At the time of writing (check Cloudflare's current pricing pages), the free
-plan allows each day:
+### What the free plan allows
+At the time of writing (check Cloudflare's current pricing pages), each day:
 
 | Free allowance | What uses it |
 |---|---|
-| **5,000,000 rows read** from the D1 database | Every time a laptop asks the server for news — about every 4 seconds while it is open with sync on, some 900 times an hour — this version of the server reads **every row it holds**, even when nothing is new |
-| **100,000 rows written** | Each record saved on any laptop is about ten rows written on the server (the record, its indexes and the delivery counter) |
-| **100,000 requests** to the Worker | Each of those checks for news, and each send |
+| **5,000,000 rows read** from the D1 database | Each laptop asks the server for news about every 4 seconds while it is open with sync on. With nothing new, that reads about 2 rows (measured on server 1.8.0) — about 1,800 rows an hour a laptop. A laptop joining the clinic reads about 4 rows for each record it downloads |
+| **100,000 rows written** | Each record saved on any laptop is about 7 rows written on the server (the record, its indexes and the delivery counter). One patient's visit — check-in, Vitals, Dental Triage, treatment, check-out — saves about 15 to 25 records, so about 100 to 175 rows written |
+| **100,000 requests** to the Worker | Each check for news is one request — about 900 an hour for each laptop left open — and each save one more |
 
-The server holds roughly five to ten rows for every patient seen, plus one for
-each event and staff account, and they stay there — a deleted or finished
-clinic's records are kept as deletion markers. So **rows read is the limit a
-clinic reaches first**:
+So for a day of 400 patients on five laptops, open ten hours: about 100,000
+rows read, 40,000 to 70,000 rows written, and some 50,000 requests — inside
+the free allowances, though not by much for writes, and **a laptop left open
+overnight uses about 21,600 requests by itself**. Close the app (or press
+**Pause sync (no internet)**) on laptops that are not in use. Press **Resume
+sync** before anyone works on a paused laptop again (see [Then](#then)).
 
-- **Trying it out** — a few test patients, a hundred rows or so: one laptop
-  reads about 90,000 rows an hour, and the free allowance lasts over 50
-  laptop-hours a day.
-- **A real clinic** — say 400 patients, about 3,000 rows: one laptop reads
-  about 2.7 million rows an hour, so the free allowance runs out after about
-  two laptop-hours; with five laptops open, in under half an hour.
+When an allowance is used up, Cloudflare refuses the server until the daily
+reset at **00:00 UTC**. Until then sync stops (each laptop's **Cloud** tab
+shows **Reconnecting…** and the reason), the laptops carry on offline and catch
+up after the reset, and the pre-registration link says it is not valid.
 
-When an allowance is used up, Cloudflare refuses the server's database until
-the daily reset at **00:00 UTC**. Until then sync stops (each laptop's **Cloud**
-tab shows **Reconnecting…** and the reason), the laptops carry on offline and
-catch up after the reset, and the pre-registration link says it is not valid.
+### Why Workers Paid for clinic days
+The free plan also gives each request only **10 milliseconds of computing
+time**. Sending or receiving X-rays and consent signatures — hundreds of
+kilobytes each — can take longer than that, and Cloudflare then refuses the
+request; the laptop retries, and can keep being refused. The paid plan allows
+far more time, and far more of everything above (at the time of writing 25
+billion rows read and 50 million rows written a month). To switch: in
+Cloudflare, open **Workers & Pages**, find **Plans** (or type `Workers Paid`
+in the dashboard's search box) and choose **Workers Paid**. Nothing else
+changes — same server, same address, same key.
 
-**For clinic days, move the Worker to Cloudflare's Workers Paid plan** — at the
-time of writing $5 a month for the account, including 25 billion rows read and
-50 million rows written a month, far more than a clinic uses. Either way, close
-the app (or press **Pause sync (no internet)**) on laptops that are not in use:
-a laptop left open overnight keeps asking for news. Press **Resume sync** before
-anyone works on a paused laptop again (see [Then](#then)).
+### Limits the server works within
+Cloudflare's database also caps what one request may do, on either plan; the
+server (1.8.0 and later) and the app (0.0.21 and later) are built to stay
+inside both caps:
+
+- **A record of at most 2 MB.** The app shrinks an X-ray larger than about
+  1.4 MB when it is added to a chart, so it fits. A record over the cap (an
+  X-ray added on an older version) is refused on its own: it stays on the
+  laptop it was added on, and the rest syncs as normal.
+- **50 database queries a request** on the free plan. A laptop with a backlog —
+  a day's work done offline, or a laptop connected for the first time — is
+  sent and received a batch at a time, and a batch that runs over is finished
+  on the next try a few seconds later.
