@@ -263,10 +263,15 @@ jobs:
               phone photo) is now shrunk to fit when it is added to a chart;
               a sensor's X-ray is saved as it came. One added earlier that is
               still too large stays on the laptop it was added on instead of
-              stopping that laptop's sync.
+              stopping that laptop's sync, and that laptop's **Cloud** tab
+              says so.
             - **Big catch-ups go in pieces.** A laptop sends and receives about
               3 to 4 MB of records at a time, so a day of X-rays never arrives
               as one request the server has no memory for.
+            - **No record is skipped or overwritten when laptops sync at the
+              same moment.** The server numbers and writes each batch in one
+              step, and checks again as it writes that it keeps the newest
+              copy and that a deleted patient stays deleted.
             - The setup guide (`docs/CLOUD_SETUP.md`) has the current
               Cloudflare steps and measured costs. For clinic days, use
               Cloudflare's **Workers Paid** plan ($5 a month).

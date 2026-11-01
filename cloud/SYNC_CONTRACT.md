@@ -70,18 +70,35 @@ works locally and re-syncs when reconnected.
 ## HTTP API (Worker)
 Base URL = the deployed Worker, e.g. `https://mmw-sync.<subdomain>.workers.dev`.
 
-- `GET /health` → `{ ok:true, service:"mmw-sync", version:"1.1.0", time:"<iso>" }`
+- `GET /health` → `{ ok:true, service:"mmw-sync", version:"1.8.0", seq:true, time:"<iso>" }`
   (no auth — used by the app's "Test connection").
 - **Auth (all other routes):** header `Authorization: Bearer <CLINIC_KEY>`. The Worker
   compares against the `CLINIC_KEY` secret (constant-time). Mismatch → `401 {ok:false,error}`.
 - `POST /v1/push` — body `{ device_id, rows: [<envelope>...] }`.
   Upserts each row into D1 with LWW, keeping the stored live row's keys that a live
-  incoming row omits (see above). → `{ ok:true, applied:<n>, skipped:<n>, time:"<iso>" }`.
+  incoming row omits (see above).
+  → `{ ok:true, applied:<n>, skipped:<n>, refused:[{uid, entity, reason:"too large"}], time:"<iso>" }`.
+  - **refused (v1.8.0):** a row whose data is over D1's 2 MB limit cannot be stored. It is
+    refused on its own (counted in `skipped`) and the rest of the push is stored. The app
+    (v0.0.21+) names such rows on its Cloud tab.
+  - **Partial push (v1.8.0):** D1 allows 50 queries a request on the free plan, so a push is
+    read and written a batch at a time, in at most 30 statements. A push needing more saves
+    what fits and answers `503 { ok:false, partial:true, written:<n>, error }`. The app sends
+    the same rows again; those already stored are skipped (LWW), so every try gets further.
+  - Rows are numbered (`seq`) inside the same transaction that writes them, and LWW and the
+    sticky deletion are checked again as each row is written (an upsert with a `WHERE`).
+    So a pull never sees a number before its row exists, and two laptops pushing the same
+    record at once cannot put an older copy, or a live copy over a deletion, on top.
+  - The app (v0.0.21+) sends about 3 MB of row data a push at most (always at least one row).
 - `GET /v1/pull?since=<cursor>&event_uid=<uid>&limit=500` — returns rows with
   `seq > since` (optionally scoped to `event_uid`), ordered by `seq` asc.
   → `{ ok:true, rows:[<envelope>...], cursor:"<seq>", more:false, mode:"seq" }`.
   `cursor` = the last `seq` returned (or `since` when empty); the app stores it and
-  passes it as the next `since`. `more:true` when the limit was hit (app pulls again).
+  passes it as the next `since`. `more:true` when the limit was hit, or (v1.8.0) when the
+  page was cut short at about 4 MB of row data — always at least one row — so a laptop
+  catching up on X-rays is not sent them in one answer (app pulls again).
+  The filter is the bare `seq > ?` (v1.8.0), so it seeks `idx_sync_seq`: a check with
+  nothing new reads about 2 rows instead of every row the server holds.
 
   **Delivery order is the server's counter, never a clock (v1.5.0).** `seq` is assigned
   by the Worker on every write. Ordering by `updated_at` was unsafe: a row can reach the
@@ -117,7 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_sync_updated ON sync_rows(updated_at);
 CREATE INDEX IF NOT EXISTS idx_sync_event   ON sync_rows(event_uid, updated_at);
 CREATE INDEX IF NOT EXISTS idx_sync_entity  ON sync_rows(entity);
 CREATE INDEX IF NOT EXISTS idx_sync_seq     ON sync_rows(seq);
--- The counter itself. Every write takes the next value atomically.
+-- The counter itself. A push moves it on by its n rows and writes them, numbered
+-- counter - n + 1 … counter, in one transaction (D1 batch).
 CREATE TABLE IF NOT EXISTS sync_seq (id INTEGER PRIMARY KEY, v INTEGER NOT NULL);
 ```
 The Worker migrates an existing database on its own (adds `seq`, backfills it from each

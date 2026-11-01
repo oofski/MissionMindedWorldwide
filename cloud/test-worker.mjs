@@ -61,11 +61,6 @@ function makeFakeD1() {
           const row = store.get(uid);
           return row && row.entity === 'event' && !row.deleted ? { data: row.data } : null;
         }
-        // v1.8.0 delivery counter: reserve the next n sequence numbers.
-        if (/^INSERT INTO sync_seq \(id, v\) VALUES \(1, \?\) ON CONFLICT\(id\) DO UPDATE SET v = v \+ excluded\.v RETURNING v$/.test(s)) {
-          seq += Number(this._binds[0]);
-          return { v: seq };
-        }
         throw new Error('fake D1: unsupported first() SQL: ' + s);
       },
       async run() {
@@ -86,28 +81,29 @@ function makeFakeD1() {
         if (/^\s*INSERT INTO sync_seq \(id, v\) SELECT 1/.test(s)) {
           return { success: true, meta: { changes: 0 } };
         }
-        // v1.8.0: a batch of rows in one JSON parameter.
-        if (/^INSERT OR REPLACE INTO sync_rows \(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\) SELECT json_extract\(value, '\$\[0\]'\).* FROM json_each\(\?\)$/.test(s)) {
-          const list = JSON.parse(this._binds[0]);
-          for (const [uid, entity, event_uid, patient_uid, deleted, updated_at, data, rowSeq] of list) {
-            store.set(uid, { uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq: rowSeq != null ? rowSeq : null });
-          }
-          return { success: true, meta: { changes: list.length } };
-        }
-        if (/^INSERT OR REPLACE INTO sync_rows \(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\) VALUES/.test(s)) {
-          const [uid, entity, event_uid, patient_uid, deleted, updated_at, data, rowSeq] =
-            this._binds;
-          store.set(uid, {
-            uid,
-            entity,
-            event_uid,
-            patient_uid,
-            deleted,
-            updated_at,
-            data,
-            seq: rowSeq != null ? rowSeq : null,
-          });
+        // v1.8.0 delivery counter: move it on by the n rows about to be written.
+        if (/^INSERT INTO sync_seq \(id, v\) VALUES \(1, \?\) ON CONFLICT\(id\) DO UPDATE SET v = v \+ excluded\.v$/.test(s)) {
+          seq += Number(this._binds[0]);
           return { success: true, meta: { changes: 1 } };
+        }
+        // v1.8.0: rows written with their delivery number (counter - n + their
+        // place), keeping the newer copy and — unless restored — a deletion.
+        const UPSERT = ' ON CONFLICT\\(uid\\) DO UPDATE SET entity = excluded\\.entity, event_uid = excluded\\.event_uid, patient_uid = excluded\\.patient_uid, deleted = excluded\\.deleted, updated_at = excluded\\.updated_at, data = excluded\\.data, seq = excluded\\.seq WHERE excluded\\.updated_at > sync_rows\\.updated_at( AND \\(sync_rows\\.deleted = 0 OR excluded\\.deleted = 1\\))?$';
+        const many = new RegExp("^INSERT INTO sync_rows \\(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\\) SELECT json_extract\\(value, '\\$\\[0\\]'\\).*, \\(SELECT v FROM sync_seq WHERE id = 1\\) - \\? \\+ json_extract\\(value, '\\$\\[7\\]'\\) FROM json_each\\(\\?\\) WHERE true" + UPSERT).exec(s);
+        const one = new RegExp('^INSERT INTO sync_rows \\(uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq\\) VALUES \\(\\?, \\?, \\?, \\?, \\?, \\?, \\?, \\(SELECT v FROM sync_seq WHERE id = 1\\) - \\? \\+ \\?\\)' + UPSERT).exec(s);
+        if (many || one) {
+          const sticky = !!(many || one)[1];
+          const list = many ? JSON.parse(this._binds[1]) : [[...this._binds.slice(0, 7), this._binds[8]]];
+          const n = Number(many ? this._binds[0] : this._binds[7]);
+          let changes = 0;
+          for (const [uid, entity, event_uid, patient_uid, deleted, updated_at, data, place] of list) {
+            const ex = store.get(uid);
+            if (ex && !(String(updated_at) > String(ex.updated_at))) continue;
+            if (ex && sticky && ex.deleted && !deleted) continue;
+            store.set(uid, { uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq: seq - n + Number(place) });
+            changes++;
+          }
+          return { success: true, meta: { changes } };
         }
         throw new Error('fake D1: unsupported run() SQL: ' + s);
       },
@@ -129,7 +125,7 @@ function makeFakeD1() {
           return { results };
         }
         // Pull, v1.8.0: the next rows' sizes, then the rows up to a seq.
-        const sized = /^SELECT seq, length\(data\) AS n FROM sync_rows WHERE seq > \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
+        const sized = /^SELECT seq, (?:octet_)?length\(data\) AS n FROM sync_rows WHERE seq > \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
         const ranged = /^SELECT uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq FROM sync_rows WHERE seq > \? AND seq <= \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
         if (sized || ranged) {
           const b = [...this._binds];
@@ -167,7 +163,14 @@ function makeFakeD1() {
     };
   }
 
-  return { prepare, _store: store, _log: log };
+  // D1 runs a batch as one transaction; here, one statement after another.
+  async function batch(statements) {
+    const out = [];
+    for (const st of statements) out.push(await st.run());
+    return out;
+  }
+
+  return { prepare, batch, _store: store, _log: log };
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +190,7 @@ async function makeSqliteD1() {
   const log = [];
   const DB = {
     prepare(sql) { log.push(sql); return d.prepare(sql); },
+    batch: (statements) => d.batch(statements),
     get _store() { return new Map(sqlite.prepare('SELECT * FROM sync_rows').all().map((r) => [r.uid, r])); },
     _log: log,
   };
@@ -1310,6 +1314,87 @@ async function main() {
       seqs.every((n) => Number.isFinite(n) && n > 0) && new Set(seqs).size === seqs.length);
   }
 
+  // --- v1.8.0: a push being written while others push and pull ---
+  // The first write (the batch) of one push is held back while another laptop
+  // pushes and a third pulls. Numbered before it was written, the held push's
+  // rows got numbers below the other laptop's, the third laptop's cursor went
+  // past them, and it never received them.
+  {
+    const base = await makeD1();
+    const DBg = Object.create(base);
+    // armed: the next batch waits until release() is called.
+    let armed = false;
+    let release = null;
+    DBg.batch = async (statements) => {
+      if (armed) { armed = false; await new Promise((r) => { release = r; }); }
+      return base.batch(statements);
+    };
+    const envG = { CLINIC_KEY, DB: DBg };
+    const push = (rows) => call(envG, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { device_id: 'g', rows } });
+    const pullFrom = (c) => call(envG, 'GET', `/v1/pull?since=${c}&limit=400`, { auth: CLINIC_KEY });
+    const live = (uid, stamp, extra = {}) => ({ entity: 'patient', uid, event_uid: 'ev-g', updated_at: stamp, data: { first_name: uid }, ...extra });
+    await push([live('g-seed', '2026-10-02T00:00:00.000Z@g')]);
+    const start = (await pullFrom('0')).data.cursor;
+    // While a's batch waits, the server must not look half-written to anyone.
+    const aRows = [];
+    for (let i = 0; i < 50; i++) aRows.push(live(`g-a-${i}`, `2026-10-02T01:00:00.${String(i).padStart(3, '0')}Z@a`));
+    armed = true; release = null;
+    const aDone = push(aRows);
+    while (release === null) await new Promise((r) => setTimeout(r, 1));
+    await push([live('g-b', '2026-10-02T02:00:00.000Z@b')]);
+    const c1 = (await pullFrom(start)).data;
+    release();
+    await aDone;
+    const c2 = (await pullFrom(c1.cursor)).data;
+    const gotA = c1.rows.concat(c2.rows).filter((r) => r.uid.startsWith('g-a-')).length;
+    check('v1.8.0: rows are numbered as they are written — a laptop pulling while another\'s push is being written still receives every row of it',
+      c1.rows.some((r) => r.uid === 'g-b') && gotA === 50);
+
+    // Keep-newest and sticky deletion hold at the moment of writing: a live
+    // copy read before a deletion arrived does not bring the patient back.
+    await push([live('g-del', '2026-10-02T09:00:00.000Z@a')]);
+    armed = true; release = null;
+    const stale = push([live('g-del', '2026-10-02T09:30:00.000Z@a')]);
+    while (release === null) await new Promise((r) => setTimeout(r, 1));
+    await push([live('g-del', '2026-10-02T10:00:00.000Z@b', { deleted: 1, data: {} })]);
+    release();
+    await stale;
+    const gDel = base._store.get('g-del');
+    check('v1.8.0: a live copy decided before a deletion reached the server is not written over it — the patient stays deleted',
+      gDel.deleted === 1 && String(gDel.updated_at) === '2026-10-02T10:00:00.000Z@b');
+  }
+
+  // --- v1.8.0: the start-up check finds the counter's row too ---
+  if (D1_MODE.kind === 'sqlite') {
+    const DBs = await makeD1();
+    const envS = { CLINIC_KEY, DB: DBs };
+    const w1 = await hubMod.loadWorker();
+    await w1.fetch(new Request('https://sync.example.com/v1/push', { method: 'POST', headers: { Authorization: 'Bearer ' + CLINIC_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ rows: [{ entity: 'patient', uid: 's-1', event_uid: 'e', updated_at: '2026-10-03T00:00:00.000Z@s', data: {} }] }) }), envS, {});
+    const before = Math.max(...[...DBs._store.values()].map((r) => Number(r.seq)));
+    await DBs.prepare('DELETE FROM sync_seq').run();
+    const w2 = await hubMod.loadWorker();
+    await w2.fetch(new Request('https://sync.example.com/v1/push', { method: 'POST', headers: { Authorization: 'Bearer ' + CLINIC_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ rows: [{ entity: 'patient', uid: 's-2', event_uid: 'e', updated_at: '2026-10-03T00:00:01.000Z@s', data: {} }] }) }), envS, {});
+    check('v1.8.0: a server whose counter row is missing seeds it again at start-up, so new rows are numbered after every row it holds',
+      Number(DBs._store.get('s-2').seq) > before);
+  }
+
+  // --- v1.8.0: a database without octet_length still pages pulls by size ---
+  {
+    const base = await makeD1();
+    const DBo = Object.create(base);
+    DBo.prepare = (sql) => {
+      if (/octet_length/.test(sql)) return { bind() { return this; }, async all() { throw new Error('no such function: octet_length'); } };
+      return base.prepare(sql);
+    };
+    const envO = { CLINIC_KEY, DB: DBo };
+    await call(envO, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [{ entity: 'patient', uid: 'o-1', event_uid: 'e', updated_at: '2026-10-04T00:00:00.000Z@o', data: { a: 1 } }] } });
+    const r = await call(envO, 'GET', '/v1/pull?since=0&limit=10', { auth: CLINIC_KEY });
+    check('v1.8.0: on a database without octet_length, a pull falls back to length() and still delivers',
+      r.status === 200 && r.data.rows.some((x) => x.uid === 'o-1'));
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,6 +1464,7 @@ async function run() {
     await hubChecks();
   }
   // --- summary ---
+  summarised = true;
   console.log('');
   if (failures) {
     console.log(failures + ' check(s) FAILED');
@@ -1388,6 +1474,16 @@ async function run() {
     process.exit(0);
   }
 }
+
+// A check left waiting on something that never comes empties Node's event
+// loop, and Node then exits — with code 0, as if every check had passed.
+process.on('exit', (code) => {
+  if (code === 0 && !summarised) {
+    console.log('FAIL: the checks stopped before the end (a check was left waiting)');
+    process.exitCode = 1;
+  }
+});
+let summarised = false;
 
 run().catch((e) => {
   console.error('Test harness crashed:', e);

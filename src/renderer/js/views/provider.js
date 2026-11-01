@@ -658,7 +658,9 @@ export function renderProvider(ctx, params = {}) {
             let out = encode(1, 0.92);
             for (const q of [0.85, 0.75]) { if (out.length <= XRAY_MAX_CHARS) break; out = encode(1, q); }
             for (let scale = 0.8; out.length > XRAY_MAX_CHARS && scale > 0.1; scale *= 0.8) out = encode(scale, 0.8);
-            resolve(out);
+            // A canvas too large for the browser draws nothing and encodes to
+            // "data:,"; the image as it came is better than none.
+            resolve(/^data:image\/jpeg;base64,./.test(out) ? out : dataUrl);
           } catch (_) { resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);

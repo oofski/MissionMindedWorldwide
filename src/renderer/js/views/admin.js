@@ -839,6 +839,23 @@ export function renderAdmin(ctx, params = {}) {
     }
 
     /* ---------- The Connection card: the same in both ways ---------- */
+    // Records the server refused as too large (over 2 MB — in practice an
+    // X-ray added before v0.0.21): they stay on this laptop only.
+    function refusedNote(list) {
+      if (!Array.isArray(list) || !list.length) return null;
+      const NAMES = { xray: ['X-ray', 'X-rays'], consent: ['consent', 'consents'] };
+      const counts = {};
+      list.forEach((x) => { counts[x.entity] = (counts[x.entity] || 0) + 1; });
+      const what = Object.entries(counts).map(([e, n]) => `${n} ${(NAMES[e] || [e + ' record', e + ' records'])[n === 1 ? 0 : 1]}`).join(', ');
+      return el('div', { class: 'banner banner--warn cloud-refused', style: 'margin:0 0 var(--space-3);' }, [
+        icon('alert', { size: 14 }),
+        el('span', {}, [
+          el('strong', {}, [`Not on the other laptops: ${what}.`]),
+          ` ${list.length === 1 ? 'It is' : 'They are'} too large for the sync server (2 MB at most), so ${list.length === 1 ? 'it stays' : 'they stay'} on this laptop only. To share one, add the image to the chart again — it is made smaller to fit.`,
+        ]),
+      ]);
+    }
+
     function connectionCard() {
       const host = hostOf(st.url);
       const pill = !st.online
@@ -893,6 +910,7 @@ export function renderAdmin(ctx, params = {}) {
           st.lastOk ? ` Last synced ${new Date(st.lastOk).toLocaleTimeString()}.` : '',
         ]),
         st.lastError ? el('p', { class: 'muted small cloud-last-error', style: 'margin:0 0 var(--space-3);' }, [st.lastError]) : null,
+        refusedNote(st.refused),
         // A paused laptop collects nothing, so its changes are dated when it
         // is resumed and beat what other laptops changed meanwhile, later
         // changes included. Said here, where the pause is undone.

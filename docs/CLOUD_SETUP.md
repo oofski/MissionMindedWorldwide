@@ -573,7 +573,8 @@ inside both caps:
 - **A record of at most 2 MB.** The app shrinks an X-ray larger than about
   1.4 MB when it is added to a chart, so it fits. A record over the cap (an
   X-ray added on an older version) is refused on its own: it stays on the
-  laptop it was added on, and the rest syncs as normal.
+  laptop it was added on, that laptop's **Cloud** tab says so ("Not on the
+  other laptops: 1 X-ray"), and the rest syncs as normal.
 - **50 database queries a request** on the free plan. A laptop with a backlog —
   a day's work done offline, or a laptop connected for the first time — is
   sent and received a batch at a time, and a batch that runs over is finished

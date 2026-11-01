@@ -325,7 +325,23 @@ async function pushOnce(conn, deviceId) {
   const { rows, mark } = db.collectSyncRows(PULL_LIMIT);
   if (!rows.length) return 0;
   const r = await httpJson('POST', conn.base + '/v1/push', conn.key, { device_id: deviceId, rows }, conn.pin);
-  if (r && r.ok && stillOn(conn)) { db.markSynced(mark); db.setSyncMeta({ lastPush: new Date().toISOString() }); }
+  if (r && r.ok && stillOn(conn)) {
+    db.markSynced(mark);
+    db.setSyncMeta({ lastPush: new Date().toISOString() });
+    // A record too large for the server (2 MB) is refused on its own and
+    // stays on this laptop. Kept, and said on the Cloud tab, so nobody takes
+    // it for being on the other laptops — until a later version of it (or its
+    // deletion) gets through.
+    const refusedNow = (Array.isArray(r.refused) ? r.refused : []).filter((x) => x && x.uid)
+      .map((x) => ({ entity: String(x.entity || ''), uid: String(x.uid) }));
+    const known = db.getSyncMeta().refused;
+    if (refusedNow.length || known.length) {
+      const sent = new Set(rows.map((x) => x.uid));
+      const still = known.filter((k) => !sent.has(k.uid));
+      const next = still.concat(refusedNow.filter((x) => !still.some((k) => k.uid === x.uid))).slice(-200);
+      if (JSON.stringify(next) !== JSON.stringify(known)) db.setSyncMeta({ refused: next });
+    }
+  }
   return rows.length;
 }
 
@@ -538,7 +554,7 @@ function status() {
     url: m.url, hasKey: !!m.key, configured: m.configured,
     kind, lanPin: m.lanPin, lanPinShown: lan.showPin(m.lanPin, 4), lanHost: m.lanHost, lanName: m.lanName, isHost,
     deviceId: m.deviceId, cursor: m.cursor,
-    lastOk: m.lastOk, lastPush: m.lastPush, lastError: m.lastError,
+    lastOk: m.lastOk, lastPush: m.lastPush, lastError: m.lastError, refused: m.refused,
     running, ...lastResult,
   };
 }

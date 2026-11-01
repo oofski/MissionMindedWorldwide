@@ -78,11 +78,16 @@ const state = {
 /* ---------------- D1, over better-sqlite3 ---------------- */
 
 // The calls worker.js makes, with D1's answers: first() is a row or null,
-// all() is { results }, run() is { success, meta }. Statements are prepared
-// when first run, as D1 does, so a statement the database refuses fails where
-// worker.js expects it to (its migrations rely on that, inside try/catch).
+// all() is { results }, run() is { success, meta }, and batch() runs its
+// statements in one transaction, all or none, as D1 does. Statements are
+// prepared when first run, as D1 does, so a statement the database refuses
+// fails where worker.js expects it to (its migrations rely on that, inside
+// try/catch).
 function d1(sqlite) {
   return {
+    async batch(statements) {
+      return sqlite.transaction(() => statements.map((st) => st._exec()))();
+    },
     prepare(sql) {
       let binds = [];
       let stmt = null;
@@ -107,6 +112,10 @@ function d1(sqlite) {
           return { results: [], success: true, meta: { changes: info.changes } };
         },
         async run() {
+          return api._exec();
+        },
+        // Synchronous, for batch().
+        _exec() {
           const st = s();
           if (st.reader) return { results: st.all(...binds), success: true, meta: {} };
           const info = st.run(...binds);

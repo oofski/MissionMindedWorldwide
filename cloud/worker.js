@@ -61,12 +61,15 @@ async function ensureSchema(env) {
   // v1.8.0: one read when everything is already in place — every server after
   // its first request. The ten statements below each count against the
   // request's query allowance (see PUSH_QUERY_BUDGET), on every new Worker
-  // instance Cloudflare starts.
+  // instance Cloudflare starts. The counter's row is looked for too: the
+  // migrations seed it, inside try/catch, and if that ever failed they run
+  // again rather than numbering new rows from 1, below every laptop's cursor.
   try {
     const have = await env.DB
-      .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('sync_rows', 'sync_seq', 'idx_sync_seq')")
+      .prepare("SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name IN ('sync_rows', 'sync_seq', 'idx_sync_seq')) AS n, " +
+        '(SELECT COUNT(*) FROM sync_seq WHERE id = 1) AS s')
       .first();
-    if (have && Number(have.n) === 3) { schemaReady = true; return; }
+    if (have && Number(have.n) === 3 && Number(have.s) === 1) { schemaReady = true; return; }
   } catch (_e) { /* create them below */ }
   for (const sql of SCHEMA_STATEMENTS) {
     await env.DB.prepare(sql).run();
@@ -77,48 +80,56 @@ async function ensureSchema(env) {
   schemaReady = true;
 }
 
-// Reserve the next n delivery numbers: they are top - n + 1 … top, for the
-// returned top. A single atomic upsert, so two laptops pushing at the same
-// moment can never be handed the same value.
-async function reserveSeq(env, n) {
-  const row = await env.DB
-    .prepare('INSERT INTO sync_seq (id, v) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET v = v + excluded.v RETURNING v')
-    .bind(n)
-    .first();
-  if (!row || row.v == null) throw new Error('The server could not number the changes it received.');
-  return Number(row.v);
-}
-
 // What Cloudflare's D1 allows, which a push has to fit whatever a laptop sends.
 //  - Queries per request: 50 on the free plan (1,000 paid). Read, numbered and
 //    written one row at a time, a push was three queries a row: 400 rows (one
 //    push from a laptop with a backlog) was 1,200. It failed part way, and the
 //    laptop sent the same rows again every few seconds — on the free plan
 //    never getting past the first forty or so, so it stopped syncing both
-//    ways. Rows are now read, numbered and written a batch at a time (one
-//    JSON parameter, opened with json_each), and a push stops at
-//    PUSH_QUERY_BUDGET and asks for the rest again; what it wrote is skipped
-//    then, so every try gets further.
+//    ways. Rows are now read and written a batch at a time (one JSON
+//    parameter, opened with json_each), and a push stops at PUSH_QUERY_BUDGET
+//    statements and asks for the rest again; what it wrote is skipped then,
+//    so every try gets further.
 //  - A row, and a bound value, of at most 2,000,000 bytes. A row bigger than
 //    that (a large X-ray) can never be stored; it is refused on its own, named
 //    in the answer's `refused`, instead of failing every push it is in.
 const PUSH_QUERY_BUDGET = 30;
 const ROW_DATA_MAX = 1950000;
 const PARAM_MAX = 1900000;
+// A row whose data is bigger than this is written by a statement of its own,
+// its data bound as it is. In a batch it is escaped into JSON a second time,
+// which costs Worker CPU time (10 ms a request on the free plan).
+const BIG_ROW = 256000;
 // A pull page holds about this much row data at most (and always one row), so
 // a laptop catching up on a day of X-rays is not sent them in one answer the
 // Worker has no memory for.
 const PULL_PAGE_BYTES = 4000000;
 
 const SYNC_COLS_SQL = 'uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq';
-const INSERT_ONE_SQL = 'INSERT OR REPLACE INTO sync_rows (' + SYNC_COLS_SQL + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
-const INSERT_MANY_SQL = 'INSERT OR REPLACE INTO sync_rows (' + SYNC_COLS_SQL + ') SELECT ' +
-  [0, 1, 2, 3, 4, 5, 6, 7].map((i) => "json_extract(value, '$[" + i + "]')").join(', ') +
-  ' FROM json_each(?)';
+// Delivery numbers are taken as the rows are written, in one transaction with
+// moving the counter on (see writeRows): row k of n takes counter - n + k.
+// Numbered first and written afterwards, a laptop pulling in between was
+// handed the rows numbered after them, stepped its cursor past their numbers,
+// and never received them.
+const SEQ_SQL = '(SELECT v FROM sync_seq WHERE id = 1) - ? + ';
+// Keep-newest and sticky deletion (see handlePush) are decided on what the
+// server held when the push was read, and checked again as each row is
+// written, so a laptop pushing the same record a moment earlier is not
+// overwritten by an older copy, nor a deletion by a live one.
+const UPSERT_SQL = ' ON CONFLICT(uid) DO UPDATE SET entity = excluded.entity, event_uid = excluded.event_uid, ' +
+  'patient_uid = excluded.patient_uid, deleted = excluded.deleted, updated_at = excluded.updated_at, ' +
+  'data = excluded.data, seq = excluded.seq WHERE excluded.updated_at > sync_rows.updated_at';
+const STICKY_SQL = ' AND (sync_rows.deleted = 0 OR excluded.deleted = 1)';
+// restore: a record deliberately brought back, which a deletion does not stop.
+const insertOneSql = (restore) => 'INSERT INTO sync_rows (' + SYNC_COLS_SQL + ') VALUES (?, ?, ?, ?, ?, ?, ?, ' +
+  SEQ_SQL + '?)' + UPSERT_SQL + (restore ? '' : STICKY_SQL);
+const insertManySql = (restore) => 'INSERT INTO sync_rows (' + SYNC_COLS_SQL + ') SELECT ' +
+  [0, 1, 2, 3, 4, 5, 6].map((i) => "json_extract(value, '$[" + i + "]')").join(', ') + ', ' +
+  SEQ_SQL + "json_extract(value, '$[7]') FROM json_each(?) WHERE true" + UPSERT_SQL + (restore ? '' : STICKY_SQL);
 
 const UTF8 = new TextEncoder();
 function byteLength(str) {
-  return UTF8.encode(str).length;
+  return /[^\x00-\x7f]/.test(str) ? UTF8.encode(str).length : str.length;
 }
 
 // Splits encoded items into runs whose JSON array fits one bound parameter.
@@ -136,25 +147,54 @@ function runsByBytes(sizes, max) {
   return runs;
 }
 
-// Writes rows — each [uid, entity, event_uid, patient_uid, deleted,
-// updated_at, data, seq] — as few statements as their size allows, no more
-// than maxQueries of them. Returns how many rows were written.
-async function writeRows(env, entries, maxQueries) {
-  const encoded = entries.map((e) => JSON.stringify(e));
-  const sizes = encoded.map(byteLength);
-  let written = 0;
-  let used = 0;
-  for (const [start, end] of runsByBytes(sizes, PARAM_MAX)) {
-    if (used >= maxQueries) break;
-    if (end - start === 1 && sizes[start] + 2 > PARAM_MAX) {
-      await env.DB.prepare(INSERT_ONE_SQL).bind(...entries[start]).run();
-    } else {
-      await env.DB.prepare(INSERT_MANY_SQL).bind('[' + encoded.slice(start, end).join(',') + ']').run();
+// D1 runs a batch as one transaction. The fakes some tests use have no batch,
+// and run one statement after another.
+async function runAll(env, statements) {
+  if (typeof env.DB.batch === 'function') return env.DB.batch(statements);
+  const out = [];
+  for (const st of statements) out.push(await st.run());
+  return out;
+}
+
+// Writes rows — each { row: [uid, entity, event_uid, patient_uid, deleted,
+// updated_at, data], restore } — numbering them as they go, in one
+// transaction of at most maxStatements statements. Returns how many rows it
+// took; the rest are for the next try.
+async function writeRows(env, entries, maxStatements) {
+  const plan = [];
+  const encoded = [];
+  const open = new Map(); // restore -> the batch statement being filled
+  entries.forEach((e, i) => {
+    if (e.row[6].length > BIG_ROW) { plan.push({ one: true, restore: !!e.restore, idx: [i] }); return; }
+    encoded[i] = JSON.stringify(e.row);
+    const size = byteLength(encoded[i]) + 12; // and its place in the batch
+    let cur = open.get(!!e.restore);
+    if (!cur || cur.size + 1 + size > PARAM_MAX) {
+      cur = { one: false, restore: !!e.restore, idx: [], size: 2 };
+      open.set(!!e.restore, cur);
+      plan.push(cur);
     }
-    used++;
-    written += end - start;
+    cur.idx.push(i);
+    cur.size += 1 + size;
+  });
+  const taken = plan.slice(0, Math.max(1, maxStatements - 1)); // one for the counter
+  const order = taken.flatMap((p) => p.idx).sort((a, b) => a - b);
+  const place = new Map(order.map((i, k) => [i, k + 1]));
+  const n = order.length;
+  const statements = [
+    env.DB.prepare('INSERT INTO sync_seq (id, v) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET v = v + excluded.v').bind(n),
+  ];
+  for (const p of taken) {
+    if (p.one) {
+      const i = p.idx[0];
+      statements.push(env.DB.prepare(insertOneSql(p.restore)).bind(...entries[i].row, n, place.get(i)));
+    } else {
+      const items = p.idx.map((i) => encoded[i].slice(0, -1) + ',' + place.get(i) + ']');
+      statements.push(env.DB.prepare(insertManySql(p.restore)).bind(n, '[' + items.join(',') + ']'));
+    }
   }
-  return written;
+  await runAll(env, statements);
+  return n;
 }
 
 export default {
@@ -326,29 +366,28 @@ async function handlePush(request, env) {
     }
 
     writes.delete(row.uid);
-    writes.set(row.uid, [
-      row.uid,
-      row.entity,
-      row.event_uid != null ? row.event_uid : null,
-      row.patient_uid != null ? row.patient_uid : null,
-      row.deleted ? 1 : 0,
-      row.updated_at,
-      dataStr,
-    ]);
+    writes.set(row.uid, {
+      row: [
+        row.uid,
+        row.entity,
+        row.event_uid != null ? row.event_uid : null,
+        row.patient_uid != null ? row.patient_uid : null,
+        row.deleted ? 1 : 0,
+        row.updated_at,
+        dataStr,
+      ],
+      restore: isUndelete(row),
+    });
     stored.set(row.uid, { updated_at: row.updated_at, deleted: row.deleted ? 1 : 0, entity: row.entity, data: dataStr });
     applied++;
   }
 
   if (writes.size) {
-    // Delivery numbers, in the order the rows were decided. A row that is
+    // Delivery numbers go in the order the rows were decided. A row that is
     // written LATE (a laptop that was offline, or one whose clock is behind)
     // still lands at the END of the delivery order, so every device that
     // hasn't reached it yet still gets it.
     const entries = [...writes.values()];
-    const top = await reserveSeq(env, entries.length);
-    queries++;
-    entries.forEach((e, i) => e.push(top - entries.length + 1 + i));
-
     const written = await writeRows(env, entries, PUSH_QUERY_BUDGET - queries);
     if (written < entries.length) {
       // Not an error the laptop has to act on: it sends the same rows again,
@@ -390,6 +429,7 @@ function keepOmittedKeys(stored, entity, incoming) {
   return merged;
 }
 
+let sizeFn = 'octet_length';
 async function handlePull(url, env) {
   const since = url.searchParams.get('since') || '';
   const eventUid = url.searchParams.get('event_uid');
@@ -410,15 +450,25 @@ async function handlePull(url, env) {
     // v1.8.0: the bare column, so the filter seeks idx_sync_seq. Wrapped in
     // IFNULL it could not, and every check for news read every row the server
     // holds (D1 bills rows read). The rows returned are the same: every write
-    // takes a delivery number (reserveSeq), the backfill gives one to any row
+    // takes a delivery number (writeRows), the backfill gives one to any row
     // from before the column existed, and a NULL never passed
     // IFNULL(seq, 0) > a cursor of 0 or more anyway.
     // First how big the next rows are — nothing more when there is no news —
     // then as many of them as fit PULL_PAGE_BYTES, and always one.
-    const sized = await env.DB
-      .prepare('SELECT seq, length(data) AS n FROM sync_rows WHERE seq > ?' + eventSql + ' ORDER BY seq ASC, uid ASC LIMIT ?')
+    const sizesOf = (fn) => env.DB
+      .prepare('SELECT seq, ' + fn + '(data) AS n FROM sync_rows WHERE seq > ?' + eventSql + ' ORDER BY seq ASC, uid ASC LIMIT ?')
       .bind(sinceVal, ...eventBind, limit)
       .all();
+    let sized;
+    try {
+      sized = await sizesOf(sizeFn);
+    } catch (err) {
+      // octet_length reads a row's size without reading the row (length()
+      // reads all of it). An SQLite older than 3.43 has no octet_length.
+      if (sizeFn !== 'octet_length' || !/octet_length/.test(errMessage(err))) throw err;
+      sizeFn = 'length';
+      sized = await sizesOf(sizeFn);
+    }
     const sizes = sized && Array.isArray(sized.results) ? sized.results : [];
     if (!sizes.length) {
       return json({ ok: true, rows: [], cursor: String(sinceVal), more: false, mode: 'seq' });
@@ -667,8 +717,7 @@ async function handleCheckinPost(eventUid, request, env) {
 
   // Same delivery-number rule as a push: a pre-registration is queued at the
   // end of the order, so every laptop picks it up regardless of its clock.
-  const top = await reserveSeq(env, rows.length);
-  const entries = rows.map((r, i) => [r.uid, r.entity, eventUid, r.patient_uid, 0, r.stamp, JSON.stringify(r.data), top - rows.length + 1 + i]);
+  const entries = rows.map((r) => ({ row: [r.uid, r.entity, eventUid, r.patient_uid, 0, r.stamp, JSON.stringify(r.data)], restore: false }));
   if (await writeRows(env, entries, PUSH_QUERY_BUDGET) < entries.length) throw new Error('The sign-up could not be saved. Please try again.');
 
   return json({ ok: true });

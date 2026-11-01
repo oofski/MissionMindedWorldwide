@@ -4772,7 +4772,9 @@ function ensureUids() {
 // row). Counted only in rows, a laptop with a day of X-rays behind it sent
 // hundreds of megabytes in one request — more than a Cloudflare Worker may
 // receive, or has memory for — and sent it again every few seconds. What is
-// left goes with the next push.
+// left goes with the next push. Every changed row is still stamped now, sent
+// or not: a row's stamp is what keeps a change made here from losing to an
+// older copy pulled in from another laptop in the meantime.
 const PUSH_BYTES = 3000000;
 function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
   ensureUids();
@@ -4781,17 +4783,13 @@ function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
   let bytes = 0;
   let full = false;
   for (const entity of APPLY_ORDER) {
-    if (rows.length >= max || full) break;
     const table = ENTITY_TABLE[entity];
     const all = db.prepare(`SELECT * FROM ${table}`).all();
     for (const row of all) {
-      if (rows.length >= max) break;
       const data = buildData(entity, row);
       const json = JSON.stringify(data);
       const s = crypto.createHash('sha256').update(json).digest('hex'); // sig(data)
       if (s === row.synced_rev) continue; // clean
-      if (rows.length && bytes + json.length > maxBytes) { full = true; break; }
-      bytes += json.length;
       // Stamp updated_at only when the content is different from what it was
       // last stamped for (content_rev), keeping timestamps stable across retries.
       let updatedAt = row.updated_at;
@@ -4807,6 +4805,8 @@ function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
           db.prepare(`UPDATE ${table} SET updated_at = ?, content_rev = ? WHERE id = ?`).run(updatedAt, s, row.id);
         }
       }
+      if (full || rows.length >= max || (rows.length && bytes + json.length > maxBytes)) { full = true; continue; }
+      bytes += json.length;
       const reviving = !!db.prepare('SELECT 1 FROM undeletes WHERE uid = ?').get(row.uid);
       rows.push({
         entity, uid: row.uid,
@@ -5231,16 +5231,18 @@ function getSyncMeta() {
     lanPin: (getSetting('cloud_lan_pin') || '').trim(),
     lanHost: (getSetting('cloud_lan_host') || '').trim(),
     lanName: getSetting('cloud_lan_name') || '',
+    // v0.0.21: records the server refused as too large ([{ entity, uid }]).
+    refused: (() => { try { const r = JSON.parse(getSetting('cloud_refused') || '[]'); return Array.isArray(r) ? r : []; } catch { return []; } })(),
   };
 }
 function setSyncMeta(patch) {
   const map = { url: 'cloud_url', key: 'cloud_key', mode: 'cloud_mode', deviceId: 'cloud_device_id', cursor: 'cloud_cursor', lastPush: 'cloud_last_push', lastOk: 'cloud_last_ok', lastError: 'cloud_last_error',
-    lanPin: 'cloud_lan_pin', lanHost: 'cloud_lan_host', lanName: 'cloud_lan_name' };
+    lanPin: 'cloud_lan_pin', lanHost: 'cloud_lan_host', lanName: 'cloud_lan_name', refused: 'cloud_refused' };
   for (const [k, v] of Object.entries(patch || {})) {
     // Back-compat: an `enabled` boolean maps onto the online/offline mode.
     if (k === 'enabled') { setSetting('cloud_mode', v ? 'online' : 'offline'); continue; }
     if (!map[k]) continue;
-    setSetting(map[k], v == null ? '' : String(v));
+    setSetting(map[k], v == null ? '' : (k === 'refused' ? JSON.stringify(v) : String(v)));
   }
   return getSyncMeta();
 }
@@ -5264,7 +5266,7 @@ function disconnectCloud() {
   // with it, which clinic network host that address was.
   for (const k of ['cloud_url', 'cloud_key', 'cloud_cursor', 'cloud_pending',
                    'cloud_device_id', 'cloud_last_push', 'cloud_last_ok', 'cloud_last_error',
-                   'cloud_lan_pin', 'cloud_lan_host', 'cloud_lan_name']) {
+                   'cloud_lan_pin', 'cloud_lan_host', 'cloud_lan_name', 'cloud_refused']) {
     db.prepare('DELETE FROM settings WHERE key = ?').run(k);
   }
   // Written, not deleted: an absent cloud_mode is not treated as offline.
