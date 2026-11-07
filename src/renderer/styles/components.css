@@ -966,6 +966,15 @@ body.survey-open{ overflow:hidden; }
 .inv-move-delta.is-out{ color:var(--danger); }
 .inv-move > span:last-child{ grid-column:2 / -1; }
 .banner--warn{ background:var(--warning-soft); color:var(--warning); border:1px solid var(--warning-border); }
+/* v0.0.22: setting up the sync server on Cloudflare — each step as it runs. */
+.cloud-setup-steps{ list-style:none; margin:var(--space-3) 0 0; padding:0; display:grid; gap:6px; }
+.cloud-setup-steps li{ display:flex; align-items:center; gap:8px; color:var(--text-subtle); padding-left:21px; }
+.cloud-setup-steps li .icon{ margin-left:-21px; flex:none; }
+.cloud-setup-steps li.is-done{ color:var(--success); }
+.cloud-setup-steps li.is-now{ color:var(--text); font-weight:var(--fw-semibold); }
+.cloud-setup-steps li.is-now::before{ content:''; width:9px; height:9px; margin-left:-19px; margin-right:1px; border-radius:50%; border:2px solid var(--info); border-right-color:transparent; animation:spin 0.8s linear infinite; flex:none; }
+.cloud-setup-steps li.is-failed{ color:var(--danger); font-weight:var(--fw-semibold); }
+.cloud-setup-error{ margin:var(--space-3) 0 0; padding:10px 12px; border-radius:var(--radius-sm); background:var(--danger-soft, #fdecec); color:var(--danger); border:1px solid var(--danger-border, rgba(200,40,40,.25)); }
 .banner--warn .btn, .banner--alert .btn{ flex:none; margin-left:auto; }
 /* Keep the status pill and the row actions on one line — at six columns they
    wrap into two rows and the table doubles in height. */

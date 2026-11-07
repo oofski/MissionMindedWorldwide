@@ -236,45 +236,30 @@ jobs:
 
             ### New in this build
 
-            Getting the clinic's online sync server (Cloudflare) ready for
-            real clinic days.
+            **Set up the online sync server with one button.**
 
-            **Update the sync server as well:** in Cloudflare open the
-            Worker, **Edit code**, replace everything with the new
-            `cloud/worker.js`, and **Deploy**. Its `/health` page then says
-            version 1.8.0. Laptops on 0.0.20 keep working with it, but update
-            them all to this version.
-
-            - **Checking for news is cheap now.** Each laptop asks the server
-              for news every 4 seconds. The server used to read every record
-              it held each time — for a 400-patient clinic, 3,200 rows every 4
-              seconds per laptop — which used up Cloudflare's free daily
-              allowance in under half an hour and stopped sync until
-              midnight UTC. It now reads about 2.
-            - **A laptop with a backlog no longer gets stuck.** Cloudflare
-              allows 50 database queries per request on the free plan, and the
-              server used three for every record it received. A laptop
-              connecting for the first time, or catching up after a day
-              offline, failed every time and stopped syncing both ways. The
-              server now saves a whole batch in a few queries, and finishes
-              a batch that runs over on the next try.
-            - **X-rays fit.** Cloudflare's database holds a record of up to
-              2 MB. An X-ray larger than about 1.4 MB (a panoramic film, a
-              phone photo) is now shrunk to fit when it is added to a chart;
-              a sensor's X-ray is saved as it came. One added earlier that is
-              still too large stays on the laptop it was added on instead of
-              stopping that laptop's sync, and that laptop's **Cloud** tab
-              says so.
-            - **Big catch-ups go in pieces.** A laptop sends and receives about
-              3 to 4 MB of records at a time, so a day of X-rays never arrives
-              as one request the server has no memory for.
-            - **No record is skipped or overwritten when laptops sync at the
-              same moment.** The server numbers and writes each batch in one
-              step, and checks again as it writes that it keeps the newest
-              copy and that a deleted patient stays deleted.
-            - The setup guide (`docs/CLOUD_SETUP.md`) has the current
-              Cloudflare steps and measured costs. For clinic days, use
-              Cloudflare's **Workers Paid** plan ($5 a month).
+            - **Admin → Cloud → Set up the clinic's sync server.** Press
+              **Open Cloudflare**, make a free account (or sign in), and copy
+              the token Cloudflare offers: its permissions are already chosen.
+              Paste it and press **Set up the sync server**. The app makes the
+              database, installs the server, makes the clinic key, turns on the
+              address and connects this laptop, ticking off each step. There is
+              no code to paste, nothing to name and no key to make up.
+            - The clinic key is made for you and travels inside the
+              **connection code**, so nobody types it. The other laptops paste
+              the code, as before. The token is used once and not kept on the
+              laptop.
+            - If the Cloudflare account has the sync server already, the app
+              says so instead of replacing it. If no laptop has the old key any
+              more, it can give the server a new clinic key, keeping its
+              records.
+            - **Updating the server is one button too.** When a new version of
+              the app brings a newer sync server, the Cloud tab offers **Update
+              the sync server**: paste a token and it is installed, keeping the
+              database and the clinic key.
+            - Setting the server up by hand still works (setup guide, Part A).
+            - For clinic days, switch Cloudflare to **Workers Paid** ($5 a
+              month); the app cannot choose a paid plan for you.
 
             ### Signing in
             Every install now comes with an administrator already set up:

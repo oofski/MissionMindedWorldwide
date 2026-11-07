@@ -27,6 +27,8 @@ const CHANNELS = [
   'app:openExternal',
   'cloud:config', 'cloud:test', 'cloud:status', 'cloud:syncNow', 'cloud:resync', 'cloud:disconnect',
   'cloud:connectionCode', 'cloud:join',
+  // v0.0.22: the sync server set up on Cloudflare by the app.
+  'cloud:setupServer', 'cloud:updateServer', 'cloud:serverVersion', 'cloud:tokenLink',
   // v0.0.17: the clinic network (no internet).
   'hub:status', 'hub:start', 'hub:stop', 'hub:firewall', 'lan:scan',
   'data:reset',
@@ -44,6 +46,12 @@ const api = {
     const listener = (_e, data) => cb(data);
     ipcRenderer.on('update:event', listener);
     return () => ipcRenderer.removeListener('update:event', listener);
+  },
+  // Each step of setting up the sync server on Cloudflare, as it starts.
+  onCloudSetupProgress(cb) {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('cloud:setupProgress', listener);
+    return () => ipcRenderer.removeListener('cloud:setupProgress', listener);
   },
   // Subscribe to cloud-sync change events (remote data pulled) so open views can refresh.
   onCloudChanged(cb) {

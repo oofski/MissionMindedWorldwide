@@ -981,6 +981,207 @@ export function renderAdmin(ctx, params = {}) {
 
     if (choice === 'lan') { await clinicNetworkPanel(); return; }
 
+    /* ---------- v0.0.22: the sync server, set up by the app ---------- */
+    // On the clinic's own Cloudflare account: the administrator copies one
+    // token from Cloudflare — the link opens its page with the permissions
+    // already chosen — and the app makes the database, installs the server,
+    // makes the clinic key, turns on the address and connects this laptop.
+    const SETUP_STEPS = [
+      ['token', 'Checking the token'],
+      ['database', 'Making the clinic\'s database'],
+      ['server', 'Installing the sync server'],
+      ['address', 'Turning on its address'],
+      ['answer', 'Waiting for it to answer (the first time can take a few minutes)'],
+      ['connect', 'Connecting this laptop'],
+    ];
+    // The step list, painted as the main process reports each step.
+    function setupProgress(steps) {
+      const list = el('ol', { class: 'cloud-setup-steps small', style: 'display:none' });
+      const paintAt = (current, failed) => {
+        list.style.display = '';
+        const at = current === 'done' ? steps.length : steps.findIndex(([k]) => k === current);
+        clear(list);
+        steps.forEach(([, label], i) => {
+          const state = i < at ? 'is-done' : i === at ? (failed ? 'is-failed' : 'is-now') : '';
+          list.append(el('li', { class: state }, [
+            i < at ? icon('check', { size: 13 }) : i === at && failed ? icon('alert', { size: 13 }) : null,
+            label,
+          ]));
+        });
+      };
+      return { list, paintAt };
+    }
+    const openTokenPage = async () => {
+      try { api.openExternal(await api.cloudTokenLink()); } catch (e) { toast(e.message, 'error'); }
+    };
+
+    function setupCard() {
+      const tokenIn = el('input', { class: 'input', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Paste the token from Cloudflare' });
+      const prog = setupProgress(SETUP_STEPS);
+      const failNote = el('p', { class: 'cloud-setup-error small', style: 'display:none' });
+      const goBtn = el('button', { class: 'btn btn--primary', onClick: () => run() }, [icon('database', { size: 16 }), 'Set up the sync server']);
+      tokenIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+
+      async function chooseAccount(accounts) {
+        const sel = el('select', { class: 'input' }, accounts.map((a) => el('option', { value: a.id }, [a.name])));
+        const ok = await modal({
+          title: 'Which Cloudflare account?',
+          body: el('div', {}, [el('p', { style: 'margin:0 0 var(--space-3);' }, ['This token can use more than one Cloudflare account. Set the sync server up on:']), sel]),
+          confirmText: 'Use this account', cancelText: 'Cancel',
+        });
+        return ok ? sel.value : null;
+      }
+      const askNewKey = (account) => modal({
+        title: 'This Cloudflare account already has a sync server',
+        body: el('div', {}, [
+          el('p', { style: 'margin:0 0 var(--space-3);' }, [`“${account}” has the clinic's sync server already, so other laptops may be using it. To connect this laptop to it, paste the connection code from a laptop that is connected (Admin → Cloud → Show connection code) under Connect a sync server, below.`]),
+          el('p', { style: 'margin:0;' }, ['If no laptop is connected to it any more, give it a new clinic key: this laptop connects with it, its records are kept, and every other laptop connects again with the new connection code.']),
+        ]),
+        confirmText: 'Give it a new clinic key', cancelText: 'Cancel', danger: true,
+      });
+      const ready = (r) => modal({
+        title: 'The sync server is ready',
+        body: el('ol', { style: 'margin:0; padding-left:1.3em; line-height:1.55;' }, [
+          el('li', { style: 'margin:0 0 var(--space-2);' }, [r.answered
+            ? 'This laptop is connected.'
+            : 'This laptop is connected, and starts syncing as soon as the new address answers — the first time, that can take a few minutes.']),
+          el('li', { style: 'margin:0 0 var(--space-2);' }, ['For each other laptop: press Show connection code here, and paste the code on that laptop. The clinic key the app made is inside the code — nobody has to type it.']),
+          el('li', { style: 'margin:0 0 var(--space-2);' }, ['Before a real clinic day, switch Cloudflare to the Workers Paid plan ($5 a month): Workers & Pages → Plans.']),
+          el('li', {}, ['The token is not kept on this laptop. Delete it in Cloudflare (My Profile → API Tokens), or keep it somewhere safe to update the server later.']),
+        ]),
+        confirmText: 'Done',
+      });
+
+      async function run() {
+        const token = tokenIn.value.trim();
+        if (!token) { toast('Paste the token Cloudflare showed after Create Token.', 'error'); tokenIn.focus(); return; }
+        // A laptop on the clinic network moves to the new server, asked first.
+        if (st.configured && !(await askMove('a new sync server on Cloudflare', 'Setting up'))) return;
+        let opts = {};
+        let current = 'token';
+        failNote.style.display = 'none';
+        goBtn.disabled = true; tokenIn.disabled = true;
+        prog.paintAt(current);
+        const unsub = api.onCloudSetupProgress(({ step } = {}) => { if (step) { current = step; prog.paintAt(current); } });
+        try {
+          for (;;) {
+            const r = await api.cloudSetupServer(token, opts);
+            if (r && r.chooseAccount) {
+              const id = await chooseAccount(r.chooseAccount);
+              if (!id) { prog.list.style.display = 'none'; return; }
+              opts = { ...opts, accountId: id };
+              continue;
+            }
+            if (r && r.exists) {
+              if (!(await askNewKey(r.account))) { prog.list.style.display = 'none'; return; }
+              opts = { ...opts, replaceKey: true };
+              continue;
+            }
+            tokenIn.value = '';
+            prog.paintAt('done');
+            await ready(r || {});
+            cloudChoice = 'internet';
+            paint();
+            return;
+          }
+        } catch (e) {
+          prog.paintAt(current, true);
+          failNote.textContent = e.message;
+          failNote.style.display = '';
+        } finally {
+          unsub();
+          goBtn.disabled = false; tokenIn.disabled = false;
+        }
+      }
+
+      const step = (lead, rest) => el('li', { style: 'margin:0 0 var(--space-2);' }, [el('strong', {}, [lead]), ' ', rest]);
+      return el('div', { class: 'card cloud-setup' }, [
+        el('div', { class: 'card-head-row' }, [
+          el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'Set up the clinic\'s sync server']),
+          el('span', { class: 'pill pill--success' }, ['Recommended']),
+        ]),
+        el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+          'The app sets the server up on the clinic\'s own free Cloudflare account, makes the clinic key, and connects this laptop. You copy one thing from Cloudflare.',
+        ]),
+        el('ol', { class: 'cloud-steps small', style: 'margin:0 0 var(--space-3); padding-left:1.4em; line-height:1.55;' }, [
+          step('Press Open Cloudflare,', 'and make a free account or sign in. It opens a new token with its permissions already chosen: Workers Scripts, D1 and Account Settings — nothing else.'),
+          step('On that page press Continue to summary, then Create Token, then Copy.', 'If the page shows no permissions, press Edit token, then come back to the summary.'),
+          step('Paste the token here and press Set up the sync server.', 'It takes a minute or two.'),
+        ]),
+        el('div', { class: 'action-row', style: 'margin:0 0 var(--space-3);' }, [
+          el('button', { class: 'btn btn--ghost', onClick: openTokenPage }, [icon('globe', { size: 16 }), 'Open Cloudflare']),
+        ]),
+        el('div', { class: 'form-grid' }, [
+          el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Token from Cloudflare']), tokenIn,
+            el('span', { class: 'field-hint' }, ['Used once to set the server up, and not kept on this laptop.'])]),
+        ]),
+        el('div', { class: 'action-row' }, [goBtn]),
+        prog.list,
+        failNote,
+        el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0 0;' }, ['New to Cloudflare? After signing up it may show its home page instead of the token — press Open Cloudflare again.']),
+      ]);
+    }
+
+    // A connected laptop whose app brings a newer sync server than the one
+    // running: one token, and the app installs it, keeping the database and
+    // the clinic key. Shown only then.
+    function serverUpdateCard() {
+      const card = el('div', { class: 'card cloud-server-update', style: 'display:none' });
+      api.cloudServerVersion().then((v) => {
+        if (!v || !v.server || !v.behind) return;
+        card.style.display = '';
+        const head = el('div', { class: 'card-title' }, [icon('refresh', { size: 15 }), `Update the sync server to ${v.bundled}`]);
+        if (!v.updatable) {
+          card.append(head, el('p', { class: 'muted small', style: 'margin:0;' }, [
+            `The sync server runs ${v.server}; this version of the app brings ${v.bundled}. Its address is not a Cloudflare workers.dev one, so update it by hand: in Cloudflare, Edit code, paste the new worker.js, Deploy.`,
+          ]));
+          return;
+        }
+        const tokenIn = el('input', { class: 'input', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Paste the token from Cloudflare' });
+        const prog = setupProgress([['token', 'Checking the token'], ['server', 'Installing the new version'], ['answer', 'Waiting for it to answer']]);
+        const failNote = el('p', { class: 'cloud-setup-error small', style: 'display:none' });
+        const goBtn = el('button', { class: 'btn btn--primary', onClick: () => run() }, [icon('refresh', { size: 16 }), 'Update the sync server']);
+        async function run() {
+          const token = tokenIn.value.trim();
+          if (!token) { toast('Paste the token Cloudflare showed after Create Token.', 'error'); tokenIn.focus(); return; }
+          let current = 'token';
+          failNote.style.display = 'none';
+          goBtn.disabled = true; tokenIn.disabled = true;
+          prog.paintAt(current);
+          const unsub = api.onCloudSetupProgress(({ step } = {}) => { if (step) { current = step; prog.paintAt(current); } });
+          try {
+            const r = await api.cloudUpdateServer(token);
+            tokenIn.value = '';
+            toast(`The sync server runs ${r.version} now.`, 'success');
+            paint();
+          } catch (e) {
+            prog.paintAt(current, true);
+            failNote.textContent = e.message;
+            failNote.style.display = '';
+          } finally {
+            unsub();
+            goBtn.disabled = false; tokenIn.disabled = false;
+          }
+        }
+        card.append(
+          head,
+          el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
+            `The sync server runs ${v.server}; this version of the app brings ${v.bundled}. Updating keeps its database and the clinic key, so the other laptops carry on as they are. It needs a token from the Cloudflare account the server is on, made as at setup.`,
+          ]),
+          el('div', { class: 'action-row', style: 'margin:0 0 var(--space-3);' }, [
+            el('button', { class: 'btn btn--ghost', onClick: openTokenPage }, [icon('globe', { size: 16 }), 'Open Cloudflare']),
+          ]),
+          el('div', { class: 'form-grid' }, [
+            el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Token from Cloudflare']), tokenIn]),
+          ]),
+          el('div', { class: 'action-row' }, [goBtn]),
+          prog.list,
+          failNote,
+        );
+      }).catch(() => { /* no answer: nothing to offer */ });
+      return card;
+    }
+
     /* ---------- Internet server: not connected (the default state) ---------- */
     if (!st.configured) {
       const step = (lead, rest) => el('li', { style: 'margin:0 0 var(--space-2);' }, [el('strong', {}, [lead]), ' ', rest]);
@@ -988,6 +1189,7 @@ export function renderAdmin(ctx, params = {}) {
         el('p', { class: 'view-sub', style: 'margin:0 0 var(--space-4);' }, [
           'This clinic is not connected to a sync server. Every record stays on this computer.',
         ]),
+        setupCard(),
         el('div', { class: 'card' }, [
           el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'Local only']),
           el('p', { class: 'muted small', style: 'margin:0 0 var(--space-3);' }, [
@@ -995,7 +1197,7 @@ export function renderAdmin(ctx, params = {}) {
           ]),
           el('ol', { class: 'cloud-steps small', style: 'margin:0 0 var(--space-3); padding-left:1.4em; line-height:1.55;' }, [
             step('Someone sets up the clinic\'s sync server, once.',
-              'About 10 minutes in a web browser, on a free Cloudflare account. Mission Minded does not run a shared server — each clinic has its own.'),
+              'With "Set up the sync server" above, on a free Cloudflare account: a few minutes, and the app does the work. (By hand, with the setup guide, it is about 10 minutes.) Mission Minded does not run a shared server — each clinic has its own.'),
             step('They give you its address and the clinic key',
               '— or a single connection code, copied from a laptop that is already connected.'),
             step('Enter them below, on every laptop the clinic uses.',
@@ -1009,6 +1211,9 @@ export function renderAdmin(ctx, params = {}) {
           ]),
         ]),
       );
+    } else if (kind !== 'internet') {
+      // A laptop on the clinic network can set up the internet server too.
+      body.append(setupCard());
     }
 
     /* ---------- Connect / change the server ---------- */
@@ -1093,7 +1298,7 @@ export function renderAdmin(ctx, params = {}) {
     ]));
 
     /* ---------- Connected: status and controls ---------- */
-    if (onInternet) body.append(connectionCard(), anotherLaptopCard());
+    if (onInternet) body.append(connectionCard(), serverUpdateCard(), anotherLaptopCard());
 
     /* ================= The clinic network (no internet) ================= */
     async function clinicNetworkPanel() {

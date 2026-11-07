@@ -18,6 +18,7 @@ const updater = require('./updater');
 const autoupdate = require('./autoupdate');
 const cloud = require('./cloud');
 const hub = require('./hub');
+const cfsetup = require('./cfsetup');
 const lan = require('./lan');
 const usb = require('./usb');
 const xrayFolder = require('./xrayFolder');
@@ -156,6 +157,12 @@ const PERMS = {
   // sign-in screen's, used before anyone has signed in, and checks for itself
   // whether this computer may join without one (see its handler).
   'cloud:connectionCode': ['admin'],
+  // v0.0.22: setting up (and updating) the sync server on the clinic's own
+  // Cloudflare account, with a token the administrator pastes.
+  'cloud:setupServer': ['admin'],
+  'cloud:updateServer': ['admin'],
+  'cloud:serverVersion': ['admin'],
+  'cloud:tokenLink': ['admin'],
   // v0.0.17, the clinic network: hosting it on this laptop — starting,
   // stopping, erasing, the firewall helper, and its status (its addresses,
   // the laptops connected) — is the administrator's, like connecting a
@@ -309,6 +316,52 @@ function register(getMainWindow) {
     const r = cloud.connectionCode();
     db.audit(currentUser, 'cloud.code', 'settings', null, 'Connection code shown');
     return r;
+  });
+
+  // v0.0.22: the sync server, set up on the clinic's Cloudflare account by
+  // the app (cfsetup.js), then this laptop connected to it — as Connect does,
+  // with the key the setup made. The key never comes back to the screen:
+  // the other laptops get it inside the connection code.
+  function setupProgress(step) {
+    try {
+      const w = getMainWindow && getMainWindow();
+      if (w && w.webContents) w.webContents.send('cloud:setupProgress', { step });
+    } catch (_) { /* the screen is gone */ }
+  }
+  handle('cloud:tokenLink', () => cfsetup.tokenUrl());
+  handle('cloud:setupServer', async ({ token, accountId, replaceKey } = {}) => {
+    const before = db.getSyncMeta();
+    if (before.configured && !before.lanPin) throw new Error('This laptop is connected to a sync server already. Disconnect it first to set up another.');
+    const r = await cfsetup.setupServer({ token, accountId, replaceKey: !!replaceKey, onStep: setupProgress });
+    if (r.chooseAccount) return { chooseAccount: r.chooseAccount };
+    if (r.exists) return { exists: true, account: r.account.name };
+    setupProgress('connect');
+    // Answering already: the address and the key are tested as Connect tests
+    // them. Not yet: saved all the same, and the laptop connects by itself as
+    // soon as the new address answers.
+    if (r.answered) await cloud.testConnection(r.url, r.key);
+    cloud.applyConfig({ url: r.url, key: r.key, online: true });
+    await leaveOwnHub(before);
+    db.audit(currentUser, 'cloud.setup', 'settings', null,
+      `Sync server set up on Cloudflare (${r.account.name}): ${new URL(r.url).host}${replaceKey ? ', with a new clinic key' : ''}`);
+    return { url: r.url, answered: r.answered, version: r.version };
+  });
+  handle('cloud:updateServer', async ({ token, accountId } = {}) => {
+    const m = db.getSyncMeta();
+    if (!m.configured || m.lanPin) throw new Error('This laptop is not connected to an internet sync server.');
+    const r = await cfsetup.updateServer({ token, url: m.url, accountId, onStep: setupProgress });
+    if (r.chooseAccount) return r;
+    db.audit(currentUser, 'cloud.update', 'settings', null, `Sync server updated to ${r.version}`);
+    return r;
+  });
+  // The version this app carries, the one the connected server runs, and
+  // whether the app can update it (a workers.dev address).
+  handle('cloud:serverVersion', async () => {
+    const m = db.getSyncMeta();
+    const bundled = cfsetup.bundledVersion();
+    if (!m.configured || m.lanPin) return { bundled, server: null, updatable: false };
+    const h = await cfsetup.health(m.url);
+    return { bundled, server: h ? h.version : null, updatable: !!cfsetup.parseServerUrl(m.url), behind: !!h && cfsetup.newer(bundled, h.version) };
   });
 
   // "Join a clinic already set up", from the sign-in screen. It runs before

@@ -17,8 +17,9 @@ administrator connects a laptop to it, nothing leaves that laptop.
 
 It happens in three steps:
 
-1. **Someone sets up the clinic's sync server, once** — about 10 minutes in a
-   web browser ([Part A](#part-a--set-up-the-clinics-sync-server-once)).
+1. **Someone sets up the clinic's sync server, once** — a few minutes, with
+   **Set up the sync server** in the app (or about 10 minutes by hand in a
+   web browser) ([Part A](#part-a--set-up-the-clinics-sync-server-once)).
 2. **They give you its address and the clinic key** — or a single
    **connection code** copied from a laptop that is already connected.
 3. **You enter them on every laptop** — in **Admin → Cloud**, or with **Join a
@@ -46,6 +47,44 @@ It happens in three steps:
 
 ## Part A — Set up the clinic's sync server (once)
 
+### The quick way: let the app do it (0.0.22 and later)
+On the laptop that will be connected first, signed in as an administrator:
+
+1. Open **Admin → Cloud**. Under **Set up the clinic's sync server**, press
+   **Open Cloudflare**. Make a free Cloudflare account, or sign in. Cloudflare
+   opens the page for a new API token with its permissions already chosen:
+   **Workers Scripts · Edit**, **D1 · Edit** and **Account Settings · Read** —
+   nothing else. (New to Cloudflare? After signing up it may show its home page
+   instead: press **Open Cloudflare** again. If the token page shows no
+   permissions, press **Edit token**, then come back to the summary.)
+2. Press **Continue to summary**, then **Create Token**, then **Copy**.
+3. Back in the app, paste the token and press **Set up the sync server**.
+
+The app then, step by step on screen: checks the token, makes the clinic's
+database (`mmw`), installs the sync server (`mmw-sync`, this app's own
+`cloud/worker.js`), makes the clinic key, turns on the server's
+`workers.dev` address (choosing the account's `workers.dev` name if it has
+none yet) and connects this laptop. The first time, the new address can take
+a few minutes to start answering; the laptop connects by itself as soon as it
+does.
+
+You never see or type the clinic key: it is inside the **connection code**
+(**Show connection code**), which is how every other laptop connects
+([Part B](#part-b--connect-each-laptop)). The token is used for the setup and
+**not kept** on the laptop — delete it in Cloudflare afterwards (**My Profile →
+API Tokens**), or keep it somewhere safe for updating the server later.
+
+- **Already set up?** If the Cloudflare account has the sync server already,
+  the app says so instead of replacing it: connect with the connection code
+  from a laptop that is already connected. If no laptop is connected to it any
+  more, the app can give it a **new clinic key** — its database and records
+  are kept, and every laptop connects again with the new code.
+- **"This token is not allowed to …"** — the token is missing a permission.
+  Make a new one with **Open Cloudflare**, which asks for all three.
+- **For clinic days**, switch the account to **Workers Paid** (see
+  [Cost](#cost)).
+
+### By hand
 You need a web browser and an email address. Nothing is installed. Cloudflare
 moves its menus around from time to time; if a menu named below is not where
 this says, use the dashboard's search box (type `D1` or `Workers`).
@@ -119,9 +158,15 @@ something else, see [Troubleshooting](#troubleshooting).
 Give the **address** and the **clinic key** to whoever connects the laptops.
 
 ### Keeping the server up to date
-When a new release of the app says the sync server changed, open the Worker's
-**Edit code** again, replace everything with the new `cloud/worker.js`, and
-**Deploy**. The database, the binding and the clinic key stay as they are.
+When a laptop's app brings a newer sync server than the one running, its
+**Admin → Cloud** shows **Update the sync server to …**: make a token with
+**Open Cloudflare** (in the Cloudflare account the server is on), paste it, and
+press **Update the sync server**. The database and the clinic key stay as they
+are, so every laptop carries on.
+
+By hand: open the Worker's **Edit code** again, replace everything with the new
+`cloud/worker.js`, and **Deploy**. The database, the binding and the clinic key
+stay as they are.
 
 ### The same thing from the command line (optional)
 For someone comfortable with a terminal and Node.js, the project's `cloud/`

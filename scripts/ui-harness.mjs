@@ -94,6 +94,7 @@ const PERMS = {
   'exportZip': ['admin'], 'exportClinic': ['admin'], 'importClinic': ['admin'], 'eventFinish': ['admin'], 'eventPurge': ['admin'], 'reportsRebuild': ['admin'],
   'cloudConfig': ['admin'], 'cloudTest': ['admin'], 'cloudResync': ['admin'], 'cloudDisconnect': ['admin'], 'dataReset': ['admin'],
   'cloudConnectionCode': ['admin'],
+  'cloudSetupServer': ['admin'], 'cloudUpdateServer': ['admin'], 'cloudServerVersion': ['admin'], 'cloudTokenLink': ['admin'],
   // v0.0.17: hosting the clinic network is the administrator's.
   'hubStatus': ['admin'], 'hubStart': ['admin'], 'hubStop': ['admin'], 'hubFirewall': ['admin'],
   'cloudStatus': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], 'cloudSyncNow': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -12172,6 +12173,329 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
     } finally {
       globalThis.fetch = fetch21;
       db.disconnectCloud();
+    }
+  }
+
+  /* ================= v0.0.22: the sync server, set up by the app ================= */
+  // On the clinic's own Cloudflare account, from one pasted token. The real
+  // handlers run in a child process against a stand-in for Cloudflare's API
+  // that runs the Worker it is given — over a real SQLite database, at its
+  // workers.dev address — so the laptop really syncs with what was uploaded.
+  {
+    const { execFileSync: exec22 } = await import('node:child_process');
+    const probe22 = String.raw`// v0.0.22 probe: the real IPC handlers set up and update the sync server on a
+// stand-in for Cloudflare's API, which runs the Worker it is given over a real
+// SQLite database, at its workers.dev address.
+const os = require('os'), fs = require('fs'), path = require('path');
+const [root] = process.argv.slice(2);
+const handlers = {}; const sent = [];
+const ep = require.resolve('electron', { paths: [root] });
+require.cache[ep] = { id: ep, filename: ep, loaded: true, exports: { ipcMain: { handle: (c, f) => { handlers[c] = f; } }, dialog: {}, shell: { openExternal() {} },
+  app: { getPath: () => os.tmpdir(), getVersion: () => '0.0.22', isPackaged: false, on() {} }, BrowserWindow: class {} } };
+const req = (m) => require(path.join(root, m));
+const B = require(require.resolve('better-sqlite3', { paths: [root] }));
+const out = {};
+(async () => { try {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mmwcf-'));
+  const db = req('src/main/db.js'), cloud = req('src/main/cloud.js'), hub = req('src/main/hub.js'), cfsetup = req('src/main/cfsetup.js'), ipc = req('src/main/ipc.js');
+  db.init(dir); db.ensureDeviceId();
+  ipc.register(() => ({ webContents: { send: (ch, d) => sent.push([ch, d && d.step]) } }));
+  const call = (ch, p) => handlers[ch]({}, p);
+  const GOOD = 'good_token-1234567890abcdefXYZ';
+  const cf = { accounts: [{ id: 'acc1', name: 'Sandy Clinic' }], dbs: [], scripts: {}, subdomain: '', taken: 1, deny: new Set(), dnsDown: 0, uploads: 0 };
+  const sqlite = new B(':memory:'); const D1 = hub.d1(sqlite);
+  const workerSrc = fs.readFileSync(path.join(root, 'cloud/worker.js'), 'utf8');
+  const loaded = new Map();
+  const loadWorker = async (src) => { if (!loaded.has(src)) loaded.set(src, (await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'))).default); return loaded.get(src); };
+  const json = (status, o) => new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } });
+  const ok = (result) => json(200, { success: true, errors: [], messages: [], result });
+  const bad = (status, code, message) => json(status, { success: false, errors: [{ code, message }], messages: [], result: null });
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url); const method = (init.method || 'GET').toUpperCase();
+    if (u.host.endsWith('.workers.dev')) {
+      const [name, sub] = u.host.split('.');
+      const s = cf.scripts[name];
+      if (cf.dnsDown > 0) { cf.dnsDown--; throw new TypeError('fetch failed'); }
+      if (!s || !s.enabled || sub !== cf.subdomain) throw new TypeError('fetch failed');
+      const w = await loadWorker(s.source);
+      return w.fetch(new Request(url, init), { CLINIC_KEY: s.key, DB: D1 }, {});
+    }
+    if (u.host !== 'api.cloudflare.com' || !u.pathname.startsWith('/client/v4/')) throw new TypeError('fetch failed');
+    const h = init.headers || {};
+    const p = u.pathname.slice('/client/v4'.length);
+    if (h.authorization !== 'Bearer ' + GOOD) return bad(401, 1000, 'Invalid API Token');
+    if (p === '/user/tokens/verify') return ok({ id: 't1', status: 'active' });
+    if (p === '/accounts') return ok(cf.accounts);
+    let m;
+    if ((m = /^\/accounts\/([^/]+)\/d1\/database$/.exec(p))) {
+      if (cf.deny.has('d1')) return bad(403, 10000, 'Authentication error');
+      if (method === 'GET') return ok(cf.dbs.filter((d) => !u.searchParams.get('name') || d.name === u.searchParams.get('name')));
+      const body = JSON.parse(init.body); const d = { uuid: 'db-uuid-' + (cf.dbs.length + 1), name: body.name }; cf.dbs.push(d); return ok(d);
+    }
+    if (/^\/accounts\/[^/]+\/workers\/scripts$/.test(p)) return ok(Object.keys(cf.scripts).map((id) => ({ id })));
+    if ((m = /^\/accounts\/[^/]+\/workers\/scripts\/([^/]+)$/.exec(p)) && method === 'PUT') {
+      const form = init.body; const meta = JSON.parse(form.get('metadata')); const file = form.get('worker.js');
+      const prev = cf.scripts[m[1]] || {};
+      const keep = new Set(meta.keep_bindings || []);
+      const d1 = (meta.bindings || []).find((b) => b.type === 'd1') || (keep.has('d1') ? prev.d1 : null);
+      const sec = (meta.bindings || []).find((b) => b.type === 'secret_text' && b.name === 'CLINIC_KEY');
+      cf.scripts[m[1]] = { ...prev, source: await file.text(), d1, key: sec ? sec.text : (keep.has('secret_text') ? prev.key : undefined),
+        meta, fileType: file.type, fileName: file.name, query: u.search };
+      cf.uploads++;
+      return ok({ id: m[1] });
+    }
+    if (/^\/accounts\/[^/]+\/workers\/subdomain$/.test(p)) {
+      if (method === 'GET') return cf.subdomain ? ok({ subdomain: cf.subdomain }) : bad(404, 10007, 'This account does not have a workers.dev subdomain.');
+      const body = JSON.parse(init.body);
+      if (cf.taken > 0) { cf.taken--; return bad(409, 10031, 'Subdomain unavailable'); }
+      cf.subdomain = body.subdomain; return ok({ subdomain: body.subdomain });
+    }
+    if ((m = /^\/accounts\/[^/]+\/workers\/scripts\/([^/]+)\/subdomain$/.exec(p)) && method === 'POST') {
+      const s = cf.scripts[m[1]]; const body = JSON.parse(init.body);
+      s.enabled = !!body.enabled; s.previews = body.previews_enabled; s.apiDate = h['Cloudflare-Workers-Script-Api-Date'];
+      return ok({ enabled: s.enabled });
+    }
+    return bad(404, 7003, 'Could not route to ' + p);
+  };
+  const auditOf = () => { const r = new B(path.join(dir, fs.readdirSync(dir).find((f) => f.endsWith('.db'))), { readonly: true });
+    try { return r.prepare("SELECT action, detail FROM audit_log WHERE action LIKE 'cloud.%' ORDER BY id").all(); } finally { r.close(); } };
+
+  await call('auth:login', { username: 'admin', password: 'admin' });
+  const link = (await call('cloud:tokenLink')).data;
+  const lu = new URL(link);
+  out.link = { origin: lu.origin, path: lu.pathname, keys: JSON.parse(lu.searchParams.get('permissionGroupKeys')), accountId: lu.searchParams.get('accountId'), zoneId: lu.searchParams.get('zoneId'), name: lu.searchParams.get('name'), raw: link };
+  out.badToken = (await call('cloud:setupServer', { token: 'wrong_token-1234567890abcdefXYZ' })).error;
+  out.junkToken = (await call('cloud:setupServer', { token: 'not a token at all' })).error;
+  out.noToken = (await call('cloud:setupServer', { token: '' })).error;
+
+  // A first setup: no workers.dev subdomain yet (the first name tried is
+  // taken), and the new address answers only after two tries.
+  cf.dnsDown = 2; sent.length = 0;
+  const r1 = await call('cloud:setupServer', { token: ' ' + GOOD + '\n' });
+  out.r1 = r1;
+  out.steps = sent.filter((x) => x[0] === 'cloud:setupProgress').map((x) => x[1]);
+  const s1 = cf.scripts['mmw-sync'];
+  const m1 = db.getSyncMeta();
+  out.after = { url: m1.url, mode: m1.mode, keyMatches: m1.key === s1.key, keyShape: /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(s1.key || ''), keyInAnswer: JSON.stringify(r1).includes(s1.key) };
+  out.upload = { main: s1.meta.main_module, date: s1.meta.compatibility_date, bindings: s1.meta.bindings.map((b) => b.type + ':' + b.name), d1: s1.d1, dbs: cf.dbs, sameSource: s1.source === workerSrc,
+    fileType: s1.fileType, fileName: s1.fileName, query: s1.query, enabled: s1.enabled, previews: s1.previews, apiDate: s1.apiDate, subdomain: cf.subdomain, keep: s1.meta.keep_bindings || null };
+  // The laptop syncs with it.
+  const a = db.login('admin', 'admin');
+  db.createPatient(a, { first_name: 'Cleo', last_name: 'Cloudflare', dob: '1980-01-01', phone: '5035550100', demographics: { city: 'Sandy', state: 'OR', emergency_name: 'K', emergency_phone: '5035550101', services: ['dental'] }, medical_history: {}, dental_history: { visit_type: 'cleaning' }, consents: [{ type: 'general', signer_name: 'Cleo', signature_png: 'data:image/png;base64,AAAA' }] });
+  cloud.stop(); const sy = await cloud.syncSettled(); cloud.stop();
+  out.sync = { raw: sy, ok: sy.ok, pushed: sy.pushed, error: sy.error || '', patientsOnServer: sqlite.prepare("SELECT COUNT(*) n FROM sync_rows WHERE entity = 'patient'").get().n };
+  out.refusedWhenConnected = (await call('cloud:setupServer', { token: GOOD })).error;
+
+  // Another laptop on the same account: the server is there already.
+  db.disconnectCloud();
+  const uploadsBefore = cf.uploads;
+  const r2 = await call('cloud:setupServer', { token: GOOD });
+  out.exists = { r: r2, uploaded: cf.uploads - uploadsBefore, connected: db.getSyncMeta().configured };
+  const oldKey = s1.key;
+  const r3 = await call('cloud:setupServer', { token: GOOD, replaceKey: true });
+  const s3 = cf.scripts['mmw-sync'];
+  out.replaced = { ok: r3.ok, newKey: !!s3.key && s3.key !== oldKey, dbs: cf.dbs.length, sameDb: !!s3.d1 && s3.d1.id === cf.dbs[0].uuid, connectedWithNew: db.getSyncMeta().key === s3.key,
+    sent: s3.meta.bindings.map((x) => x.type + ':' + x.name), keep: s3.meta.keep_bindings || null };
+  cloud.stop(); const sy3 = await cloud.syncSettled(); cloud.stop(); out.syncNewKey = sy3.ok;
+
+  // A token that reaches two accounts: which one is asked.
+  db.disconnectCloud();
+  cf.accounts.push({ id: 'acc2', name: 'Personal' });
+  out.choose = (await call('cloud:setupServer', { token: GOOD })).data;
+  cf.accounts.pop();
+
+  // A token without D1 · Edit: said, by name.
+  const keep = { scripts: cf.scripts, dbs: cf.dbs };
+  cf.scripts = {}; cf.dbs = []; cf.deny.add('d1');
+  out.denied = (await call('cloud:setupServer', { token: GOOD })).error;
+  cf.deny.delete('d1'); cf.scripts = keep.scripts; cf.dbs = keep.dbs;
+
+  // Not answering at all within the wait: set up all the same.
+  cf.dnsDown = 1000;
+  const r6 = await cfsetup.setupServer({ token: GOOD, replaceKey: true, waitMs: 0 });
+  out.notYet = { answered: r6.answered, url: r6.url };
+  cf.dnsDown = 0;
+
+  // Connected again, to a server running an older version: updated in place.
+  const r7 = await call('cloud:setupServer', { token: GOOD, replaceKey: true });
+  const s7 = cf.scripts['mmw-sync']; const keyBefore = s7.key; const dbBefore = s7.d1.id;
+  s7.source = s7.source.replace(/const VERSION = '([^']+)'/, "const VERSION = '1.7.9'");
+  const v1 = (await call('cloud:serverVersion')).data;
+  sent.length = 0;
+  const up = await call('cloud:updateServer', { token: GOOD });
+  const s8 = cf.scripts['mmw-sync'];
+  const v2 = (await call('cloud:serverVersion')).data;
+  out.update = { r7ok: r7.ok, v1, up, v2, keep: s8.meta.keep_bindings, bindings: s8.meta.bindings, keyKept: s8.key === keyBefore, dbKept: !!s8.d1 && s8.d1.id === dbBefore,
+    sameSource: s8.source === workerSrc, steps: sent.map((x) => x[1]) };
+  cloud.stop(); const sy8 = await cloud.syncSettled(); cloud.stop(); out.syncAfterUpdate = sy8.ok;
+  out.updateBadToken = (await call('cloud:updateServer', { token: 'wrong_token-1234567890abcdefXYZ' })).error;
+  out.audit = auditOf();
+  // Not for anyone but an administrator.
+  db.createUser(a, { username: 'dana', full_name: 'Dana Desk', role: 'registration', password: 'pw-dana-1' });
+  await call('auth:login', { username: 'dana', password: 'pw-dana-1' });
+  out.deskRefused = [(await call('cloud:setupServer', { token: GOOD })).error, (await call('cloud:updateServer', { token: GOOD })).error, (await call('cloud:tokenLink')).error];
+} catch (e) { out.crash = String((e && e.stack) || e); }
+process.stdout.write('\n@@CF@@' + JSON.stringify(out), () => process.exit(0));
+})();
+`;
+    const probeFile22 = path.join(fileURLToPathSev(new URL('.', import.meta.url)), '.cf-setup-probe.cjs');
+    let C;
+    try {
+      fs.writeFileSync(probeFile22, probe22);
+      const o = exec22(process.execPath, [probeFile22, fileURLToPathSev(new URL('..', import.meta.url))], { encoding: 'utf8', timeout: 240000, stdio: ['ignore', 'pipe', 'pipe'] });
+      C = JSON.parse(o.slice(o.lastIndexOf('@@CF@@') + 6));
+    } catch (e) {
+      C = { crash: String((e && e.message) || e) + (e && e.stderr ? ' ' + String(e.stderr).slice(-400) : '') };
+    } finally {
+      fs.rmSync(probeFile22, { force: true });
+    }
+    const bundled22 = (/const VERSION = '([^']+)'/.exec(fs.readFileSync(new URL('../cloud/worker.js', import.meta.url), 'utf8')) || [])[1];
+    const L = C.link || {};
+    log(!C.crash && L.origin === 'https://dash.cloudflare.com' && L.path === '/profile/api-tokens' && L.accountId === '*' && L.zoneId === 'all'
+      && JSON.stringify(L.keys) === JSON.stringify([{ key: 'workers_scripts', type: 'edit' }, { key: 'd1', type: 'edit' }, { key: 'account_settings', type: 'read' }])
+      && L.name === 'Mission Minded sync server',
+      'v0.0.22 setup: Open Cloudflare opens the token page with its three permissions already chosen — Workers Scripts and D1 to edit, Account Settings to read, nothing else' + (C.crash ? ' — CRASH: ' + C.crash : ''));
+    log(/did not accept that token/.test(C.badToken || '') && /does not look like a Cloudflare token/.test(C.junkToken || '') && /Paste the token/.test(C.noToken || ''),
+      'v0.0.22 setup: a wrong, garbled or missing token is refused, saying what to do');
+    const A = C.after || {};
+    log(!!C.r1 && C.r1.ok && /^https:\/\/mmw-sync\.mmw-[0-9a-f]{10}\.workers\.dev$/.test(C.r1.data.url) && C.r1.data.answered === true && C.r1.data.version === bundled22
+      && JSON.stringify(C.steps) === JSON.stringify(['token', 'database', 'server', 'address', 'answer', 'connect'])
+      && A.url === C.r1.data.url && A.mode === 'online' && A.keyMatches && A.keyShape && A.keyInAnswer === false,
+      'v0.0.22 setup: one token sets the server up and connects this laptop with a clinic key the app made — said step by step, the key never sent back to the screen');
+    const U = C.upload || {};
+    log(U.main === 'worker.js' && U.date === '2024-11-01' && JSON.stringify(U.bindings) === JSON.stringify(['d1:DB', 'secret_text:CLINIC_KEY'])
+      && U.dbs && U.dbs.length === 1 && U.dbs[0].name === 'mmw' && U.d1 && U.d1.id === U.dbs[0].uuid && U.sameSource === true
+      && U.fileType === 'application/javascript+module' && U.fileName === 'worker.js' && U.query === '?excludeScript=true'
+      && U.enabled === true && U.previews === false && U.apiDate === '2025-08-01' && /^mmw-[0-9a-f]{10}$/.test(U.subdomain || ''),
+      'v0.0.22 setup: Cloudflare is sent what wrangler sends — this app\'s own worker.js as the module, the mmw database bound as DB, the key as the CLINIC_KEY secret — and a workers.dev address is registered (another name tried when the first is taken) and turned on');
+    log(!!C.sync && C.sync.ok === true && C.sync.patientsOnServer === 1,
+      'v0.0.22 setup: the laptop then syncs with the server it set up — a patient checked in here is on it');
+    const E = C.exists || {};
+    log(/connected to a sync server already/.test(C.refusedWhenConnected || '') && E.r && E.r.data && E.r.data.exists === true && E.r.data.account === 'Sandy Clinic'
+      && E.uploaded === 0 && E.connected === false,
+      'v0.0.22 setup: an account that has the sync server already is not overwritten — it says so, so the laptop can connect with the connection code instead');
+    const R = C.replaced || {};
+    log(R.ok && R.newKey && R.dbs === 1 && R.sameDb && R.connectedWithNew && C.syncNewKey === true
+      && JSON.stringify(R.sent) === JSON.stringify(['secret_text:CLINIC_KEY']) && JSON.stringify(R.keep) === JSON.stringify(['d1']),
+      'v0.0.22 setup: asked, it gives that server a new clinic key — keeping the database it has, whatever it is called, so its records stay — and connects with it');
+    log(!!C.choose && Array.isArray(C.choose.chooseAccount) && C.choose.chooseAccount.map((a) => a.name).join() === 'Sandy Clinic,Personal',
+      'v0.0.22 setup: a token that reaches two Cloudflare accounts asks which one');
+    log(/needs “D1 · Edit”/.test(C.denied || '') && /Open Cloudflare/.test(C.denied || ''),
+      'v0.0.22 setup: a token without a permission it needs says which, and how to make one that has it');
+    log(!!C.notYet && C.notYet.answered === false && /workers\.dev$/.test(C.notYet.url || ''),
+      'v0.0.22 setup: a new address that does not answer yet does not fail the setup — the laptop connects as soon as it does');
+    const V = C.update || {};
+    log(V.r7ok && V.v1 && V.v1.server === '1.7.9' && V.v1.behind === true && V.v1.updatable === true && V.up && V.up.ok && V.up.data.version === bundled22
+      && V.v2 && V.v2.behind === false && JSON.stringify(V.keep) === JSON.stringify(['d1', 'secret_text']) && Array.isArray(V.bindings) && V.bindings.length === 0
+      && V.keyKept && V.dbKept && V.sameSource && JSON.stringify(V.steps) === JSON.stringify(['token', 'server', 'answer']) && C.syncAfterUpdate === true
+      && /did not accept that token/.test(C.updateBadToken || ''),
+      'v0.0.22 update: a server running an older version is updated from one token — the database and the clinic key kept, so every laptop carries on');
+    const actions = (C.audit || []).map((x) => x.action);
+    log(actions.filter((x) => x === 'cloud.setup').length === 3 && actions.includes('cloud.update')
+      && !(C.audit || []).some((x) => /[A-Z2-9]{5}-[A-Z2-9]{5}/.test(x.detail || '')),
+      'v0.0.22: setting up and updating the server are in the audit log, and the clinic key is not');
+    log(Array.isArray(C.deskRefused) && C.deskRefused.length === 3 && C.deskRefused.every((x) => /permission/.test(x || '')),
+      'v0.0.22: only an administrator can set up or update the sync server');
+
+    // On screen.
+    const saved22 = { ...window.api };
+    const opened22 = []; const setupCalls = []; const updateCalls = [];
+    let st22; let progress22 = null; let setupAnswers = []; let version22 = null;
+    const LINK22 = C.link && C.link.raw ? C.link.raw : 'https://dash.cloudflare.com/profile/api-tokens';
+    window.api.cloudStatus = async () => ({ ok: true, data: { ...st22 } });
+    window.api.cloudTokenLink = async () => ({ ok: true, data: LINK22 });
+    window.api.appOpenExternal = async (u) => { opened22.push(u); return { ok: true }; };
+    window.api.onCloudSetupProgress = (cb) => { progress22 = cb; return () => { progress22 = null; }; };
+    window.api.cloudSetupServer = async (p) => {
+      setupCalls.push(p);
+      const next = setupAnswers.shift();
+      for (const s of next.steps || []) { if (progress22) progress22({ step: s }); await tick(); }
+      if (next.error) return { ok: false, error: next.error };
+      return { ok: true, data: next.data };
+    };
+    window.api.cloudUpdateServer = async (p) => { updateCalls.push(p); if (progress22) { progress22({ step: 'server' }); await tick(); } return { ok: true, data: { version: '1.8.0' } }; };
+    window.api.cloudServerVersion = async () => ({ ok: true, data: version22 });
+    const settle22 = async () => { for (let i = 0; i < 25; i++) await tick(); };
+    const btnOf = (root, re) => $all('button', root).find((b) => re.test(b.textContent.trim()));
+    const modalBtn = (re) => $all('.modal-overlay button').find((b) => re.test(b.textContent.trim()));
+    const store22 = (await import('../src/renderer/js/store.js')).store;
+    store22.setUser(signInAdmin());
+    const ctx22 = { navigate: () => {}, toast: () => {}, store: store22, setDetail: () => {} };
+    const { renderAdmin } = await import('../src/renderer/js/views/admin.js');
+    const NOT_CONNECTED = { enabled: false, mode: 'offline', online: false, url: '', hasKey: false, configured: false, deviceId: 'd22', cursor: '', lastOk: '', lastPush: '', lastError: '', refused: [], running: false };
+    const CONNECTED = { ...NOT_CONNECTED, enabled: true, mode: 'online', online: true, url: 'https://mmw-sync.mmw-abc1234567.workers.dev', hasKey: true, configured: true, kind: 'internet', lastOk: new Date().toISOString() };
+    try {
+      st22 = { ...NOT_CONNECTED };
+      let adm = renderAdmin(ctx22, { section: 'cloud' }); document.body.append(adm); await settle22();
+      const card = adm.querySelector('.cloud-setup');
+      const cards = $all('.card', adm);
+      const steps = card ? $all('ol.cloud-steps li', card).map((li) => li.textContent) : [];
+      log(!!card && cards.indexOf(card) < cards.findIndex((c) => /Local only/.test(c.textContent)) && /Set up the clinic's sync server/.test(card.textContent) && /Recommended/.test(card.textContent)
+        && steps.length === 3 && /Open Cloudflare/.test(steps[0]) && /Create Token/.test(steps[1]) && /Paste the token/.test(steps[2]) && /not kept on this laptop/.test(card.textContent),
+        'v0.0.22 Cloud tab, not connected: "Set up the clinic\'s sync server" comes first, in three steps — open Cloudflare, create the token, paste it');
+      btnOf(card, /^Open Cloudflare$/).click(); await settle22();
+      btnOf(card, /^Set up the sync server$/).click(); await settle22();
+      const noTokenCalls = setupCalls.length;
+      card.querySelector('input[type="password"]').value = 'good_token-1234567890abcdefXYZ';
+      setupAnswers = [
+        { steps: ['token'], data: { exists: true, account: 'Sandy Clinic' } },
+        { steps: ['token', 'database', 'server', 'address', 'answer', 'connect'], data: { url: CONNECTED.url, answered: true, version: '1.8.0' } },
+      ];
+      btnOf(card, /^Set up the sync server$/).click(); await settle22();
+      const existsModal = $all('.modal-overlay').find((m) => /already has a sync server/.test(m.textContent));
+      const existsText = existsModal ? existsModal.textContent : '';
+      if (modalBtn(/^Give it a new clinic key$/)) modalBtn(/^Give it a new clinic key$/).click();
+      for (let i = 0; i < 30; i++) await tick();
+      const stepsShown = $all('.cloud-setup-steps li', card).map((li) => li.className);
+      const readyModal = $all('.modal-overlay').find((m) => /The sync server is ready/.test(m.textContent));
+      const readyItems = readyModal ? $all('li', readyModal).map((li) => li.textContent) : [];
+      st22 = { ...CONNECTED };
+      if (modalBtn(/^Done$/)) modalBtn(/^Done$/).click();
+      await settle22();
+      log(opened22.length === 1 && opened22[0] === LINK22 && noTokenCalls === 0
+        && setupCalls.length === 2 && setupCalls[0].token === 'good_token-1234567890abcdefXYZ' && !setupCalls[0].replaceKey && setupCalls[1].replaceKey === true
+        && /paste the connection code/.test(existsText) && /new clinic key/.test(existsText)
+        && stepsShown.length === 6 && stepsShown.every((c) => c === 'is-done')
+        && readyItems.length === 4 && /This laptop is connected\./.test(readyItems[0]) && /Show connection code/.test(readyItems[1]) && /nobody has to type it/.test(readyItems[1])
+        && /Workers Paid/.test(readyItems[2]) && /not kept on this laptop/.test(readyItems[3]),
+        'v0.0.22 Cloud tab: Open Cloudflare opens the token page; Set up asks first about an account that has a server already, ticks off each step, then says what is left — the code for the other laptops, the paid plan, the token');
+      adm.remove();
+
+      // A refusal: the step it stopped at, and why, stay on screen.
+      st22 = { ...NOT_CONNECTED };
+      adm = renderAdmin(ctx22, { section: 'cloud' }); document.body.append(adm); await settle22();
+      const card2 = adm.querySelector('.cloud-setup');
+      card2.querySelector('input[type="password"]').value = 'good_token-1234567890abcdefXYZ';
+      setupAnswers = [{ steps: ['token', 'database'], error: 'This token is not allowed to create the clinic\'s database: it needs “D1 · Edit”.' }];
+      btnOf(card2, /^Set up the sync server$/).click();
+      for (let i = 0; i < 30; i++) await tick();
+      const failed = card2.querySelector('.cloud-setup-steps li.is-failed');
+      const note = card2.querySelector('.cloud-setup-error');
+      log(!!failed && /database/.test(failed.textContent) && !!note && note.style.display !== 'none' && /D1 · Edit/.test(note.textContent)
+        && !btnOf(card2, /^Set up the sync server$/).disabled,
+        'v0.0.22 Cloud tab: a refused setup marks the step it stopped at and keeps the reason on screen, ready to try again');
+      adm.remove();
+
+      // Connected, to a server older than this app's: one token updates it.
+      st22 = { ...CONNECTED };
+      version22 = { bundled: '1.8.0', server: '1.7.9', updatable: true, behind: true };
+      adm = renderAdmin(ctx22, { section: 'cloud' }); document.body.append(adm); await settle22();
+      const up = adm.querySelector('.cloud-server-update');
+      const upShown = !!up && up.style.display !== 'none' && /Update the sync server to 1\.8\.0/.test(up.textContent) && /runs 1\.7\.9/.test(up.textContent) && /keeps its database and the clinic key/.test(up.textContent);
+      if (up && up.querySelector('input[type="password"]')) up.querySelector('input[type="password"]').value = 'good_token-1234567890abcdefXYZ';
+      if (up && btnOf(up, /^Update the sync server$/)) btnOf(up, /^Update the sync server$/).click();
+      await settle22();
+      adm.remove();
+      version22 = { bundled: '1.8.0', server: '1.8.0', updatable: true, behind: false };
+      adm = renderAdmin(ctx22, { section: 'cloud' }); document.body.append(adm); await settle22();
+      const up2 = adm.querySelector('.cloud-server-update');
+      log(upShown && updateCalls.length === 1 && updateCalls[0].token === 'good_token-1234567890abcdefXYZ' && !!up2 && up2.style.display === 'none' && !adm.querySelector('.cloud-setup'),
+        'v0.0.22 Cloud tab, connected: a server older than this app\'s is offered an update from one token; an up-to-date one shows nothing, and no setup card');
+      adm.remove();
+    } finally {
+      $all('.modal-overlay').forEach((o) => o.remove());
+      Object.keys(window.api).forEach((k) => { if (!(k in saved22)) delete window.api[k]; });
+      Object.assign(window.api, saved22);
     }
   }
 

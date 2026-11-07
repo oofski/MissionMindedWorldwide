@@ -134,6 +134,14 @@ export const api = {
   cloudConnectionCode: () => call('cloudConnectionCode'),
   // move: the person confirmed moving a laptop already connected elsewhere.
   cloudJoin: (url, key, move, lan) => call('cloudJoin', { url, key, ...(move ? { move: true } : {}), ...(lan ? { lan } : {}) }),
+  // v0.0.22: the sync server set up (and updated) on the clinic's Cloudflare
+  // account by the app, with a token pasted from Cloudflare.
+  cloudTokenLink: () => call('cloudTokenLink'),
+  cloudSetupServer: (token, opts) => call('cloudSetupServer', { token, ...(opts || {}) }),
+  cloudUpdateServer: (token, opts) => call('cloudUpdateServer', { token, ...(opts || {}) }),
+  cloudServerVersion: () => call('cloudServerVersion'),
+  // Returns an unsubscribe function; a no-op where the bridge has no events.
+  onCloudSetupProgress: (cb) => (window.api.onCloudSetupProgress ? window.api.onCloudSetupProgress(cb) : () => {}),
   // v0.0.17: the clinic network — hosting it here (administrators only), and
   // the hosts heard on this Wi-Fi.
   hubStatus: () => call('hubStatus'),
