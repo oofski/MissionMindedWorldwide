@@ -47,9 +47,32 @@ function fromHex(h) {
   if (typeof h !== 'string' || !/^[0-9a-f]{1,512}$/i.test(h)) return null;
   return BigInt('0x' + h);
 }
+// The Jacobi symbol (a | n), n odd. For the safe prime P, (v | P) = 1 says v
+// is a square mod P — exactly the subgroup of order Q — in a fraction of a
+// millisecond, where v^Q mod P takes some 25 ms: a host answering anyone on
+// the Wi-Fi must not spend that before it has counted the try.
+function jacobi(a, n) {
+  a %= n; if (a < 0n) a += n;
+  let t = 1;
+  while (a !== 0n) {
+    while ((a & 1n) === 0n) { a >>= 1n; const r = n & 7n; if (r === 3n || r === 5n) t = -t; }
+    [a, n] = [n, a];
+    if ((a & 3n) === 3n && (n & 3n) === 3n) t = -t;
+    a %= n;
+  }
+  return n === 1n ? t : 0;
+}
+// The inverse mod P (extended Euclid), so M^-w is (M^w)^-1 rather than a
+// full-size power.
+function modInv(a, m) {
+  let [r0, r1] = [((a % m) + m) % m, m];
+  let [s0, s1] = [1n, 0n];
+  while (r1 !== 0n) { const q = r0 / r1; [r0, r1] = [r1, r0 - q * r1]; [s0, s1] = [s1, s0 - q * s1]; }
+  return ((s0 % m) + m) % m;
+}
 // In the group: 1 < v < P-1 and of order Q. A value outside it (a small-
 // subgroup element above all) is refused before anything is made from it.
-const inGroup = (v) => typeof v === 'bigint' && v > 1n && v < P - 1n && modPow(v, Q, P) === 1n;
+const inGroup = (v) => typeof v === 'bigint' && v > 1n && v < P - 1n && jacobi(v, P) === 1;
 
 // M and N: fixed group elements nobody knows the logarithm of — the hash of a
 // label, squared into the subgroup.
@@ -141,7 +164,7 @@ function hostAnswer(code, hostId, pin, Xhex) {
   const w = wOf(code, hostId);
   const y = randomExp();
   const Y = (modPow(G, y, P) * modPow(N, w, P)) % P;
-  const Z = modPow((X * modPow(M, Q - w, P)) % P, y, P);
+  const Z = modPow((X * modInv(modPow(M, w, P), P)) % P, y, P);
   const k = keys({ hostId, pin, X, Y, Z, w });
   return { Y: toHex(Y), cB: k.cB, expectA: k.cA, ke: k.ke };
 }
@@ -150,7 +173,7 @@ function hostAnswer(code, hostId, pin, Xhex) {
 function laptopFinish(state, pin, Yhex, cB) {
   const Y = fromHex(Yhex);
   if (!state || !inGroup(Y)) return null;
-  const Z = modPow((Y * modPow(N, Q - state.w, P)) % P, state.x, P);
+  const Z = modPow((Y * modInv(modPow(N, state.w, P), P)) % P, state.x, P);
   const k = keys({ hostId: state.hostId, pin, X: state.X, Y, Z, w: state.w });
   if (!sameHex(cB, k.cB)) return null;
   return { cA: k.cA, ke: k.ke };
@@ -179,5 +202,5 @@ module.exports = {
   VERSION, canonCode, makeCode, showCode, codeProblem,
   laptopStart, hostAnswer, laptopFinish, sameHex, seal, unseal,
   // for the tests
-  _group: { P, Q, G, M, N, modPow, inGroup },
+  _group: { P, Q, G, M, N, modPow, inGroup, jacobi, modInv },
 };

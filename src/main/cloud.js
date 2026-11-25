@@ -268,15 +268,20 @@ async function testClinicNetwork(url, key, t) {
 
 // v0.0.24: the network's password a join with the short clinic key brought
 // (testClinicNetwork), for the save of the same host with the same key that
-// follows it (applyConfig) — the screen only ever has the short key.
-let lastPair = null;
-const PAIR_KEEP_MS = 15 * 60 * 1000;
+// follows it (applyConfig) — the screen only ever has the short key. Kept
+// for as long as the app is open, one per host: a question asked between
+// the test and the save ("Move this laptop?") can wait as long as it likes,
+// and the short key is never saved as the password in its place.
+const pairs = new Map();
 function rememberPair(pin, code, key) {
-  lastPair = { pin: lan.normPin(pin), code: require('./joincode').canonCode(code), key, at: Date.now() };
+  const p = lan.normPin(pin);
+  pairs.delete(p);
+  pairs.set(p, { code: require('./joincode').canonCode(code), key });
+  while (pairs.size > 16) pairs.delete(pairs.keys().next().value);
 }
 function pairedKeyFor(pin, code) {
-  const p = lastPair;
-  if (!p || Date.now() - p.at > PAIR_KEEP_MS || p.pin !== lan.normPin(pin)) return '';
+  const p = pairs.get(lan.normPin(pin));
+  if (!p) return '';
   return require('./joincode').canonCode(code) === p.code ? p.key : '';
 }
 

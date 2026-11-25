@@ -610,24 +610,26 @@ function eventSlots(raw, startDate, endDate) {
   for (let m = toMin(start); m < toMin(end) && times.length < 24; m += 60) {
     times.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
   }
+  // A day already over is not offered (with half a day's grace, since the
+  // server does not know the clinic's time zone).
+  const past = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 10);
   const list = [];
-  days.forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
+  days.filter((d) => d >= past).forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
   return list.length ? { perHour: per, list } : null;
 }
-// How many pre-registrations each slot has, from the event's patient rows.
+// How many pre-registrations each slot has, counted by the database — one
+// row back for each hour, not every patient — and on the event's own index
+// (`+entity` keeps SQLite from choosing the entity index, which would read
+// every patient the server holds). A row that is not JSON counts as no slot.
+const SLOT_COUNT_SQL = "SELECT CASE WHEN json_valid(data) AND json_valid(json_extract(data, '$.demographics')) "
+  + "THEN json_extract(json_extract(data, '$.demographics'), '$.prereg_slot') END AS slot, COUNT(*) AS n "
+  + "FROM sync_rows WHERE event_uid = ? AND +entity = 'patient' AND deleted = 0 GROUP BY slot";
 async function slotCounts(env, eventUid) {
   const counts = {};
   try {
-    const r = await env.DB
-      .prepare("SELECT data FROM sync_rows WHERE entity = 'patient' AND event_uid = ? AND deleted = 0")
-      .bind(eventUid)
-      .all();
+    const r = await env.DB.prepare(SLOT_COUNT_SQL).bind(eventUid).all();
     for (const row of (r && r.results) || []) {
-      const data = parseData(row.data) || {};
-      let demo = data.demographics;
-      if (typeof demo === 'string') { try { demo = JSON.parse(demo); } catch (_e) { demo = null; } }
-      const slot = demo && typeof demo.prereg_slot === 'string' ? demo.prereg_slot : '';
-      if (slot) counts[slot] = (counts[slot] || 0) + 1;
+      if (typeof row.slot === 'string' && row.slot) counts[row.slot] = (counts[row.slot] || 0) + (Number(row.n) || 0);
     }
   } catch (_e) { /* counted as none: the form still opens */ }
   return counts;

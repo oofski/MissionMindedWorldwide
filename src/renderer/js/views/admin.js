@@ -6,7 +6,7 @@ import { store } from '../store.js';
 import { icon } from '../icons.js';
 import { eventCities } from '../components/intakeSections.js';
 import { qrFor, preregSign, printNode } from '../components/qr.js';
-import { LABEL_SIZES, PRINTER_DPI, labelSetting, saveLabelSetting, labelLayout, wristbandLabel, printWristband } from '../components/wristband.js';
+import { LABEL_SIZES, PRINTER_DPI, labelSetting, saveLabelSetting, labelLayout, wristbandLabel, printWristband, moduleFor } from '../components/wristband.js';
 
 // Cloud-sync live-update subscription. Kept at module scope so repaints of the
 // Cloud tab can drop the previous listener before adding a new one (no stacking).
@@ -1800,9 +1800,15 @@ export function wristbandLabelCard() {
     const px = cur.w ? cur.w * 96 / 25.4 : 0;
     inner.style.zoom = px > 860 ? String(Math.round((860 / px) * 100) / 100) : '1';
     preview.replaceChildren(inner);
-    what.textContent = cur.w
+    // The bars a small label leaves room for (the same widths the print uses).
+    const room = !cur.w ? 60 : labelLayout(cur) === 'band' ? Math.min(70, (cur.w - Math.min(cur.offset || 0, cur.w / 2)) * 0.45)
+      : labelLayout(cur) === 'small' ? cur.w - 3 - Math.min(cur.offset || 0, cur.w / 2) : Math.min(cur.w - 8, 80);
+    const tooSmall = moduleFor(SAMPLE_BAND.patient_code, room, cur.dpi) < 0.25;
+    what.textContent = (cur.w
       ? `Prints one ${cur.w} × ${cur.h} mm label per patient, with no margins — set the printer to this label size too, and to 100% (no "fit to page").`
-      : 'Prints the band on a sheet of paper, to cut out. For a wristband printer, choose its band size above.';
+      : 'Prints the band on a sheet of paper, to cut out. For a wristband printer, choose its band size above.')
+      + (tooSmall ? ' This label is too small for a barcode most scanners read — choose a larger one, or less blank space at the start.' : '');
+    what.classList.toggle('wb-too-small', tooSmall);
   }
   function change() {
     const next = { key: sizeSel.value, dpi: Number(dpiSel.value), offset: Number(offIn.value) || 0 };

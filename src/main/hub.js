@@ -257,6 +257,7 @@ function setKey(key) {
   setMeta('key', k);
   if (state.env) state.env.CLINIC_KEY = k;
   state.proofKey = null;
+  state.authFails.clear();
   return k;
 }
 // v0.0.24: the short clinic key people type to join (joincode.js). A host
@@ -282,6 +283,22 @@ function setJoinCode(code) {
   setMeta('join_code', c);
   state.joins.clear();
   return c;
+}
+// v0.0.24: a host from 0.0.23 whose network password was chosen by hand
+// (Change the clinic key, or a key chosen when it first hosted). That key is
+// what the clinic knows, so it becomes the clinic key the next laptop types —
+// and the network password, which every laptop sends with every sync and
+// which nobody types any more, becomes a long one the app makes. The laptops
+// joined with the old one join again, once, with the key they already know.
+// Returns the new password ('' when there was nothing to do), for the
+// caller to move this laptop's own sync to it (main.js).
+function retireHandChosenKey() {
+  if (!state.dir || !fs.existsSync(hubFile())) return '';
+  open();
+  const k = getMeta('key');
+  if (!k || lan.madeKey(k)) return '';
+  joinCode();
+  return setKey('');
 }
 // The join proof's key, made once for each key (it takes a moment).
 async function proofKeyOf(id) {
@@ -475,12 +492,14 @@ async function onJoin(req, res, pathname) {
       const retryAfter = Math.max(1, Math.ceil((oldest.at + JOIN_WINDOW_MS - now) / 1000));
       return sendJson(res, 429, { ok: false, error: 'too many tries', retryAfter });
     }
-    const id = identity();
-    const a = J.hostAnswer(joinCode(), id.hostId, id.pin, typeof body.X === 'string' ? body.X : '');
-    if (!a) return sendJson(res, 400, { ok: false, error: 'bad request' });
-    const sid = crypto.randomBytes(16).toString('hex');
+    // Counted before any work, a forged one included: every try is one
+    // guess or one bit of the host's time, and both are limited.
     const tryRec = { at: now, address, ok: false, failed: false };
     state.joinTries.push(tryRec);
+    const id = identity();
+    const a = J.hostAnswer(joinCode(), id.hostId, id.pin, typeof body.X === 'string' ? body.X : '');
+    if (!a) { tryRec.failed = true; return sendJson(res, 400, { ok: false, error: 'bad request' }); }
+    const sid = crypto.randomBytes(16).toString('hex');
     while (state.joins.size >= MAX_JOINS) state.joins.delete(state.joins.keys().next().value);
     state.joins.set(sid, { at: now, ke: a.ke, expectA: a.expectA, tryRec });
     return sendJson(res, 200, { ok: true, sid, Y: a.Y, cB: a.cB });
@@ -504,14 +523,20 @@ function recentAuthFails(address, now) {
   if (list.length) state.authFails.set(address, list); else state.authFails.delete(address);
   return list;
 }
+// Only for a network password chosen by hand (a host from 0.0.23 not yet
+// moved to a made one): one the app made is far too long to guess, and
+// limiting it only locked out a laptop that had kept syncing with the old
+// password after "make every other laptop join again" — refusing its new one
+// too, as if it were wrong.
+const passwordGuessable = () => { const k = state.env && state.env.CLINIC_KEY; return !!k && !lan.madeKey(k); };
 function authLimited(req) {
   const a = addressOf(req);
-  if (isLoopback(a)) return false;
+  if (isLoopback(a) || !passwordGuessable()) return false;
   return recentAuthFails(a, Date.now()).length >= AUTH_FAILS_PER_ADDRESS;
 }
 function noteAuthFail(req) {
   const a = addressOf(req);
-  if (isLoopback(a)) return;
+  if (isLoopback(a) || !passwordGuessable()) return;
   const now = Date.now();
   const list = recentAuthFails(a, now);
   list.push(now);
@@ -852,7 +877,7 @@ function status() {
 }
 
 module.exports = {
-  HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, start, stop, resume, erase, shutdown,
+  HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, retireHandChosenKey, start, stop, resume, erase, shutdown,
   JOIN_TRIES_PER_ADDRESS, JOIN_TRIES_ALL, AUTH_FAILS_PER_ADDRESS,
   // for the tests
   _resetJoinLimits: () => { state.joinTries = []; state.joins.clear(); state.authFails.clear(); },

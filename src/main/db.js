@@ -352,16 +352,20 @@ function migrate() {
              (SELECT MAX(id) FROM event_reports GROUP BY event_id)`);
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_event_unique ON event_reports(event_id)');
   } catch (_e) { /* index already present */ }
-  // v0.0.24: the exit survey's answers, kept apart from the patient. One row
-  // per survey answered, tied to the clinic event and to nobody: no patient
-  // id, no name, no time of day — the date only. The patient's own survey row
-  // (exit_surveys) says only that it was answered or declined, which is what
-  // check-out needs. Synced as 'survey_answer', event-scoped like a report.
-  db.exec(`CREATE TABLE IF NOT EXISTS survey_answers (
+  // v0.0.24: the exit survey's answers, kept apart from the patient — as
+  // TOTALS, never one row per patient. Each laptop keeps one running tally
+  // for each clinic event (how many answered, and how many chose each
+  // answer), so no stored copy — here, on the server, in a backup — holds
+  // anyone's answers on their own to be matched to the patient row's time.
+  // The patient's own survey row (exit_surveys) says only that it was
+  // answered or declined, which is what check-out needs. Synced as
+  // 'survey_tally', event-scoped like a report; only the laptop it belongs to
+  // ever writes it.
+  db.exec(`CREATE TABLE IF NOT EXISTS survey_tallies (
     id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
-    version TEXT NOT NULL, language TEXT, answers TEXT NOT NULL DEFAULT '{}', created_on TEXT,
+    device TEXT, responses INTEGER NOT NULL DEFAULT 0, counts TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT, synced_rev TEXT, content_rev TEXT)`);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_survey_answers_event ON survey_answers(event_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_survey_tallies_event ON survey_tallies(event_id, device)');
   // v0.0.24: who is signed in where — one row per laptop and account, kept
   // fresh while the account is signed in there (notePresence), so signing in
   // with an account already in use on another laptop can say so. Synced as
@@ -481,7 +485,7 @@ function resetClinicData() {
     db.transaction(() => {
       // Sync bookkeeping first, so nothing here can resurrect a record later.
       // A leftover tombstone also blocks a legitimate re-import of the same uid.
-      for (const t of ['undeletes', 'tombstones', 'event_reports', 'survey_answers', 'user_sessions',
+      for (const t of ['undeletes', 'tombstones', 'event_reports', 'survey_tallies', 'user_sessions',
                        'inventory_moves', 'inventory_items',
                        'xrays', 'consents', 'treatments', 'triage', 'exit_surveys', 'patients',
                        'audit_log',   // detail carries patient names
@@ -1457,10 +1461,10 @@ function deleteEvent(actor, id, { force } = {}) {
     }
     // The event's anonymous survey answers go with it — its totals are kept
     // in the summary captured above.
-    for (const r of db.prepare('SELECT uid FROM survey_answers WHERE event_id = ?').all(id)) {
-      if (r.uid) recordTombstone(r.uid, 'survey_answer', e.uid);
+    for (const r of db.prepare('SELECT uid FROM survey_tallies WHERE event_id = ?').all(id)) {
+      if (r.uid) recordTombstone(r.uid, 'survey_tally', e.uid);
     }
-    db.prepare('DELETE FROM survey_answers WHERE event_id = ?').run(id);
+    db.prepare('DELETE FROM survey_tallies WHERE event_id = ?').run(id);
     if (!placeholder) recordTombstone(e.uid, 'event', null);
     db.prepare('DELETE FROM patients WHERE event_id = ?').run(id);
     db.prepare('DELETE FROM events WHERE id = ?').run(id);
@@ -2004,17 +2008,28 @@ function patientHistory(patientId) {
     const tr = db.prepare('SELECT status FROM triage WHERE patient_id = ?').get(r.id);
     const tx = db.prepare('SELECT fillings, extractions, cleaning, completed_at FROM treatments WHERE patient_id = ?').get(r.id);
     let summary = [];
+    // A visit not completed at a treatment chair (the printed record's rule,
+    // aftercare.careStage 'not_treated') lists its chart as not confirmed —
+    // the same words as its Visit Summary — never as treatment given.
+    const notTreated = !!tx && require('./aftercare').careStage({ status: r.status, treatment: tx, triage: tr || null }) === 'not_treated';
     // v0.0.24: what that visit left for a future one, for the next visit's
-    // chart to offer ("Still to do from an earlier visit").
+    // chart to offer ("Still to do from an earlier visit") — and the teeth it
+    // treated, so an item stops being offered once a later visit has done it.
+    // A visit the patient left before a chair treated nothing: what it
+    // planned for that day is still to do too.
     const future = [];
-    // ...and the teeth that visit treated, so an item left for "a future
-    // visit" stops being offered once a later visit has done it.
     const done = [];
     if (tx) {
-      DLabels.futureRows(safeJson(tx.fillings, [])).forEach((r) => future.push({ kind: 'filling', ...r }));
-      DLabels.futureRows(safeJson(tx.extractions, [])).forEach((r) => future.push({ kind: 'extraction', ...r }));
-      DLabels.thisVisitRows(safeJson(tx.fillings, [])).forEach((r) => { if (r.tooth) done.push({ kind: 'filling', tooth: String(r.tooth) }); });
-      DLabels.thisVisitRows(safeJson(tx.extractions, [])).forEach((r) => { if (r.tooth) done.push({ kind: 'extraction', tooth: String(r.tooth) }); });
+      const fil = safeJson(tx.fillings, []), ext = safeJson(tx.extractions, []);
+      DLabels.futureRows(fil).forEach((x) => future.push({ kind: 'filling', ...x }));
+      DLabels.futureRows(ext).forEach((x) => future.push({ kind: 'extraction', ...x }));
+      if (notTreated) {
+        DLabels.thisVisitRows(fil).forEach((x) => { if (x.tooth) future.push({ kind: 'filling', ...x, unfinished: true }); });
+        DLabels.thisVisitRows(ext).forEach((x) => { if (x.tooth) future.push({ kind: 'extraction', ...x, unfinished: true }); });
+      } else {
+        DLabels.thisVisitRows(fil).forEach((x) => { if (x.tooth) done.push({ kind: 'filling', tooth: String(x.tooth) }); });
+        DLabels.thisVisitRows(ext).forEach((x) => { if (x.tooth) done.push({ kind: 'extraction', tooth: String(x.tooth) }); });
+      }
     }
     if (tx) {
       const f = countFillings(tx), x = DLabels.thisVisitRows(safeJson(tx.extractions, [])).length;
@@ -2025,14 +2040,10 @@ function patientHistory(patientId) {
       if (f) summary.push(`${f} filling(s)`);
       if (x) summary.push(`${x} extraction(s)`);
       if (c) summary.push('cleaning');
-      if (future.length) summary.push(`${future.length} left for a future visit`);
+      const later = future.filter((it) => !it.unfinished).length;
+      if (later) summary.push(`${later} left for a future visit`);
     }
-    // A visit not completed at a treatment chair (the printed record's rule,
-    // aftercare.careStage 'not_treated') lists its chart as not confirmed —
-    // the same words as its Visit Summary — never as treatment given.
-    const unconfirmed = summary.length && require('./aftercare').careStage({
-      status: r.status, treatment: tx, triage: tr || null,
-    }) === 'not_treated';
+    const unconfirmed = summary.length && notTreated;
     return {
       id: r.id, event_name: r.event_name, created_at: r.created_at, status: r.status,
       summary: summary.length ? (unconfirmed ? UNCONFIRMED_PREFIX : '') + summary.join(', ') : '—',
@@ -2047,11 +2058,14 @@ function patientHistory(patientId) {
 // v0.0.24: { filling, extraction, other } — this visit's planned work on a
 // treatment record (rows marked for a future visit left out).
 function treatmentNeeds(tx) {
-  if (!tx) return { filling: false, extraction: false, other: false };
+  if (!tx) return { filling: false, extraction: false, cleaning: false, other: false };
   const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
   return {
     filling: DLabels.thisVisitRows(safeJson(tx.fillings, [])).some(has),
     extraction: DLabels.thisVisitRows(safeJson(tx.extractions, [])).some(has),
+    // A cleaning ticked on the dentist's chart (sealant, scaling…): the
+    // report's own rule (didCleaning).
+    cleaning: didCleaning(tx),
     // Restorative work at a chair (core build-up, re-cement, denture,
     // bridge) and a typed-in procedure are "Other procedure".
     other: !!String(tx.other_procedures || '').trim()
@@ -3080,8 +3094,8 @@ function inventoryChairUsage(eventId) {
  * could be identified by — which is what lets the aggregate live on past the
  * clinic's own records.
  */
-// v0.0.24: a check-out survey's answers are kept apart from the patient
-// (survey_answers), and the patient's row records only that it was answered —
+// v0.0.24: a check-out survey's answers are added to the clinic's totals
+// (survey_tallies), and the patient's row records only that it was answered —
 // its version carries this mark, so a row answered that way is never opened
 // again: its answers cannot be found, and a second Finish would count the
 // patient twice.
@@ -3111,7 +3125,7 @@ function saveExitSurvey(actor, patientId, data) {
   // added afterwards would be counted in the grant totals.
   const prior = db.prepare('SELECT answers, exit_status, version FROM exit_surveys WHERE patient_id = ?').get(patientId);
   if (stage === 'exit' && isAnonSurvey(prior) && prior.exit_status === 'completed') {
-    throw new Error('This patient has answered the survey already. The answers were saved anonymously — without the patient — so they cannot be opened or changed.');
+    throw new Error('This patient has answered the survey already. The answers were added to the clinic\'s totals, apart from the patient, so they cannot be opened or changed.');
   }
   const kept = prior ? safeJson(prior.answers, {}) : {};
   const exitDeclined = !!(prior && prior.exit_status === 'declined');
@@ -3130,11 +3144,9 @@ function saveExitSurvey(actor, patientId, data) {
   const existing = db.prepare('SELECT id FROM exit_surveys WHERE patient_id = ?').get(patientId);
   const status = declined ? 'declined' : 'completed';
   const col = stage === 'registration' ? 'registration_status' : 'exit_status';
-  if (anonymous) {
-    db.prepare(`INSERT INTO survey_answers (uid, event_id, version, language, answers, created_on) VALUES (?,?,?,?,?,?)`)
-      .run(crypto.randomUUID(), pt.event_id, baseVersion, language, JSON.stringify(answers), today());
-  }
   const onRow = anonymous ? {} : answers;
+  const write = db.transaction(() => {
+  if (anonymous) addToSurveyTally(pt.event_id, answers);
   // `declined` stays the EXIT answer: it is what check-out gates on, so a
   // registration row from an older build that was skipped must not set it.
   if (existing) {
@@ -3153,13 +3165,31 @@ function saveExitSurvey(actor, patientId, data) {
           stage === 'exit' ? declined : 0, status, now(),
           actor ? actor.id : null, actor ? actor.full_name : null, now());
   }
+  });
+  write();
   // No dirty-marking here on purpose: sync decides dirtiness by hashing a row's
   // syncable columns (see collectSyncRows), so a plain write is enough.
   audit(actor, 'survey.save', 'patient', patientId,
         declined ? `Survey (${stage}) declined by patient`
-          : anonymous ? 'Survey (exit) completed — answers kept anonymously, apart from the patient'
+          : anonymous ? 'Survey (exit) completed — answers added to the clinic totals, apart from the patient'
             : `Survey (${stage}) completed — ${Object.keys(answers).length} answered in total`);
   return getExitSurvey(patientId);
+}
+
+// Add one survey's answers to this laptop's tally for the event: one more
+// response, and one more for each answer chosen (each option of a select-all
+// question). The tally is this laptop's own row, so no other laptop's write
+// can undo an addition (last writer wins per row).
+function addToSurveyTally(eventId, answers) {
+  const device = ensureDeviceId();
+  const row = db.prepare('SELECT id, responses, counts FROM survey_tallies WHERE event_id IS ? AND device = ? ORDER BY id LIMIT 1').get(eventId, device);
+  const counts = row ? (safeJson(row.counts, {}) || {}) : {};
+  for (const [q, v] of Object.entries(answers || {})) {
+    const bucket = (counts[q] = counts[q] && typeof counts[q] === 'object' ? counts[q] : {});
+    for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (Number(bucket[one]) || 0) + 1;
+  }
+  if (row) db.prepare('UPDATE survey_tallies SET responses = ?, counts = ? WHERE id = ?').run((Number(row.responses) || 0) + 1, JSON.stringify(counts), row.id);
+  else db.prepare('INSERT INTO survey_tallies (uid, event_id, device, responses, counts) VALUES (?,?,?,?,?)').run(crypto.randomUUID(), eventId, device, 1, JSON.stringify(counts));
 }
 
 function getExitSurvey(patientId) {
@@ -3899,8 +3929,8 @@ function exportClinicBundle(eventId) {
     consents: kids('consents'),
     xrays: kids('xrays'),
     exit_surveys: kids('exit_surveys'),
-    // v0.0.24: the event's anonymous survey answers — no patient in them.
-    survey_answers: db.prepare('SELECT uid, version, language, answers, created_on, updated_at FROM survey_answers WHERE event_id = ?').all(evId),
+    // v0.0.24: the event's survey totals, a tally per laptop — no patient in them.
+    survey_tallies: db.prepare('SELECT uid, device, responses, counts, updated_at FROM survey_tallies WHERE event_id = ?').all(evId),
   };
 }
 
@@ -4046,12 +4076,18 @@ function importClinicBundle(actor, bundle) {
     restoreMany('consents', SYNC_COLS.consent, 'consents');
     restoreMany('xrays', SYNC_COLS.xray, 'xrays');
     restoreOnePerPatient('exit_surveys', SYNC_COLS.survey, 'exit_surveys');
-    // The anonymous answers, by uid: one already here is left as it is.
-    for (const r of (Array.isArray(b.survey_answers) ? b.survey_answers : [])) {
-      if (!r || !r.uid || db.prepare('SELECT 1 FROM survey_answers WHERE uid = ?').get(r.uid)) continue;
-      db.prepare('INSERT INTO survey_answers (uid, event_id, version, language, answers, created_on, updated_at) VALUES (?,?,?,?,?,?,?)')
-        .run(r.uid, eventId, String(r.version || 'mmw-exit-v2'), r.language || null,
-          typeof r.answers === 'string' ? r.answers : JSON.stringify(r.answers || {}), r.created_on || null, r.updated_at || null);
+    // The survey totals, by uid: a newer copy of a tally replaces an older
+    // one; one already here and as new is left as it is.
+    for (const r of (Array.isArray(b.survey_tallies) ? b.survey_tallies : [])) {
+      if (!r || !r.uid) continue;
+      const counts = typeof r.counts === 'string' ? r.counts : JSON.stringify(r.counts || {});
+      const here = db.prepare('SELECT id, updated_at FROM survey_tallies WHERE uid = ?').get(r.uid);
+      if (!here) {
+        db.prepare('INSERT INTO survey_tallies (uid, event_id, device, responses, counts, updated_at) VALUES (?,?,?,?,?,?)')
+          .run(r.uid, eventId, String(r.device || ''), Number(r.responses) || 0, counts, r.updated_at || null);
+      } else if (r.updated_at && (!here.updated_at || String(r.updated_at) > String(here.updated_at))) {
+        db.prepare('UPDATE survey_tallies SET responses = ?, counts = ?, updated_at = ? WHERE id = ?').run(Number(r.responses) || 0, counts, r.updated_at, here.id);
+      }
     }
     return eventId;
   });
@@ -4064,7 +4100,7 @@ function importClinicBundle(actor, bundle) {
   // deleted the whole clinic again — the restore silently undid itself.
   if (b.event && b.event.uid) uids.push(b.event.uid);
   for (const p of (b.patients || [])) if (p.uid) uids.push(p.uid);
-  for (const t of ['triage', 'treatments', 'consents', 'xrays', 'exit_surveys', 'survey_answers']) {
+  for (const t of ['triage', 'treatments', 'consents', 'xrays', 'exit_surveys', 'survey_tallies']) {
     for (const r of (b[t] || [])) if (r.uid) uids.push(r.uid);
   }
   if (uids.length) {
@@ -4144,7 +4180,7 @@ function foldCityCounts(map) {
   return map;
 }
 
-function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf, anonymousAnswers = []) {
+function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf, surveyTallies = []) {
   const bump = (o, k) => { const key = k || 'Not recorded'; o[key] = (o[key] || 0) + 1; };
   // An impossible age is 'Not recorded', not a band. A date of birth typed after
   // the visit gives a negative number, which would otherwise satisfy `a < 18`
@@ -4268,13 +4304,15 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
       for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (bucket[one] || 0) + 1;
     }
   }
-  // v0.0.24: the answers kept apart from the patients — counted the same way.
-  // A patient's row says the survey was answered; these say what was answered.
-  for (const raw of (Array.isArray(anonymousAnswers) ? anonymousAnswers : [])) {
-    const ans = typeof raw === 'string' ? safeJson(raw, {}) : (raw || {});
-    for (const [q, v] of Object.entries(ans)) {
+  // v0.0.24: the totals kept apart from the patients, a tally per laptop —
+  // added in. A patient's row says the survey was answered; the tallies say
+  // how many chose each answer.
+  for (const raw of (Array.isArray(surveyTallies) ? surveyTallies : [])) {
+    const counts = typeof raw === 'string' ? safeJson(raw, {}) : (raw || {});
+    for (const [q, vals] of Object.entries(counts || {})) {
+      if (!vals || typeof vals !== 'object') continue;
       const bucket = (survey.answers[q] = survey.answers[q] || {});
-      for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (bucket[one] || 0) + 1;
+      for (const [one, n] of Object.entries(vals)) { const k = Number(n); if (k > 0) bucket[one] = (bucket[one] || 0) + k; }
     }
   }
 
@@ -4311,7 +4349,7 @@ function buildEventSummary(eventId) {
     (p) => db.prepare('SELECT COUNT(*) AS n FROM xrays WHERE patient_id = ?').get(p.id).n,
     (p) => db.prepare('SELECT flags, xrays_taken FROM triage WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT answers, declined, registration_status, exit_status FROM exit_surveys WHERE patient_id = ?').get(p.id),
-    db.prepare('SELECT answers FROM survey_answers WHERE event_id = ?').all(evId).map((r) => r.answers),
+    db.prepare('SELECT counts FROM survey_tallies WHERE event_id = ?').all(evId).map((r) => r.counts),
   );
 }
 
@@ -4489,7 +4527,7 @@ function rebuildSummaryFromBundle(actor, bundle) {
   const patients = b.patients.map((p) => rowToPatient({ ...p }));
   const svBy = new Map((b.exit_surveys || []).map((r) => [r.patient_id, r]));
   const summary = summarize(b.event, patients, (p) => txBy.get(p.id), (p) => xrayCount[p.id] || 0, (p) => triBy.get(p.id), (p) => svBy.get(p.id),
-    (b.survey_answers || []).map((r) => r && r.answers));
+    (b.survey_tallies || []).map((r) => r && r.counts));
 
   // Attach to the matching local event if there is one; otherwise recreate the
   // event shell (name/date only) so the report has somewhere to live.
@@ -4605,12 +4643,12 @@ function exportEventJson(eventId) {
 /*  fields are hashed) so no write path had to change.                 */
 /* ================================================================== */
 
-const ENTITY_TABLE = { event: 'events', user: 'users', presence: 'user_sessions', report: 'event_reports', survey_answer: 'survey_answers', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys', inv_item: 'inventory_items', inv_move: 'inventory_moves' };
+const ENTITY_TABLE = { event: 'events', user: 'users', presence: 'user_sessions', report: 'event_reports', survey_tally: 'survey_tallies', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys', inv_item: 'inventory_items', inv_move: 'inventory_moves' };
 // 'user' is applied right after 'event' (a scoped staff account is parented to an
 // event, exactly like a patient) and before patients.
 // inv_item before inv_move: a movement hangs off an item, so the item has to
 // exist locally first or the movement is deferred for nothing.
-const APPLY_ORDER = ['event', 'user', 'presence', 'report', 'survey_answer', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
+const APPLY_ORDER = ['event', 'user', 'presence', 'report', 'survey_tally', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
 // Syncable payload columns per entity (fixed order -> stable content hash).
 const SYNC_COLS = {
   // cities: the check-in City list, so every station and the online form offer
@@ -4650,8 +4688,9 @@ const SYNC_COLS = {
   // The exit survey. Closed-choice answers only, so the blob carries no free
   // text a patient could be identified by.
   survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
-  // v0.0.24: one survey's answers, with no patient — event-scoped, like a report.
-  survey_answer: ['version', 'language', 'answers', 'created_on'],
+  // v0.0.24: a laptop's survey totals for an event, with no patient —
+  // event-scoped, like a report.
+  survey_tally: ['device', 'responses', 'counts'],
   // v0.0.24: an account signed in on a laptop (see notePresence).
   presence: ['user_uid', 'device', 'computer', 'signed_in_at', 'last_seen', 'signed_out_at'],
   // Supplies. An item is clinic-wide (no parent); a movement is event-scoped so
@@ -4956,13 +4995,13 @@ function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
         // has event_id NULL -> event_uid NULL (no parent, never deferred on apply).
         // A supply movement belongs to the clinic it happened at (NULL for stock
         // received back at base); a supply ITEM belongs to no event at all.
-        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report' || entity === 'survey_answer' || entity === 'inv_move')
+        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report' || entity === 'survey_tally' || entity === 'inv_move')
           ? uidOf('events', row.event_id) : null,
         // patient_uid is the generic parent slot on the wire. For a movement the
         // parent is its ITEM, not a patient — supplies never touch a chart.
         patient_uid: entity === 'inv_move'
           ? uidOf('inventory_items', row.item_id)
-          : ((entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'presence' && entity !== 'report' && entity !== 'survey_answer' && entity !== 'inv_item')
+          : ((entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'presence' && entity !== 'report' && entity !== 'survey_tally' && entity !== 'inv_item')
             ? uidOf('patients', row.patient_id) : null),
         deleted: 0, updated_at: updatedAt, data,
       });
@@ -5182,7 +5221,7 @@ function applyRemoteRows(remoteRows) {
     // A supply movement is the one row with TWO parents: the item it moves, and
     // the clinic it moved at. parentCol carries the item; this carries the event.
     let moveEventId;
-    if (entity === 'patient' || entity === 'report' || entity === 'survey_answer') { parentCol = 'event_id'; parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
+    if (entity === 'patient' || entity === 'report' || entity === 'survey_tally') { parentCol = 'event_id'; parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
     // A supply item stands alone — clinic property, not part of any event.
     else if (entity === 'inv_item' || entity === 'presence') { parentCol = null; parentId = null; }
     else if (entity === 'inv_move') {

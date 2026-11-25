@@ -226,7 +226,7 @@ export function renderCheckout(ctx, params = {}) {
                 el('div', { class: `pill ${st.pill}` }, [el('span', { class: 'pill-dot' }), st.label]),
                 // v0.0.24: answered anonymously, it cannot be reopened —
                 // its answers are not on this record.
-                st.anonymous ? el('p', { class: 'view-sub survey-anon-note', style: 'margin-top:6px' }, [icon('lock', { size: 13 }), ' The answers were saved anonymously, apart from this record, so they cannot be opened or changed.'])
+                st.anonymous ? el('p', { class: 'view-sub survey-anon-note', style: 'margin-top:6px' }, [icon('lock', { size: 13 }), ' The answers were added to the clinic\u2019s totals, apart from this record, so they cannot be opened or changed.'])
                   : el('button', {
                     class: 'btn btn--block ' + (surveyDone ? 'btn--ghost' : 'btn--primary'),
                     onClick: () => takeSurvey(p),
@@ -234,7 +234,7 @@ export function renderCheckout(ctx, params = {}) {
                 // The count comes from the survey itself, so this line cannot
                 // go stale again the way "12 questions" did when the survey
                 // moved back to check-out in one piece.
-                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, [`${SURVEY_QUESTIONS.length} questions for MMW\u2019s grant reporting. It is anonymous: the answers are saved without the patient\u2019s name or record. The patient can decline inside.`]),
+                surveyDone ? null : el('p', { class: 'view-sub', style: 'margin-top:6px' }, [`${SURVEY_QUESTIONS.length} questions for MMW\u2019s grant reporting. It is anonymous: the answers are only added to the clinic\u2019s totals, never saved with the patient\u2019s name or record. The patient can decline inside.`]),
               ]),
               aftercareBlock(p, acParts),
               // Optional artefacts, grouped and de-emphasised so they read as

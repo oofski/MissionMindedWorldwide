@@ -38,7 +38,7 @@ const CLEANING_OPTS = [
 // left out), so the floor lead can send patients to the right chair.
 export function needsLabel(n) {
   if (!n) return '';
-  const parts = [n.filling ? 'Filling' : null, n.extraction ? 'Extraction' : null].filter(Boolean);
+  const parts = [n.filling ? 'Filling' : null, n.extraction ? 'Extraction' : null, n.cleaning ? 'Cleaning' : null].filter(Boolean);
   if (!parts.length && n.other) parts.push('Other procedure');
   return parts.join(' + ');
 }
@@ -465,19 +465,20 @@ export function renderProvider(ctx, params = {}) {
         ? `Filling #${f.tooth}${surfaceList(f.surfaces).length ? ' ' + surfaceList(f.surfaces).join('') : ''}`
         : `Extraction #${f.tooth}${Array.isArray(f.types) && f.types.length ? ' (' + f.types.map((k) => (EXTRACTION_TYPES.find(([key]) => key === k) || [k, k])[1].toLowerCase()).join(', ') + ')' : ''}`;
       const when = (f) => [f.from, f.from_at ? new Date(f.from_at).toLocaleDateString() : ''].filter(Boolean).join(', ');
+      const why = (f) => (f.unfinished ? `planned for that day at ${when(f)}, not done — the patient left before a chair` : `planned at ${when(f)}`);
       carrySlot.replaceChildren(el('div', { class: 'card carry-card' }, [
         el('div', { class: 'card-title' }, [icon('calendar', { size: 15 }), `Still to do from an earlier visit (${items.length})`]),
-        el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Marked "Future visit" at an earlier clinic and not done since.']),
+        el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Marked "Future visit" at an earlier clinic, or planned and not done because the patient left before a chair — and not done since.']),
         el('div', { class: 'carry-rows' }, items.map((f) => el('div', { class: 'carry-row', 'data-carry': `${f.kind}:${f.tooth}` }, [
           el('strong', {}, [describe(f)]),
-          when(f) ? el('span', { class: 'subtle small' }, [`planned at ${when(f)}`]) : null,
+          when(f) ? el('span', { class: 'subtle small' }, [why(f)]) : null,
           f.note ? el('span', { class: 'tx-note' }, [f.note]) : null,
           locked ? null : softBtn('plus', 'Add to this visit', () => carryIn(f)),
         ]))),
       ]));
     }
     function carryIn(f) {
-      const { kind, from, from_at, status, ...row } = f;
+      const { kind, from, from_at, status, unfinished, ...row } = f;
       const rowsEl = kind === 'filling' ? fillingRows : extractRows;
       // The empty row a new chart opens with is filled in, not left above it.
       const last = rowsEl.lastElementChild;
@@ -1126,8 +1127,10 @@ export function renderProvider(ctx, params = {}) {
     /* ---------- helpers to collect + mark ---------- */
     function computeMarksLive() {
       const m = {};
-      Array.from(fillingRows.children).forEach((r) => { const f = r._get(); if (f.tooth) m[f.tooth] = 'filling'; });
-      Array.from(extractRows.children).forEach((r) => { const x = r._get(); if (x.tooth) m[x.tooth] = 'extraction'; });
+      // v0.0.24: only this visit's work is drawn on the mouth — a tooth left
+      // for a future visit is listed below, not shown as today's.
+      Array.from(fillingRows.children).forEach((r) => { const f = r._get(); if (f.tooth && !isFutureRow(f)) m[f.tooth] = 'filling'; });
+      Array.from(extractRows.children).forEach((r) => { const x = r._get(); if (x.tooth && !isFutureRow(x)) m[x.tooth] = 'extraction'; });
       (cleanState.teeth || []).forEach((id) => { if (!m[id]) m[id] = 'cleaning'; });
       return m;
     }
@@ -1279,7 +1282,7 @@ export function renderProvider(ctx, params = {}) {
       // chair (Filling / Extraction), so the dentist decides here — there is
       // no "undecided". Work marked for a future visit is not this visit's.
       if (mode === 'waiting' && !plannedForThisVisit(payload)) {
-        toast('Add the treatment for this visit before moving the patient: use Add filling or Add extraction (or Other / restorative work). Rows marked "Future visit" do not count.', 'error');
+        toast('Add the treatment for this visit before moving the patient: use Add filling or Add extraction (or a cleaning, Other or restorative work). Rows marked "Future visit" do not count.', 'error');
         const firstTooth = (fillingRows.firstElementChild && fillingRows.firstElementChild._tooth) || (extractRows.firstElementChild && extractRows.firstElementChild._tooth);
         if (firstTooth && firstTooth.focus) firstTooth.focus();
         return;
@@ -1676,6 +1679,8 @@ export function plannedForThisVisit(payload) {
   const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
   if (thisVisitRows(payload.fillings).some(has) || thisVisitRows(payload.extractions).some(has)) return true;
   if (String(payload.other_procedures || '').trim()) return true;
+  // A cleaning ticked on this chart — the data layer's rule (didCleaning).
+  if (Object.entries(payload.cleaning || {}).some(([k, v]) => v && k !== 'quad_detail' && k !== 'teeth' && !(Array.isArray(v) && !v.length))) return true;
   return Object.values(payload.restorative || {}).some((v) => v && typeof v === 'object' && v.on);
 }
 // v0.0.24: This visit | Future visit, on each filling and extraction row. A

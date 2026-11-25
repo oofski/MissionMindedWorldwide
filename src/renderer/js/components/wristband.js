@@ -59,7 +59,9 @@ export function moduleFor(code, widthMm, dpi = 203) {
     if (m < 0.25 && n < maxDots) break;
     if (modules * m <= widthMm) return m;
   }
-  return Math.max(0.25, widthMm / modules);
+  // Too small for a quarter-millimetre bar: shrunk to fit rather than cut
+  // off (which never scans) — the Wristband labels card warns of it.
+  return widthMm / modules;
 }
 // How the band is laid out on a label: a long band as one row, a small label
 // stacked tight, anything bigger as the screen shows it.

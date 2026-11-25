@@ -124,10 +124,17 @@ function makeFakeD1() {
           }
           return { results };
         }
-        // v1.9.0: an event's patient rows, for its time slots' counts.
-        if (/^SELECT data FROM sync_rows WHERE entity = 'patient' AND event_uid = \? AND deleted = 0$/.test(s)) {
+        // v1.9.0: how many of an event's patients chose each time slot.
+        if (/^SELECT CASE WHEN json_valid\(data\) AND json_valid\(json_extract\(data, '\$\.demographics'\)\) THEN json_extract\(json_extract\(data, '\$\.demographics'\), '\$\.prereg_slot'\) END AS slot, COUNT\(\*\) AS n FROM sync_rows WHERE event_uid = \? AND \+entity = 'patient' AND deleted = 0 GROUP BY slot$/.test(s)) {
           const ev = this._binds[0];
-          return { results: Array.from(store.values()).filter((r) => r.entity === 'patient' && r.event_uid === ev && !r.deleted).map((r) => ({ data: r.data })) };
+          const by = new Map();
+          for (const r of store.values()) {
+            if (r.entity !== 'patient' || r.event_uid !== ev || r.deleted) continue;
+            let slot = null;
+            try { const d = JSON.parse(r.data); const demo = typeof d.demographics === 'string' ? JSON.parse(d.demographics) : d.demographics; slot = demo && demo.prereg_slot != null ? demo.prereg_slot : null; } catch (_) { slot = null; }
+            by.set(slot, (by.get(slot) || 0) + 1);
+          }
+          return { results: Array.from(by, ([slot, n]) => ({ slot, n })) };
         }
         // Pull, v1.8.0: the next rows' sizes, then the rows up to a seq.
         const sized = /^SELECT seq, (?:octet_)?length\(data\) AS n FROM sync_rows WHERE seq > \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
@@ -1405,9 +1412,9 @@ async function main() {
     const envS = { CLINIC_KEY, DB: await makeD1() };
     const slotsJson = JSON.stringify({ start: '08:00', end: '12:00', per_hour: 2 });
     await call(envS, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [
-      { entity: 'event', uid: 'evt-slots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Slot Clinic', active: 1, start_date: '2026-12-05', end_date: '', location: 'Sandy, OR', slots: slotsJson } },
-      { entity: 'event', uid: 'evt-noslots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Walk-in Clinic', active: 1, start_date: '2026-12-06', location: 'Sandy, OR', slots: null } },
-      { entity: 'event', uid: 'evt-twodays', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Weekend Clinic', active: 1, start_date: '2026-12-05', end_date: '2026-12-06', location: 'Sandy, OR', slots: JSON.stringify({ start: '09:30', end: '11:00', per_hour: 5 }) } },
+      { entity: 'event', uid: 'evt-slots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Slot Clinic', active: 1, start_date: '2099-12-05', end_date: '', location: 'Sandy, OR', slots: slotsJson } },
+      { entity: 'event', uid: 'evt-noslots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Walk-in Clinic', active: 1, start_date: '2099-12-06', location: 'Sandy, OR', slots: null } },
+      { entity: 'event', uid: 'evt-twodays', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Weekend Clinic', active: 1, start_date: '2099-12-05', end_date: '2099-12-06', location: 'Sandy, OR', slots: JSON.stringify({ start: '09:30', end: '11:00', per_hour: 5 }) } },
     ] } });
     const getS = async (uid, q = '') => {
       const res = await activeWorker.fetch(new Request('https://sync.example.com/checkin/' + uid + q, { method: 'GET' }), envS, {});
@@ -1420,30 +1427,34 @@ async function main() {
     const f2d = await getS('evt-twodays');
     check('v1.9.0: a two-day event offers each day\'s hours, from the first arrival, one an hour',
       (f2d.text.match(/name="prereg_slot"/g) || []).length === 4 && /Sat Dec 5 · 9:30 AM/.test(f2d.text) && /Sun Dec 6 · 10:30 AM/.test(f2d.text));
+    await call(envS, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [
+      { entity: 'event', uid: 'evt-past', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Past Clinic', active: 1, start_date: '2020-03-07', location: 'Sandy, OR', slots: slotsJson } }] } });
+    const fPast = await getS('evt-past');
+    check('v1.9.0: hours on a day already over are not offered', fPast.status === 200 && !/prereg_slot"/.test(fPast.text));
     const fNo = await getS('evt-noslots');
     check('v1.9.0: an event without time slots asks no arrival time', fNo.status === 200 && !/When will you arrive/.test(fNo.text) && !/prereg_slot"/.test(fNo.text));
     const sub = (uid, slot, n) => call(envS, 'POST', '/checkin/' + uid, { body: { ...REQ, first_name: 'Slot', last_name: 'P' + n, dob: '1990-01-01', gender: 'female',
       city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'Slot P', signature_png: 'data:image/png;base64,AAAA',
       ...(slot === undefined ? {} : { prereg_slot: slot }) } });
     const none = await sub('evt-slots', undefined, 0);
-    const bogus = await sub('evt-slots', '2026-12-05T13:00', 0);
-    const a = await sub('evt-slots', '2026-12-05T09:00', 1);
-    const b = await sub('evt-slots', '2026-12-05T09:00', 2);
-    const c = await sub('evt-slots', '2026-12-05T09:00', 3);
-    const d = await sub('evt-slots', '2026-12-05T10:00', 4);
-    const walkIn = await sub('evt-noslots', '2026-12-05T09:00', 5);
+    const bogus = await sub('evt-slots', '2099-12-05T13:00', 0);
+    const a = await sub('evt-slots', '2099-12-05T09:00', 1);
+    const b = await sub('evt-slots', '2099-12-05T09:00', 2);
+    const c = await sub('evt-slots', '2099-12-05T09:00', 3);
+    const d = await sub('evt-slots', '2099-12-05T10:00', 4);
+    const walkIn = await sub('evt-noslots', '2099-12-05T09:00', 5);
     const rowsOf = (uid) => Array.from(envS.DB._store.values()).filter((r) => r.entity === 'patient' && r.event_uid === uid);
     const slotOf = (r) => JSON.parse(JSON.parse(r.data).demographics).prereg_slot;
     check('v1.9.0: no arrival time, or one the event does not have, is refused; the time chosen is kept with the patient',
       none.status === 400 && /choose the time you will arrive/.test(none.data.error) && bogus.status === 400
-      && a.status === 200 && b.status === 200 && d.status === 200 && rowsOf('evt-slots').filter((r) => slotOf(r) === '2026-12-05T09:00').length === 2);
+      && a.status === 200 && b.status === 200 && d.status === 200 && rowsOf('evt-slots').filter((r) => slotOf(r) === '2099-12-05T09:00').length === 2);
     check('v1.9.0: an hour with its places taken is refused, and the patient asked to choose another',
       c.status === 409 && /just filled up/.test(c.data.error) && rowsOf('evt-slots').length === 3);
     check('v1.9.0: on an event without time slots a time posted is not kept', walkIn.status === 200 && slotOf(rowsOf('evt-noslots')[0]) === undefined);
     const f2 = await getS('evt-slots', '?lang=es');
     check('v1.9.0: the form shows a full hour as full, and it cannot be chosen — in Spanish too',
-      /value="2026-12-05T09:00" disabled>sáb 5 dic · 9:00 <small>Lleno<\/small>/.test(f2.text) && /¿A qué hora llegará\?/.test(f2.text)
-      && /value="2026-12-05T10:00">sáb 5 dic · 10:00 <small>quedan 1<\/small>/.test(f2.text));
+      /value="2099-12-05T09:00" disabled>sáb 5 dic · 9:00 <small>Lleno<\/small>/.test(f2.text) && /¿A qué hora llegará\?/.test(f2.text)
+      && /value="2099-12-05T10:00">sáb 5 dic · 10:00 <small>quedan 1<\/small>/.test(f2.text));
   }
 
 }
@@ -1575,11 +1586,22 @@ async function hubChecks() {
     check('v0.0.24 clinic network hub: the host\'s Cloud tab counts the wrong tries at once (the laptop says its check failed)', hubMod.status().joinFailures === hubMod.JOIN_TRIES_PER_ADDRESS);
     hubMod._resetJoinLimits();
     check('v0.0.24 clinic network hub: and once that is over, the right key joins', (await lan.pairWithCode(base, realCode)).key === remade);
-    // Refused the password many times from one address: refused unchecked.
+    // Refused the password many times from one address: with a password the
+    // app made (far too long to guess) nothing is held back — a laptop left
+    // syncing with an old one must still get in with the new one — but a
+    // password chosen by hand is refused unchecked from that address.
     const fakeReq = (a) => ({ socket: { remoteAddress: a } });
     for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
-    check('v0.0.24 clinic network hub: an address refused the password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check; another address, and the host itself, are not',
-      hubMod._authLimited(fakeReq('::ffff:192.168.1.77')) === true && hubMod._authLimited(fakeReq('192.168.1.78')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
+    const madeLimited = hubMod._authLimited(fakeReq('192.168.1.77'));
+    hubMod.setKey('hand chosen password 1');
+    for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
+    check('v0.0.24 clinic network hub: an address refused a hand-chosen password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check (another address, and the host itself, are not) — and one the app made is never held back',
+      madeLimited === false && hubMod._authLimited(fakeReq('::ffff:192.168.1.77')) === true && hubMod._authLimited(fakeReq('192.168.1.78')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
+    const codeBefore = hubMod.status().joinCode;
+    const retired = hubMod.retireHandChosenKey();
+    check('v0.0.24 clinic network hub: a hand-chosen password is replaced by a long one the app makes (the clinic key is kept), and its limits cleared',
+      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(retired) && hubMod.identity().key === retired && hubMod.status().joinCode === codeBefore
+      && hubMod._authLimited(fakeReq('192.168.1.77')) === false && hubMod.retireHandChosenKey() === '');
     await hubMod.stop();
     await hubMod.erase();
   } finally {
@@ -1603,8 +1625,12 @@ async function hubChecks() {
       f.close();
       hubMod.init(dir2);
       const c = hubMod.status().joinCode;
-      check(`v0.0.24 clinic network hub: a host from 0.0.23 with a network password ${label} is given its clinic key (${label === 'chosen by hand' ? 'that password' : 'a new six-digit one'}), and keeps its password`,
-        expect(c) && hubMod.identity().key === key && hubMod.status().joinCode === c);
+      // Started by 0.0.24 (main.js resumeHosting): a hand-chosen password is
+      // retired, and the clinic types the key it already knows.
+      const retiredOld = hubMod.retireHandChosenKey();
+      check(`v0.0.24 clinic network hub: a host from 0.0.23 with a network password ${label} is given its clinic key (${label === 'chosen by hand' ? 'that password, and a new long password' : 'a new six-digit one, keeping its password'})`,
+        expect(c) && hubMod.status().joinCode === c
+        && (label === 'chosen by hand' ? /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(retiredOld) && hubMod.identity().key === retiredOld : retiredOld === '' && hubMod.identity().key === key));
     } finally {
       hubMod.shutdown();
       rmSync(dir2, { recursive: true, force: true });

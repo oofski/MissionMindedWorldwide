@@ -25,6 +25,32 @@ const signInAdmin = () => db.login(SETUP_ADMIN.username, SETUP_ADMIN.password);
 // A second handle on the same file, for the handful of checks that have to
 // forge history (back-date a visit) or read a column the API does not expose.
 const rawDb = () => new (require('better-sqlite3'))(DB_PATH);
+// v0.0.24: the exit survey's totals across every laptop's tally, and what a
+// save added to them — the answers are never stored one patient at a time.
+function tallyNow() {
+  const r = rawDb();
+  try {
+    const out = { responses: 0, counts: {} };
+    for (const row of r.prepare('SELECT responses, counts FROM survey_tallies').all()) {
+      out.responses += Number(row.responses) || 0;
+      for (const [q, vals] of Object.entries(JSON.parse(row.counts || '{}'))) {
+        out.counts[q] = out.counts[q] || {};
+        for (const [v, n] of Object.entries(vals)) out.counts[q][v] = (out.counts[q][v] || 0) + n;
+      }
+    }
+    return out;
+  } finally { r.close(); }
+}
+function tallyDiff(a, b) {
+  const out = {};
+  for (const [q, vals] of Object.entries(b.counts)) {
+    for (const [v, n] of Object.entries(vals)) {
+      const d = n - (((a.counts[q] || {})[v]) || 0);
+      if (d) { out[q] = out[q] || {}; out[q][v] = d; }
+    }
+  }
+  return out;
+}
 
 // ---- jsdom env ----
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost/', pretendToBeVisual: true });
@@ -2600,6 +2626,7 @@ async function main() {
 
     currentUser = signInAdmin();
     const sp1 = db.createPatient(currentUser, { first_name: 'Survey', last_name: 'One', language: 'es', demographics: {}, medical_history: {}, dental_history: {} });
+    const tallySnapSv = tallyNow();
     const saved = db.saveExitSurvey(currentUser, sp1.id, {
       version: sp.SURVEY_VERSION, language: 'es',
       answers: {
@@ -2611,14 +2638,14 @@ async function main() {
         totally_unknown_question: 'x',
       },
     });
-    // v0.0.24: the answers are kept apart from the patient (survey_answers).
-    const anonRowsSv = () => { const r = rawDb(); try { return r.prepare('SELECT answers FROM survey_answers ORDER BY id').all().map((x) => JSON.parse(x.answers)); } finally { r.close(); } };
-    const stored = anonRowsSv().pop() || {};
-    log(stored.first_time === 'yes' && stored.rate_care === '5' && saved.anonymous === true && Object.keys(saved.answers).length === 0,
+    // v0.0.24: the answers are added to the clinic's totals (survey_tallies),
+    // apart from the patient. What this save added is the difference.
+    const stored = tallyDiff(tallySnapSv, tallyNow());
+    log((stored.first_time || {}).yes === 1 && (stored.rate_care || {})['5'] === 1 && saved.anonymous === true && Object.keys(saved.answers).length === 0,
       'MMW survey: answers are stored — since v0.0.24 apart from the patient, whose record keeps only that the survey was answered');
-    log(JSON.stringify(stored.assistance) === JSON.stringify(['snap', 'wic']),
+    log(JSON.stringify(stored.assistance) === JSON.stringify({ snap: 1, wic: 1 }),
       'MMW survey: a repeated tick on a select-all question is only counted once');
-    log(JSON.stringify(stored.access_barriers) === JSON.stringify(['cost']),
+    log(JSON.stringify(stored.access_barriers) === JSON.stringify({ cost: 1 }),
       'MMW survey: an option the question does not offer is dropped');
     log(stored.employment === undefined && stored.totally_unknown_question === undefined && saved.answers.employment === undefined,
       'MMW survey: unknown questions and impossible values never reach the database');
@@ -2635,10 +2662,10 @@ async function main() {
 
     // Answering again would count a household twice in a grant return — and
     // since v0.0.24 the first answers cannot be found to replace. Refused.
-    const nAnon = anonRowsSv().length;
+    const nAnon = tallyNow().responses;
     let againErr = '';
     try { db.saveExitSurvey(currentUser, sp1.id, { answers: { first_time: 'no' } }); } catch (e) { againErr = e.message; }
-    log(/answered the survey already/.test(againErr) && anonRowsSv().length === nAnon && db.getExitSurvey(sp1.id).exit_status === 'completed',
+    log(/answered the survey already/.test(againErr) && tallyNow().responses === nAnon && db.getExitSurvey(sp1.id).exit_status === 'completed',
       'MMW survey: answering again is refused rather than adding a second response (v0.0.24: the first is anonymous)');
 
     // The aggregate: counts only, and nothing that belongs to a person.
@@ -5346,6 +5373,39 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       wc2.querySelector('[data-need-filter="all"]').click();
       await settle(16);
       log(Array.from(cardTitled(qv, 'Treatment waiting').querySelectorAll('tbody tr')).length === wRows.length, 'v0.0.24: All shows everyone again');
+
+      // After review: a cleaning at the chair counts; a tooth left for later
+      // is not drawn as today's; a visit the patient left before a chair
+      // leaves its planned work still to do.
+      log(provM.needsLabel({ cleaning: true }) === 'Cleaning' && provM.needsLabel({ filling: true, cleaning: true }) === 'Filling + Cleaning'
+        && provM.plannedForThisVisit({ fillings: [], extractions: [], cleaning: { sealant: true } }) === true
+        && provM.plannedForThisVisit({ fillings: [], extractions: [], cleaning: { teeth: ['3'], quad_detail: 'UR' } }) === false,
+        'v0.0.24: a cleaning ticked on the dentist\'s chart is treatment for a chair (Cleaning) — the teeth tapped and the quadrant note are not');
+      const cl = mkB('Cleo', 'Cleanonly');
+      db.saveTreatment(currentUser, cl.id, { cleaning: { quad_deep_scaling: true, quad_detail: 'UR' } }, 'waiting');
+      log(db.getPatient(cl.id).status === 'treatment_waiting' && (db.listPatients({}).find((p) => p.id === cl.id) || {}).needs.cleaning === true,
+        'v0.0.24: a patient needing only scaling at a dental chair can wait for one, listed as Cleaning');
+      const provMarks = await view('provider.js', 'renderProvider', { id: next.id });
+      const toothEl = (n) => Array.from(provMarks.querySelectorAll('.odo-tooth')).find((g) => g.getAttribute('data-id') === String(n) || g.dataset.id === String(n));
+      const t5 = toothEl(5), t3 = toothEl(3);
+      log(!!t3 && t3.classList.contains('mark-filling') && !!t5 && !t5.classList.contains('mark-filling'),
+        'v0.0.24: the mouth shows this visit\'s filling, not the one left for a future visit');
+      provMarks.remove();
+      const evLeft = db.createEvent(currentUser, { name: 'Left Early Clinic', location: 'Sandy' });
+      db.setActiveEvent(currentUser, evLeft.id);
+      const left = mkB('Lou', 'Leftearly');
+      db.saveTreatment(currentUser, left.id, { extractions: [{ tooth: '9', types: ['simple'] }] }, 'waiting');
+      db.setActiveEvent(currentUser, evB.id);
+      const leftNext = mkB('Lou', 'Leftearly');
+      const hLeft = db.patientHistory(leftNext.id);
+      const openLeft = provM.stillToDo(hLeft);
+      log(hLeft.length === 1 && hLeft[0].done.length === 0 && openLeft.length === 1 && openLeft[0].tooth === '9' && openLeft[0].unfinished === true,
+        'v0.0.24: a visit the patient left before a chair did not do its extraction — the next visit offers it as still to do');
+      const provLeft = await view('provider.js', 'renderProvider', { id: leftNext.id });
+      const carryLeft = cardTitled(provLeft, 'Still to do from an earlier visit');
+      log(!!carryLeft && /Extraction #9/.test(carryLeft.textContent) && /not done — the patient left before a chair/.test(carryLeft.textContent),
+        'v0.0.24: and says why: planned for that day, not done');
+      provLeft.remove();
       db.setActiveEvent(currentUser, evB.id);
     }
 
@@ -5355,16 +5415,17 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       db.setActiveEvent(currentUser, evS.id);
       const rawS = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).all(...a); } finally { r.close(); } };
       const rawRun = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).run(...a); } finally { r.close(); } };
+      const tallyOf = (evId) => rawS('SELECT * FROM survey_tallies WHERE event_id = ?', evId).map((r) => ({ ...r, counts: JSON.parse(r.counts) }));
       const sp = mkB('Sara', 'Survey');
       const before = db.buildEventSummary(evS.id).survey;
       db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', language: 'es', answers: { first_time: 'yes', assistance: ['snap', 'wic'] }, declined: false, stage: 'exit' });
       const svS = db.getPatient(sp.id).exit_survey;
-      const anonRows = rawS('SELECT * FROM survey_answers WHERE event_id = ?', evS.id);
-      const cols = rawS('PRAGMA table_info(survey_answers)').map((c) => c.name);
+      const t1 = tallyOf(evS.id);
+      const cols = rawS('PRAGMA table_info(survey_tallies)').map((c) => c.name);
       log(svS.exit_status === 'completed' && svS.anonymous === true && JSON.stringify(svS.answers) === '{}'
-        && anonRows.length === 1 && JSON.parse(anonRows[0].answers).first_time === 'yes' && /^\d{4}-\d{2}-\d{2}$/.test(anonRows[0].created_on)
-        && !cols.some((c) => /patient|name|by/.test(c)),
-        'v0.0.24: a finished survey leaves only "answered" on the patient\'s record; the answers are a separate row for the clinic, with no patient, name or time of day');
+        && t1.length === 1 && t1[0].responses === 1 && t1[0].counts.first_time.yes === 1 && t1[0].counts.assistance.snap === 1
+        && !cols.some((c) => /patient|name|_by|language|created/.test(c)),
+        'v0.0.24: a finished survey leaves only "answered" on the patient\'s record; its answers are added to this laptop\'s totals for the clinic — no patient, name, language or time in them');
       const after = db.buildEventSummary(evS.id).survey;
       log(after.responses === before.responses + 1 && after.answers.first_time.yes === 1 && after.answers.assistance.snap === 1 && after.answers.assistance.wic === 1,
         'v0.0.24: the report counts the anonymous answers exactly as before');
@@ -5372,39 +5433,48 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       try { db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', answers: { first_time: 'no' }, declined: false, stage: 'exit' }); } catch (e) { again = e.message; }
       let declineAfter = '';
       try { db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', declined: true, stage: 'exit' }); } catch (e) { declineAfter = e.message; }
-      log(/answered the survey already/.test(again) && /saved anonymously/.test(declineAfter)
-        && rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 1,
+      log(/answered the survey already/.test(again) && /clinic's totals/.test(declineAfter) && tallyOf(evS.id)[0].responses === 1,
         'v0.0.24: an anonymous survey cannot be taken again or declined afterwards — the patient would be counted twice, and their answers cannot be found');
       const dp = mkB('Dex', 'Decliner');
       db.saveExitSurvey(currentUser, dp.id, { version: 'mmw-exit-v2', declined: true, stage: 'exit' });
-      log(db.getPatient(dp.id).exit_survey.exit_status === 'declined' && rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 1,
-        'v0.0.24: a declined survey stores no answers anywhere');
+      log(db.getPatient(dp.id).exit_survey.exit_status === 'declined' && tallyOf(evS.id)[0].responses === 1,
+        'v0.0.24: a declined survey adds nothing to the totals');
       // An answer from before 0.0.24, kept on the patient's row: shown to check,
-      // and moved to an anonymous row when the survey is finished.
+      // and moved into the totals when the survey is finished.
       const lp = mkB('Lena', 'Legacysurvey');
       rawRun("INSERT INTO exit_surveys (patient_id, version, language, answers, declined, exit_status, completed_at, created_at) VALUES (?, 'mmw-exit-v2', 'en', ?, 0, 'completed', ?, ?)",
         lp.id, JSON.stringify({ first_time: 'no' }), new Date().toISOString(), new Date().toISOString());
       const legacySum = db.buildEventSummary(evS.id).survey;
       db.saveExitSurvey(currentUser, lp.id, { version: 'mmw-exit-v2', answers: { first_time: 'not_sure' }, declined: false, stage: 'exit' });
       const legacyAfter = db.buildEventSummary(evS.id).survey;
+      const t2 = tallyOf(evS.id);
       log(legacySum.answers.first_time.no === 1 && JSON.stringify(db.getPatient(lp.id).exit_survey.answers) === '{}' && db.getPatient(lp.id).exit_survey.anonymous === true
         && !legacyAfter.answers.first_time.no && legacyAfter.answers.first_time.not_sure === 1 && legacyAfter.responses === legacySum.responses,
         'v0.0.24: a survey answered before 0.0.24 still counts; corrected now, its answers move off the patient\'s record — counted once');
-      // Sync: the row travels with its clinic and no patient.
+      log(t2.length === 1 && t2[0].responses === 2 && t2[0].counts.first_time.yes === 1 && t2[0].counts.first_time.not_sure === 1,
+        'v0.0.24: a second patient\'s answers join the same totals — no row holds one patient\'s answers on its own, to be matched to the time they checked out');
+      // Sync: the tally travels with its clinic and no patient.
       // (collectSyncRows hands out the uids, the event's included.)
-      const pushedAll = db.collectSyncRows(5000).rows.filter((r) => r.entity === 'survey_answer');
+      const pushedAll = db.collectSyncRows(5000).rows.filter((r) => r.entity === 'survey_tally');
       const evUid = rawS('SELECT uid FROM events WHERE id = ?', evS.id)[0].uid;
       const pushed = pushedAll.filter((r) => r.event_uid === evUid);
-      log(pushed.length === 2 && pushedAll.every((r) => !!r.event_uid && r.patient_uid === null && !('patient_id' in r.data) && Object.keys(r.data).join() === 'version,language,answers,created_on'),
-        'v0.0.24: the anonymous answers sync with their clinic event and no patient'
-          + ` (${pushed.length} of ${pushedAll.length}; here ${rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n}; ${JSON.stringify(pushedAll.slice(0, 2)).slice(0, 300)})`);
-      const res = db.applyRemoteRows([{ entity: 'survey_answer', uid: 'peer-survey-1', event_uid: evUid, patient_uid: null, deleted: 0, updated_at: new Date().toISOString() + '@peer',
-        data: { version: 'mmw-exit-v2', language: 'en', answers: JSON.stringify({ first_time: 'yes' }), created_on: '2026-11-20' } }]);
-      log(res.applied === 1 && db.buildEventSummary(evS.id).survey.answers.first_time.yes === 2, 'v0.0.24: and another laptop\'s answers are counted here'
-        + ` (${JSON.stringify(res).slice(0, 200)}; ${JSON.stringify(db.buildEventSummary(evS.id).survey.answers.first_time)})`);
+      log(pushed.length === 1 && pushedAll.every((r) => !!r.event_uid && r.patient_uid === null && Object.keys(r.data).join() === 'device,responses,counts')
+        && pushed[0].data.responses === 2,
+        'v0.0.24: the totals sync with their clinic event and no patient' + ` (${pushed.length} of ${pushedAll.length})`);
+      const res = db.applyRemoteRows([{ entity: 'survey_tally', uid: 'peer-tally-1', event_uid: evUid, patient_uid: null, deleted: 0, updated_at: new Date().toISOString() + '@peer',
+        data: { device: 'peer-laptop', responses: 3, counts: JSON.stringify({ first_time: { yes: 2, no: 1 } }) } }]);
+      const peerSum = db.buildEventSummary(evS.id).survey;
+      log(res.applied === 1 && peerSum.answers.first_time.yes === 3 && peerSum.answers.first_time.no === 1 && tallyOf(evS.id).length === 2,
+        'v0.0.24: another laptop\'s totals are added to this one\'s' + ` (${JSON.stringify(peerSum.answers.first_time)})`);
+      // This laptop's next survey adds to its own tally, never the other laptop's.
+      const sp3 = mkB('Sol', 'Third');
+      db.saveExitSurvey(currentUser, sp3.id, { version: 'mmw-exit-v2', answers: { first_time: 'yes' }, declined: false, stage: 'exit' });
+      const peerRow = tallyOf(evS.id).find((r) => r.uid === 'peer-tally-1');
+      log(peerRow.responses === 3 && peerRow.counts.first_time.yes === 2 && db.buildEventSummary(evS.id).survey.answers.first_time.yes === 4,
+        'v0.0.24: and this laptop adds only to its own totals');
       const bundle = db.exportClinicBundle(evS.id);
-      log(Array.isArray(bundle.survey_answers) && bundle.survey_answers.length === 3 && bundle.survey_answers.every((r) => !('patient_id' in r) && !('event_id' in r)),
-        'v0.0.24: the USB clinic backup carries the anonymous answers, with no patient in them' + ` (${(bundle.survey_answers || []).length})`);
+      log(Array.isArray(bundle.survey_tallies) && bundle.survey_tallies.length === 2 && bundle.survey_tallies.every((r) => !('patient_id' in r) && !('event_id' in r)),
+        'v0.0.24: the USB clinic backup carries the totals, with no patient in them' + ` (${(bundle.survey_tallies || []).length})`);
       // On screen: said first, in both languages.
       const { openExitSurvey, surveyStatus } = await import('../src/renderer/js/components/exitSurvey.js');
       const pr = openExitSurvey({ id: dp.id }, { lang: 'es' });
@@ -5419,15 +5489,15 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       log(stA.key === 'done' && stA.label === 'Completed · answers kept anonymously' && stA.anonymous === true,
         'v0.0.24: check-out says the survey was completed with its answers kept anonymously');
       const coS = await view('checkout.js', 'renderCheckout', { id: sp.id });
-      log(/saved anonymously, apart from this record, so they cannot be opened or changed/.test(coS.textContent) && !btnIn(coS, /review or change answers/),
+      log(/added to the clinic’s totals, apart from this record, so they cannot be opened or changed/.test(coS.textContent) && !btnIn(coS, /review or change answers/),
         'v0.0.24: and offers no way to reopen it');
       // Deleting the clinic takes its answers, everywhere.
-      const ansUids = rawS('SELECT uid FROM survey_answers WHERE event_id = ?', evS.id).map((r) => r.uid);
+      const ansUids = rawS('SELECT uid FROM survey_tallies WHERE event_id = ?', evS.id).map((r) => r.uid);
       db.setActiveEvent(currentUser, evB.id);
       db.deleteEvent(currentUser, evS.id, { force: true });
-      log(rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 0
+      log(ansUids.length === 2 && rawS('SELECT COUNT(*) AS n FROM survey_tallies WHERE event_id = ?', evS.id)[0].n === 0
         && ansUids.every((u) => rawS('SELECT 1 FROM tombstones WHERE uid = ?', u).length === 1),
-        'v0.0.24: deleting the clinic event deletes its anonymous answers on every laptop (its totals are kept in the report)');
+        'v0.0.24: deleting the clinic event deletes its survey totals on every laptop (they are kept in its report)');
     }
 
     /* ---- v0.0.24: wristband labels — the printer's stock and resolution ---- */
@@ -5482,6 +5552,12 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       if (sizeSel) setInput(sizeSel, 'custom');
       await settle(2);
       log(card.querySelector('.wb-custom').style.display === '' , 'v0.0.24 labels: "Another size" asks for its width and height in millimetres');
+      setInput(card.querySelector('.wb-w'), '20'); setInput(card.querySelector('.wb-h'), '12');
+      await settle(2);
+      const tiny = WB.wristbandLabel({ patient_code: '482913', first_name: 'A', last_name: 'B', demographics: {} }, { forPrint: true, label: WB.labelSetting() });
+      log(/too small for a barcode most scanners read/.test(card.querySelector('.wb-what').textContent)
+        && parseFloat(tiny.querySelector('svg').getAttribute('width')) <= 20 - 3 + 1e-6,
+        'v0.0.24 labels: a label too small for a readable barcode says so — and the barcode is shrunk to fit it, never cut off');
       evView.remove();
       try { window.localStorage.removeItem('mmw.wristband.label'); } catch (_) { /* none */ }
     }
@@ -8592,21 +8668,24 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     log(ov.querySelector('h2').textContent === sx.SURVEY_TITLE.es && answered(qNode('rate_care')) === '5'
       && /4 de 34 respondidas/.test(progressText()),
       'survey: switching to Spanish translates the title and keeps every answer');
+    const snapTwo = tallyNow();
     clickText('Terminar', ov);
     await settle(10);
     await pend;
     sv2 = db.getExitSurvey(two.id);
-    // v0.0.24: the answers go to an anonymous row; the patient's keeps none.
-    const lastAnon = () => { const r = rawDb(); try { const x = r.prepare('SELECT * FROM survey_answers ORDER BY id DESC LIMIT 1').get(); return x ? { ...x, answers: JSON.parse(x.answers) } : { answers: {} }; } finally { r.close(); } };
-    const an2 = lastAnon();
+    // v0.0.24: the answers go into the clinic's totals; the patient's row
+    // keeps none. What Finish added is the difference.
+    const an2 = { answers: tallyDiff(snapTwo, tallyNow()) };
+    // A one-answer question is counted under its answer: { '4': 1 }.
+    const one = (q, v) => JSON.stringify(an2.answers[q] || {}) === JSON.stringify({ [v]: 1 });
     log(sv2.exit_status === 'completed' && sv2.anonymous === true && JSON.stringify(sv2.answers) === '{}'
-      && an2.answers.household_size === '4' && an2.answers.food_insecurity === 'yes'
-      && an2.answers.rate_care === '5' && JSON.stringify(an2.answers.assistance) === '["medicaid"]',
-      'survey: Finish stores what was on the form — the confirmed registration answers and the new ones — apart from the patient (v0.0.24)');
+      && one('household_size', '4') && one('food_insecurity', 'yes')
+      && one('rate_care', '5') && JSON.stringify(an2.answers.assistance) === '{"medicaid":1}',
+      'survey: Finish stores what was on the form — the confirmed registration answers and the new ones — in the clinic\'s totals, apart from the patient (v0.0.24)');
     log(an2.answers.income === undefined,
       'survey: an answer the patient took off the pre-filled form is removed, not kept behind their back');
-    log(sv2.version === 'mmw-exit-v2+anon' && an2.version === 'mmw-exit-v2' && an2.language === 'es' && sv2.language === 'es' && sv2.registration_status === 'completed',
-      'survey: the answers record v2 and the language they were given in; the patient\'s row says they were given anonymously, and keeps its registration history');
+    log(sv2.version === 'mmw-exit-v2+anon' && sv2.language === 'es' && sv2.registration_status === 'completed',
+      'survey: the patient\'s row records v2, the language the survey was answered in, that its answers were added to the totals, and keeps its registration history');
     log(surveyStatus(sv2).label === 'Completed · answers kept anonymously', 'survey: the desk sees it was taken, with its answers kept anonymously');
 
     // Declining with answers on the form warns first, then clears everything.
@@ -8638,27 +8717,30 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // (In a clinic of its own, so the totals checked below stay exact.)
     db.setActiveEvent(currentUser, db.createEvent(currentUser, { name: 'Survey Scratch' }).id);
     const late = db.createPatient(currentUser, { first_name: 'Late', last_name: 'Row', demographics: {}, medical_history: {}, dental_history: {} });
+    const snapLate = tallyNow();
     db.saveExitSurvey(currentUser, late.id, { stage: 'exit', answers: { rate_care: '4' } });
-    const lateAnon = lastAnon();
+    const lateAdded = tallyDiff(snapLate, tallyNow());
+    const afterLate = tallyNow();
     db.saveExitSurvey(currentUser, late.id, { stage: 'registration', answers: { income: 'pna' } });
     const lsv = db.getExitSurvey(late.id);
-    log(lateAnon.answers.rate_care === '4' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
-      && lsv.registration_status === 'completed' && lsv.declined === false && lastAnon().id === lateAnon.id,
+    log(JSON.stringify(lateAdded) === '{"rate_care":{"4":1}}' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
+      && lsv.registration_status === 'completed' && lsv.declined === false && tallyNow().responses === afterLate.responses,
       'survey (legacy): a registration-stage save (db.createPatient\'s legacy path) after check-out adds to the record and erases nothing');
     db.saveExitSurvey(currentUser, late.id, { stage: 'registration', declined: true });
-    log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).exit_status === 'completed' && lastAnon().answers.rate_care === '4',
+    log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).exit_status === 'completed' && tallyNow().responses === afterLate.responses,
       'survey (legacy): a registration-stage "skip" neither clears answers nor marks check-out declined');
     const verP = db.createPatient(currentUser, { first_name: 'Vera', last_name: 'Version', demographics: {}, medical_history: {}, dental_history: {} });
-    log(db.saveExitSurvey(currentUser, verP.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2+anon' && lastAnon().version === 'mmw-exit-v2',
+    log(db.saveExitSurvey(currentUser, verP.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2+anon',
       'survey: a save that names no version is recorded as v2');
 
     // Over the survey:save channel every save is the check-out stage, which
     // REPLACES the answers: no survey role can send the merge-only
     // 'registration' stage and slip answers onto a row.
     const chP = db.createPatient(currentUser, { first_name: 'Chan', last_name: 'Nel', demographics: {}, medical_history: {}, dental_history: {} });
+    const snapCh = tallyNow();
     const viaChannel = await window.api.surveySave({ patientId: chP.id, data: { stage: 'registration', answers: { rate_care: '2' } } });
     log(viaChannel.ok && JSON.stringify(db.getExitSurvey(chP.id).answers) === '{}' && db.getExitSurvey(chP.id).exit_status === 'completed'
-      && JSON.stringify(lastAnon().answers) === '{"rate_care":"2"}',
+      && JSON.stringify(tallyDiff(snapCh, tallyNow())) === '{"rate_care":{"2":1}}',
       'survey: a save over the channel is always the check-out stage, even when it names "registration"');
     log(/handle\('survey:save', \(\{ patientId, data \}\) => db\.saveExitSurvey\(currentUser, patientId, \{ \.\.\.\(data \|\| \{\}\), stage: 'exit' \}\)\)/
       .test(fs.readFileSync(new URL('../src/main/ipc.js', import.meta.url), 'utf8')),
@@ -8680,7 +8762,9 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     // whole, so the check-out answers survive. (The push that runs before
     // every pull is what stamps the local row; collectSyncRows stands in.)
     const syncP = db.createPatient(currentUser, { first_name: 'Sy', last_name: 'Ncrow', demographics: {}, medical_history: {}, dental_history: {} });
+    const snapSync = tallyNow();
     db.saveExitSurvey(currentUser, syncP.id, { stage: 'exit', answers: { rate_care: '5', household_size: '2' } });
+    const syncAdded = tallyDiff(snapSync, tallyNow());
     db.collectSyncRows(5000);
     const rs = rawDb();
     const svUid = rs.prepare('SELECT uid FROM exit_surveys WHERE patient_id = ?').get(syncP.id).uid;
@@ -8691,9 +8775,8 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       data: { version: 'mmw-exit-v1', language: 'en', answers: JSON.stringify({ income: '0_15k' }), declined: 0, completed_at: null,
         completed_by_name: null, created_at: '2000-01-01T00:00:00.000Z', registration_status: 'completed', exit_status: null } }]);
     const ssv = db.getExitSurvey(syncP.id);
-    const syncAnon = (() => { const r = rawDb(); try { return r.prepare('SELECT answers FROM survey_answers').all().map((x) => JSON.parse(x.answers)); } finally { r.close(); } })();
     log(!!svUid && oldReg.applied === 0 && oldReg.skipped === 1 && ssv.exit_status === 'completed' && ssv.anonymous === true
-      && syncAnon.some((a) => a.rate_care === '5' && a.household_size === '2') && ssv.answers.income === undefined,
+      && JSON.stringify(syncAdded) === '{"rate_care":{"5":1},"household_size":{"2":1}}' && ssv.answers.income === undefined,
       'survey (legacy): an older registration row arriving by sync is refused whole (last writer wins) — the check-out answers survive');
 
     // A v0.0.14 row: household half at registration, then declined at check-out
@@ -12315,10 +12398,11 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         b.click(); sTaps++;
       });
       const progS = ovS.querySelector('.survey-progress-text').textContent;
+      const snapS = tallyNow();
       clickText('Finish', ovS); await settle19(10); await pendS;
       const svS = db.getExitSurvey(sp.id);
-      // v0.0.24: stored apart from the patient — the newest anonymous row.
-      const anonS = (() => { const r = rawDb(); try { const x = r.prepare('SELECT answers FROM survey_answers ORDER BY id DESC LIMIT 1').get(); return x ? JSON.parse(x.answers) : {}; } finally { r.close(); } })();
+      // v0.0.24: added to the clinic's totals, apart from the patient.
+      const anonS = tallyDiff(snapS, tallyNow());
       log(sTaps === 34 && progS === '34 of 34 answered' && !ovS.querySelector('select') && svS.exit_status === 'completed'
         && svS.anonymous === true && Object.keys(anonS).length === 34,
         'v0.0.19 survey: all 34 questions answered in 34 taps (it was about 65), no dropdowns, every answer stored');

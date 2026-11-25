@@ -280,7 +280,9 @@ function register(getMainWindow) {
       // Where else it is signed in, read before this laptop's own row is
       // written — for the sign-in screen to ask about (login.js).
       let others = [];
-      try { others = db.otherSessions(user); } catch (_) { others = []; }
+      // Not this computer under an older device id (after a Disconnect or a
+      // restore its own earlier sign-in is still on record).
+      try { others = db.otherSessions(user).filter((o) => o.computer !== os.hostname()); } catch (_) { others = []; }
       presence(false);
       return { ok: true, data: { ...user, otherSessions: others } };
     } catch (err) {
