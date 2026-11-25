@@ -171,6 +171,8 @@ const PERMS = {
   // in — and its handler applies Join's own rule.
   'hub:status': ['admin'],
   'hub:start': ['admin'],
+  // v0.0.23: choosing the clinic network's key, or a new one made here.
+  'hub:setKey': ['admin'],
   'hub:stop': ['admin'],
   'hub:firewall': ['admin'],
   'patients:arrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'],
@@ -391,8 +393,11 @@ function register(getMainWindow) {
   // v0.0.17: lan — joining the clinic network: a host picked from the list
   // found ({ hostId, fp, name }) or from a pasted code ({ pin, hostId, name }).
   // The same rules, by the host's certificate rather than its address.
-  handle('cloud:join', async ({ url, key, move, lan: lanT } = {}) => {
+  handle('cloud:join', async ({ url, key: typed, move, lan: lanT } = {}) => {
     if (currentUser && currentUser.role !== 'admin') throw new Error('Your role does not have permission for this action.');
+    // A clinic network's key as its host keeps it: capitals, spaces and
+    // dashes do not matter (v0.0.23). An internet server's is as typed.
+    const key = lanT && typed ? lan.canonKey(typed) : typed;
     const saved = db.getSyncMeta();
     const pinIn = lanT ? lan.normPin(lanT.pin) : '';
     const already = saved.configured && !!String(url || '').trim() && String(key || '') === saved.key
@@ -508,13 +513,17 @@ function register(getMainWindow) {
   // other laptop (over 127.0.0.1). A laptop on another server moves to it —
   // asked first (moveFrom), as Save server and Join ask, and then the
   // existing move: the cursor starts again and everything here is sent.
-  handle('hub:start', async ({ name, move } = {}) => {
+  handle('hub:start', async ({ name, move, key } = {}) => {
     const saved = db.getSyncMeta();
+    // A key the clinic chose (v0.0.23): refused before anything is made.
+    const chosen = String(key == null ? '' : key).trim();
+    if (chosen && lan.ownKeyProblem(chosen)) throw new Error(lan.ownKeyProblem(chosen));
     // Which clinic network this laptop hosts, if it ever has — asked without
     // making one, so a move that is not confirmed leaves nothing behind.
     const ownId = hub.ownHostId();
     const onOwn = saved.configured && !!ownId && saved.lanHost === ownId;
     if (saved.configured && !onOwn && !move) return { moveFrom: savedLabel(saved) };
+    if (chosen) hub.setKey(chosen);
     await hub.start({ name, version: appVersion(), selfDevice: db.ensureDeviceId() });
     const t = hub.ownTarget();
     // Already joined to it (hosting again, or after a restart on a new
@@ -522,6 +531,20 @@ function register(getMainWindow) {
     if (onOwn) cloud.repointLan(t.url, t.lan.pin, t.lan.name);
     else cloud.applyConfig({ url: t.url, key: t.key, online: true, lan: t.lan });
     db.audit(currentUser, 'hub.start', 'settings', null, 'Hosting the clinic network ' + t.lan.name);
+    return hub.status();
+  });
+
+  // v0.0.23: the clinic network's key — one the clinic chooses, or a new one
+  // made here (left blank). The host's own sync moves to it at once; every
+  // other laptop joins again with it (or the new connection code).
+  handle('hub:setKey', async ({ key } = {}) => {
+    const ownId = hub.ownHostId();
+    if (!ownId) throw new Error('This laptop does not host a clinic network.');
+    const saved = db.getSyncMeta();
+    const k = hub.setKey(key);
+    if (saved.configured && saved.lanHost === ownId) cloud.applyConfig({ key: k });
+    db.audit(currentUser, 'hub.key', 'settings', null, String(key || '').trim()
+      ? 'Clinic network key changed to one chosen here' : 'Clinic network key changed to a new one made here');
     return hub.status();
   });
 

@@ -145,7 +145,9 @@ export const api = {
   // v0.0.17: the clinic network — hosting it here (administrators only), and
   // the hosts heard on this Wi-Fi.
   hubStatus: () => call('hubStatus'),
-  hubStart: (name, move) => call('hubStart', { name, ...(move ? { move: true } : {}) }),
+  hubStart: (name, move, key) => call('hubStart', { name, ...(move ? { move: true } : {}), ...(key ? { key } : {}) }),
+  // v0.0.23: a clinic key the clinic chooses — or, blank, a new one made here.
+  hubSetKey: (key) => call('hubSetKey', { key: key || '' }),
   hubStop: (erase) => call('hubStop', { erase: !!erase }),
   hubFirewall: () => call('hubFirewall'),
   lanScan: (ms) => call('lanScan', { ms }),

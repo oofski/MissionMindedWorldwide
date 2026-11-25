@@ -73,6 +73,9 @@ const state = {
   // connected can say which one is this laptop — by who it is, not by its
   // address: any laptop could reach the host at 127.0.0.1.
   selfDevice: '',
+  // What worker.js checks the key against while hosting — changed in place
+  // when the key is (setKey) — and the join proof's key, made from it.
+  env: null, proofKey: null,
 };
 
 /* ---------------- D1, over better-sqlite3 ---------------- */
@@ -147,8 +150,9 @@ async function loadWorker() {
 
 // The key every laptop uses to sync with this host, made here. Long enough
 // that the join proof (lan.learnPin) gives nothing to guess from, and typed
-// easily from the host's screen: no 0/O or 1/I to confuse.
-const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+// easily from the host's screen: no 0/O or 1/I to confuse — and capitals,
+// spaces and dashes do not matter (lan.canonKey).
+const KEY_ALPHABET = lan.KEY_ALPHABET;
 function makeClinicKey() {
   const group = () => Array.from({ length: 5 }, () => KEY_ALPHABET[crypto.randomInt(KEY_ALPHABET.length)]).join('');
   return [group(), group(), group(), group(), group()].join('-');
@@ -219,6 +223,30 @@ function open() {
 function closeFile() {
   if (state.sqlite) { try { state.sqlite.close(); } catch (_) { /* closed */ } }
   state.sqlite = null;
+}
+
+// v0.0.23: a clinic key the clinic chooses, or a new one made here (key
+// left blank). Kept as lan.canonKey reads it, so a laptop typing it with
+// other capitals or spacing still matches. Every laptop joined with the old
+// key has to join again with the new one; the host's own sync is moved to it
+// by the caller (ipc.js).
+function setKey(key) {
+  open();
+  const chosen = String(key == null ? '' : key).trim();
+  if (chosen) { const problem = lan.ownKeyProblem(chosen); if (problem) throw new Error(problem); }
+  const k = chosen ? lan.canonKey(chosen) : makeClinicKey();
+  setMeta('key', k);
+  if (state.env) state.env.CLINIC_KEY = k;
+  state.proofKey = null;
+  return k;
+}
+// The join proof's key, made once for each key (it takes a moment).
+async function proofKeyOf(id) {
+  const p = state.proofKey;
+  if (p && p.key === id.key && p.hostId === id.hostId) return p.value;
+  const value = await lan.proofKey(id.key, id.hostId);
+  state.proofKey = { key: id.key, hostId: id.hostId, value };
+  return value;
 }
 
 function identity() {
@@ -327,7 +355,11 @@ async function onRequest(req, res, worker, env) {
       const nonce = u.searchParams.get('nonce') || '';
       if (req.method !== 'GET' || !/^[0-9a-f]{16,128}$/.test(nonce)) return refuse(req, res, 400, { ok: false, error: 'bad request' });
       const id = identity();
-      return sendJson(res, 200, { ok: true, app: lan.APP_ID, host: id.hostId, name: id.name, proof: lan.helloProof(id.key, nonce, id.pin, id.hostId) });
+      const answer = { ok: true, app: lan.APP_ID, host: id.hostId, name: id.name, proof2: lan.helloProof2(await proofKeyOf(id), nonce, id.pin, id.hostId) };
+      // The old proof too — for a laptop on 0.0.22 — only with a key the app
+      // made: from it, a short key the clinic chose could be guessed.
+      if (lan.madeKey(id.key)) answer.proof = lan.helloProof(id.key, nonce, id.pin, id.hostId);
+      return sendJson(res, 200, answer);
     }
     const method = String(req.method || 'GET').toUpperCase();
     // Everything under /v1/ needs the clinic key (worker.js answers OPTIONS
@@ -490,6 +522,7 @@ async function start({ name, port, bindHost = defaults.bindHost, beaconPort = de
   const id = identity();
   const worker = await loadWorker();
   const env = { DB: d1(state.sqlite), CLINIC_KEY: id.key };
+  state.env = env;
   // Limits set here rather than left to Node's defaults, which change
   // between versions: a connection that never finishes its handshake or its
   // headers is let go, and a request has five minutes — a full 100 MB push
@@ -530,6 +563,7 @@ async function stop({ keepHosting = false } = {}) {
   stopBeacon();
   const server = state.server;
   state.server = null;
+  state.env = null;
   state.laptops.clear();
   if (server) {
     await new Promise((r) => {
@@ -588,6 +622,7 @@ function shutdown() {
   stopBeacon();
   const server = state.server;
   state.server = null;
+  state.env = null;
   state.laptops.clear();
   if (server) {
     try { server.close(); if (server.closeAllConnections) server.closeAllConnections(); } catch (_) { /* closing anyway */ }
@@ -680,7 +715,7 @@ function status() {
 }
 
 module.exports = {
-  HUB_FILE, defaults, init, open, identity, start, stop, resume, erase, shutdown,
+  HUB_FILE, defaults, init, open, identity, setKey, start, stop, resume, erase, shutdown,
   status, shareUrl, ownTarget, ownHostId, runningHostId, networkOf,
   makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS, PER_ADDRESS, HANDSHAKE_MS,
   firewallScript, firewallCommand, allowThroughFirewall, FIREWALL_RULE,

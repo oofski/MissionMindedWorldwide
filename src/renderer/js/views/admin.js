@@ -1416,6 +1416,29 @@ export function renderAdmin(ctx, params = {}) {
           finally { againBtn.disabled = false; }
         },
       }, [icon('refresh', { size: 16 }), h.paused ? 'Host here anyway' : 'Host again']);
+      // v0.0.23: a key the clinic chooses — easier to read out and type than
+      // the one the app made — or a new one made here.
+      const keyBtn = el('button', {
+        class: 'btn btn--ghost',
+        onClick: async () => {
+          const newKey = el('input', { class: 'input lan-new-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'Leave blank, and the app makes a new one', style: 'font-family:var(--font-mono);' });
+          const ok = await modal({
+            title: 'Change the clinic key?',
+            body: el('div', {}, [
+              el('p', { style: 'margin:0 0 var(--space-3);' }, ['Choose a key that is easy to read out and type — at least 8 letters or numbers; capitals do not matter. Anyone who has it can read and change the clinic\'s records, so not a word anyone could guess. Or leave it blank, and the app makes a new long one.']),
+              el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['New clinic key']), newKey]),
+              el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0 0;' }, ['Every other laptop then joins again with the new key: Admin → Cloud → Join a different clinic network, choose this one and type it — or paste the new connection code. This laptop carries on by itself, and the records are kept.']),
+            ]),
+            confirmText: 'Change the key', cancelText: 'Cancel',
+          });
+          if (!ok) return;
+          try {
+            await api.hubSetKey(newKey.value.trim());
+            toast('The clinic key is changed. Show connection code shows the new one.', 'success');
+            paint();
+          } catch (e) { toast(e.message, 'error'); }
+        },
+      }, [icon('lock', { size: 16 }), 'Change the clinic key']);
       return el('div', { class: 'card lan-hosting' }, [
         el('div', { class: 'card-head-row' }, [
           el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'This laptop hosts the clinic network']),
@@ -1459,7 +1482,7 @@ export function renderAdmin(ctx, params = {}) {
           'Keep this laptop on, plugged in and awake while the clinic is open. If it sleeps or is switched off, the other laptops keep working on their own and catch up when it is back — it hosts again by itself when the app opens.',
         ]),
         firewallHelp(h),
-        el('div', { class: 'action-row' }, [ownBtn, againBtn, stopBtn]),
+        el('div', { class: 'action-row' }, [ownBtn, againBtn, keyBtn, stopBtn]),
       ]);
     }
 
@@ -1502,7 +1525,9 @@ export function renderAdmin(ctx, params = {}) {
         el('p', { class: 'subtle small', style: 'margin:0;' }, ['Looking for clinic networks on this Wi-Fi…']),
       ]);
       const addrInput = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: '192.168.1.23:47800' });
-      const keyIn = el('input', { class: 'input', type: 'password', autocomplete: 'off', placeholder: 'Clinic key' });
+      // Shown as typed (v0.0.23): it is copied from the host's screen, and a
+      // hidden box hid the very typo that kept the laptop from joining.
+      const keyIn = el('input', { class: 'input lan-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'As the host shows it, like ABCDE-FGHJK-…', style: 'font-family:var(--font-mono);' });
       addrInput.addEventListener('input', () => { picked = null; });
       const codeIn = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: 'MMW1-…', style: 'font-family:var(--font-mono);' });
       const codeJoinBtn = el('button', { class: 'btn btn--primary', onClick: () => joinWithCode() }, [icon('globe', { size: 16 }), 'Join with code']);
@@ -1558,7 +1583,8 @@ export function renderAdmin(ctx, params = {}) {
         el('div', { class: 'form-grid' }, [
           el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Host address']), addrInput,
             el('span', { class: 'field-hint' }, ['Filled in when you choose a host above. Not listed? Type the address the host\'s Cloud tab shows.'])]),
-          el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key']), keyIn]),
+          el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key']), keyIn,
+            el('span', { class: 'field-hint' }, ['On the host: Admin → Cloud → Show connection code shows it. Capitals, spaces and dashes do not matter.'])]),
         ]),
         el('div', { class: 'action-row' }, [joinBtn]),
         el('div', { class: 'login-divider' }, [el('span', {}, ['or paste a connection code'])]),
@@ -1577,6 +1603,9 @@ export function renderAdmin(ctx, params = {}) {
         class: 'input', autocomplete: 'off',
         value: (before && h.name) || (store.event && store.event.name) || 'Clinic network',
       });
+      // v0.0.23: the clinic's own key, if it wants one. Hosted before, it
+      // has its key already (Change the clinic key, once hosting).
+      const ownKeyIn = before ? null : el('input', { class: 'input lan-own-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'Leave blank, and the app makes one', style: 'font-family:var(--font-mono);' });
       const hostBtn = el('button', {
         class: 'btn btn--primary',
         onClick: async () => {
@@ -1585,7 +1614,7 @@ export function renderAdmin(ctx, params = {}) {
           if (st.configured && !(await askMove(netLabel(name) + ' on this laptop', 'Hosting'))) return;
           hostBtn.disabled = true;
           try {
-            await api.hubStart(name, st.configured);
+            await api.hubStart(name, st.configured, ownKeyIn ? ownKeyIn.value.trim() : '');
             cloudChoice = 'lan';
             toast('This laptop is hosting the clinic network.', 'success');
             paint();
@@ -1621,6 +1650,8 @@ export function renderAdmin(ctx, params = {}) {
         el('div', { class: 'form-grid' }, [
           el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic network name']), nameIn,
             el('span', { class: 'field-hint' }, ['What the other laptops see in their list — the clinic\'s name and place is good.'])]),
+          ownKeyIn ? el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key (optional)']), ownKeyIn,
+            el('span', { class: 'field-hint' }, ['Leave it blank, and the app makes a long one. Or choose your own, easy to read out and type: at least 8 letters or numbers; capitals do not matter. Anyone who has it can read and change the clinic\'s records, so not a word anyone could guess.'])]) : null,
         ]),
         el('div', { class: 'action-row' }, [hostBtn, eraseBtn]),
       ]);

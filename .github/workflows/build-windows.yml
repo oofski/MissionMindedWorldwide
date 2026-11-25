@@ -236,30 +236,29 @@ jobs:
 
             ### New in this build
 
-            **Set up the online sync server with one button.**
+            **Joining a clinic network with its key is easier.**
 
-            - **Admin → Cloud → Set up the clinic's sync server.** Press
-              **Open Cloudflare**, make a free account (or sign in), and copy
-              the token Cloudflare offers: its permissions are already chosen.
-              Paste it and press **Set up the sync server**. The app makes the
-              database, installs the server, makes the clinic key, turns on the
-              address and connects this laptop, ticking off each step. There is
-              no code to paste, nothing to name and no key to make up.
-            - The clinic key is made for you and travels inside the
-              **connection code**, so nobody types it. The other laptops paste
-              the code, as before. The token is used once and not kept on the
-              laptop.
-            - If the Cloudflare account has the sync server already, the app
-              says so instead of replacing it. If no laptop has the old key any
-              more, it can give the server a new clinic key, keeping its
-              records.
-            - **Updating the server is one button too.** When a new version of
-              the app brings a newer sync server, the Cloud tab offers **Update
-              the sync server**: paste a token and it is installed, keeping the
-              database and the clinic key.
-            - Setting the server up by hand still works (setup guide, Part A).
-            - For clinic days, switch Cloudflare to **Workers Paid** ($5 a
-              month); the app cannot choose a paid plan for you.
+            - **The clinic key no longer has to be typed exactly.** Capitals,
+              spaces and dashes do not matter, so `abcde fghjk …` joins a
+              clinic network whose key is `ABCDE-FGHJK-…`. Before, any
+              difference was refused with "could not show it holds this clinic
+              key", even when the key was right.
+            - **The key box shows what you type**, so a typo can be seen and
+              fixed. It used to hide every character.
+            - **Choose your own clinic key.** When a laptop first hosts the
+              clinic network, it can take a key that is easy to read out and
+              type (at least 8 letters or numbers; capitals do not matter), or
+              leave it blank for one the app makes.
+            - **Change the clinic key** on the host's card sets a new one,
+              chosen or made, at any time. The host carries on by itself; the
+              other laptops join again with the new key or the new connection
+              code.
+            - A key you choose is protected with a slower check, so a short
+              key cannot be guessed quickly by someone on the Wi-Fi. Every
+              laptop needs this version to join a host with a chosen key.
+            - The error now says where to find the key on the host (**Admin →
+              Cloud → Show connection code**), and suggests pasting the whole
+              connection code instead, which needs no typing.
 
             ### Signing in
             Every install now comes with an administrator already set up:

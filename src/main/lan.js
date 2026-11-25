@@ -348,6 +348,49 @@ function firstOf(items, fn, { concurrency = 8 } = {}) {
 function helloProof(key, nonce, pin, hostId) {
   return crypto.createHmac('sha256', String(key)).update(`${APP_ID} hello|${nonce}|${normPin(pin)}|${hostId || ''}`).digest('hex');
 }
+
+// v0.0.23: the clinic key as typed, read the way the host keeps it.
+//
+// A key the app made (five groups of five, from KEY_ALPHABET) was compared
+// character for character, in a box that showed none of them: "abcde fghjk
+// …" for "ABCDE-FGHJK-…" was the wrong key, and the laptop said the host
+// "could not show it holds this clinic key" — with the right key in front of
+// the director. Now capitals, spaces and dashes do not matter. A key the
+// clinic chose itself is kept as typed, except that capitals do not matter
+// there either and a run of spaces counts as one.
+const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function canonKey(key) {
+  const t = String(key == null ? '' : key).trim();
+  const compact = t.replace(/[\s\-\u2010-\u2015_.]+/g, '').toUpperCase();
+  if (compact.length === 25 && [...compact].every((c) => KEY_ALPHABET.includes(c))) return compact.match(/.{5}/g).join('-');
+  return t.replace(/\s+/g, ' ').toLowerCase();
+}
+// A key the app made, as the host keeps it.
+const madeKey = (key) => /^[A-HJ-NP-Z2-9]{5}(-[A-HJ-NP-Z2-9]{5}){4}$/.test(String(key || ''));
+// What is wrong with a key the clinic wants to choose, or '' when nothing is.
+function ownKeyProblem(key) {
+  const k = canonKey(key);
+  if (k.replace(/ /g, '').length < 8) return 'Choose a clinic key of at least 8 letters or numbers — longer is safer. Or leave it blank, and the app makes one.';
+  if (k.length > 100) return 'That clinic key is too long — 100 characters at most.';
+  if (!/^[\x20-\x7e]+$/.test(k)) return 'Use plain letters, numbers, spaces and dashes in the clinic key — no curly quotes, long dashes or accented letters, which another laptop\'s keyboard may not type the same way.';
+  return '';
+}
+
+// The join proof, v0.0.23: made from the key through scrypt, which takes a
+// laptop a tenth of a second or so. Anyone on the Wi-Fi can ask a host for a
+// proof; from the old one (a plain HMAC under the key) a short key the clinic
+// chose could be guessed at millions of tries a second. A host sends this one
+// always, and the old one only with a key the app made — far too long to
+// guess — so a laptop on 0.0.22 can still join it.
+const PROOF_KDF = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+function proofKey(key, hostId) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(canonKey(key), `${APP_ID} key|${hostId || ''}`, 32, PROOF_KDF, (e, k) => (e ? reject(e) : resolve(k)));
+  });
+}
+function helloProof2(kdfKey, nonce, pin, hostId) {
+  return crypto.createHmac('sha256', kdfKey).update(`${APP_ID} hello2|${nonce}|${normPin(pin)}|${hostId || ''}`).digest('hex');
+}
 function sameHex(a, b) {
   const x = Buffer.from(String(a || ''), 'utf8'), y = Buffer.from(String(b || ''), 'utf8');
   return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -360,14 +403,18 @@ async function learnPin(url, key, { expectPrefix = '', expectHost = '', timeoutM
   }
   let j = null;
   try { j = JSON.parse(r.text); } catch (_) { /* not ours */ }
-  if (!j || j.app !== APP_ID || typeof j.proof !== 'string') throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
+  if (!j || j.app !== APP_ID || (typeof j.proof !== 'string' && typeof j.proof2 !== 'string')) throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
   if (expectHost && j.host !== expectHost) {
     throw Object.assign(new Error('The host\'s certificate does not match.'), { pinMismatch: true, presented: r.pin });
   }
   // Not "refused the clinic key": that sent a director to retype a key that
   // was right, when the answer came from a look-alike listed under the
   // clinic's name (a beacon's name proves nothing). Either is possible here.
-  if (!sameHex(j.proof, helloProof(key, nonce, r.pin, j.host))) {
+  const k = canonKey(key);
+  const proven = typeof j.proof2 === 'string'
+    ? sameHex(j.proof2, helloProof2(await proofKey(k, j.host), nonce, r.pin, j.host))
+    : sameHex(j.proof, helloProof(k, nonce, r.pin, j.host)); // a host on 0.0.22
+  if (!proven) {
     throw Object.assign(new Error('The host could not show it holds the clinic key.'), { noProof: true });
   }
   return { pin: r.pin, hostId: typeof j.host === 'string' ? j.host : '', name: cleanText(j.name, 80) };
@@ -382,7 +429,7 @@ const MESSAGES = {
   timeout: (a) => `The clinic network host at ${a} did not answer in time. Check this laptop is on the clinic's Wi-Fi, then try again.`,
   pin_mismatch: (a) => `The laptop at ${a} is not this clinic's host: its security certificate does not match, so nothing was sent to it. If the clinic network was set up again on the host, copy a new connection code from it.`,
   wrong_key: () => 'The host answered, but refused the clinic key. Copy the connection code again from the host laptop, or type the key exactly as its Cloud tab shows it.',
-  no_proof: (a) => `The laptop at ${a} could not show it holds this clinic key, so the key was not sent to it. Check the key is typed exactly as the host's Cloud tab shows it — or, if this clinic network is listed twice, choose the other one, or paste the host's connection code.`,
+  no_proof: (a) => `The laptop at ${a} could not show it holds this clinic key, so the key was not sent to it. Check the key against the host laptop: Admin → Cloud → Show connection code shows it (capitals, spaces and dashes do not matter) — or paste the host's whole connection code instead, which needs no typing. If this clinic network is listed twice, choose the other one.`,
   not_mmw: (a) => `Something answered at ${a}, but it is not a Mission Minded clinic network host.`,
   too_large: (a) => `The host at ${a} refused this laptop's latest changes as too large to send at once (more than 100 MB — usually many x-ray images together). They are kept on this laptop; ask whoever looks after the app.`,
 };
@@ -469,6 +516,7 @@ module.exports = {
   normPin, isPin, showPin,
   beaconMessage, readBeacon, isQuery, QUERY,
   lanAddresses, broadcastTargets, hostBroadcastTargets, listen, scan, SCAN_PORTS_PER_ADDRESS, SCAN_URLS,
-  request, peerPin, firstOf, helloProof, learnPin,
+  request, peerPin, firstOf, helloProof, helloProof2, proofKey, learnPin,
+  KEY_ALPHABET, canonKey, madeKey, ownKeyProblem,
   classify, explain, diagnose, MESSAGES,
 };

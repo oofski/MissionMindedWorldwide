@@ -1439,6 +1439,36 @@ async function hubChecks() {
     // look-alike listed under the clinic's name fails it the same way.
     check('clinic network hub: joining without a code, the host proves it holds the key — and a wrong key gets no pin, told as a proof that failed',
       proof.pin === id.pin && proof.hostId === id.hostId && !!badProof && badProof.noProof === true && lan.classify(badProof) === 'no_proof');
+
+    // v0.0.23: the key as typed from the host's screen — capitals, spaces
+    // and dashes do not matter.
+    const hello = async () => JSON.parse((await req('/lan/hello?nonce=' + '0123456789abcdef'.repeat(2))).text);
+    const messy = id.key.toLowerCase().replace(/-/g, ' ');
+    const proofMessy = await lan.learnPin(base, ' ' + messy + ' ');
+    const h1 = await hello();
+    check('clinic network hub: the key typed in small letters, with spaces for dashes, still proves the host — and a host with a key the app made answers laptops on 0.0.22 too',
+      proofMessy.pin === id.pin && typeof h1.proof === 'string' && typeof h1.proof2 === 'string' && lan.canonKey(messy) === id.key);
+
+    // A key the clinic chooses: kept as the host keeps it, sent nowhere
+    // without the proof, and answered only with the slow proof.
+    let short = null;
+    try { hubMod.setKey('clinic1'); } catch (e) { short = e.message; }
+    const chosen = hubMod.setKey('  Sandy   Clinic Day 2026 ');
+    const h2 = await hello();
+    const proofOwn = await lan.learnPin(base, 'SANDY CLINIC  day 2026');
+    let wrongOwn = null;
+    try { await lan.learnPin(base, 'sandy clinic day 2025'); } catch (e) { wrongOwn = e; }
+    const withOwn = await req('/v1/pull?since=&limit=1', { headers: auth(chosen) });
+    const withOld = await req('/v1/pull?since=&limit=1', { headers: auth(id.key) });
+    check('clinic network hub: a key the clinic chooses works at once — typed with other capitals or spacing it still proves the host, the old key is refused, and too short a key is refused',
+      /at least 8 letters or numbers/.test(short || '') && chosen === 'sandy clinic day 2026' && hubMod.identity().key === chosen
+      && proofOwn.pin === id.pin && !!wrongOwn && wrongOwn.noProof === true && withOwn.status === 200 && withOld.status === 401);
+    check('clinic network hub: with a key the clinic chose, the host answers only with the slow (scrypt) proof — never the quick one a short key could be guessed from',
+      typeof h2.proof2 === 'string' && h2.proof === undefined && h2.proof2 !== h1.proof2);
+    const remade = hubMod.setKey('');
+    const h3 = await hello();
+    check('clinic network hub: a blank key makes a new long one, and the quick proof is back for laptops on 0.0.22',
+      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(remade) && remade !== id.key && typeof h3.proof === 'string');
     await hubMod.stop();
     await hubMod.erase();
   } finally {

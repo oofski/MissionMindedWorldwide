@@ -388,15 +388,28 @@ Private networks and allow it there too, or type the host's address instead.
 2. At the top, choose **Clinic network (no internet)**.
 3. Under **Host the clinic network on this laptop**, fill in the **Clinic
    network name** — the clinic's name and place is good; it is what the
-   other laptops see in their list — and press **Host the clinic network**.
+   other laptops see in their list. **Clinic key (optional)**: leave it blank
+   and the app makes a long one, or choose your own that is easy to read out
+   and type (0.0.23 and later) — at least 8 letters or numbers; capitals do
+   not matter. Anyone who has the key can read and change the clinic's
+   records, so not a word anyone could guess. Press **Host the clinic
+   network**.
 4. The card **This laptop hosts the clinic network** shows the address the
    other laptops reach it at (like `192.168.1.23:47800`), the laptops
    connected now, and its **Security fingerprint**.
 
-The host makes its own clinic key (five groups of letters and numbers) and
-its own security certificate, and keeps both. **Show connection code** shows
-the code — and the key, for typing — only when asked. Like the internet
-server's, **the connection code is the clinic's password**.
+Unless you chose one, the host makes its own clinic key (five groups of
+letters and numbers); it makes its own security certificate, and keeps both.
+**Show connection code** shows the code — and the key, for typing — only when
+asked. Like the internet server's, **the connection code is the clinic's
+password**.
+
+**Change the clinic key** (on the host's card, 0.0.23 and later) sets a key you
+choose, or makes a new one if you leave it blank. The host carries on by
+itself; every other laptop joins again with the new key (**Join a different
+clinic network**, choose the host, type the new key) or the new connection
+code. All the laptops must run 0.0.23 or later to join a host with a key you
+chose.
 
 ### Join it from every other laptop
 On each other laptop, on the same Wi-Fi:
@@ -405,7 +418,9 @@ On each other laptop, on the same Wi-Fi:
   **Join a clinic network** the clinic networks found on this Wi-Fi are
   listed (**Look again** searches again). Press **Choose** beside the
   clinic's, type the **Clinic key** the host shows, and press **Join** — or
-  paste the host's connection code and press **Join with code**.
+  paste the host's connection code and press **Join with code**. The key is
+  shown as you type it, and capitals, spaces and dashes do not matter
+  (0.0.23 and later).
 - **On a new laptop's sign-in screen**, press **Join a clinic already set
   up**: the clinic networks heard on this Wi-Fi are listed there too.
   **Choose**, type the clinic key, **Connect and sync** — or paste the
@@ -435,7 +450,7 @@ wrong, in the same words the **Connection** card uses while it retries:
 | "A computer answered at …, but Mission Minded is not hosting there." | The app is closed on the host, or **Stop hosting** was pressed. Open it / host again |
 | "The laptop at … is not this clinic's host: its security certificate does not match…" | Another device has that address — or the host's clinic network was erased and hosted again: join with its new connection code |
 | "The host answered, but refused the clinic key." | Type the key exactly as the host's Cloud tab shows it, or paste a fresh connection code |
-| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | Joining from the list or a typed address: check the key — or, if the clinic network is listed twice, choose the other one, or paste the connection code |
+| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | The key typed does not match the host's. On the host, **Show connection code** shows the key: type it as shown (capitals, spaces and dashes do not matter from 0.0.23 on) — or paste the whole connection code, which needs no typing. Still refused? On the host, **Change the clinic key** to one that is easy to type, and join with that. If the clinic network is listed twice, choose the other one |
 | "Something answered at …, but it is not a Mission Minded clinic network host." | Another program has the host's address or port now. Check the address on the host's Cloud tab |
 
 ### When the host laptop is off or asleep

@@ -95,6 +95,7 @@ const PERMS = {
   'cloudConfig': ['admin'], 'cloudTest': ['admin'], 'cloudResync': ['admin'], 'cloudDisconnect': ['admin'], 'dataReset': ['admin'],
   'cloudConnectionCode': ['admin'],
   'cloudSetupServer': ['admin'], 'cloudUpdateServer': ['admin'], 'cloudServerVersion': ['admin'], 'cloudTokenLink': ['admin'],
+  'hubSetKey': ['admin'],
   // v0.0.17: hosting the clinic network is the administrator's.
   'hubStatus': ['admin'], 'hubStart': ['admin'], 'hubStop': ['admin'], 'hubFirewall': ['admin'],
   'cloudStatus': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], 'cloudSyncNow': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -9934,10 +9935,11 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       L.bWrong = await B.run(`const r=await call('cloud:join',${JSON.stringify({ url: foundL && foundL.url, key: 'WRONG-KEY22-22222-22222-22222', lan: pickL })});
         return {error:err(r),configured:db.getSyncMeta().configured};`);
       L.aSawWrong = await A.run(`return hub.status().laptops.map((l)=>l.self?'self':l.computer);`);
-      L.bJoin = await B.run(`const r=await call('cloud:join',${JSON.stringify({ url: foundL && foundL.url, key: L.aHost.key, lan: pickL })});
+      // Typed as a person copies it off the host's screen: small letters, spaces for dashes (v0.0.23).
+      L.bJoin = await B.run(`const r=await call('cloud:join',${JSON.stringify({ url: foundL && foundL.url, key: String(L.aHost.key || '').toLowerCase().replace(/-/g, ' '), lan: pickL })});
         if(!r.ok) return {error:r.error};
         const m=db.getSyncMeta();
-        return {accounts:r.data.accounts,sync:!!(r.data.sync&&r.data.sync.ok),pin:m.lanPin,host:m.lanHost,url:m.url,kind:cloud.status().kind,
+        return {accounts:r.data.accounts,sync:!!(r.data.sync&&r.data.sync.ok),pin:m.lanPin,host:m.lanHost,url:m.url,kind:cloud.status().kind,keySaved:m.key,
           ana:!!db.login('ana.reyes','ana-pass-1'),fromA:db.listPatients({eventId:'all'}).some((p)=>p.last_name==='FromA')};`);
       L.bAdd = await B.run(`const u=db.login('admin','admin');db.createPatient(u,{first_name:'Ben',last_name:'FromB'});return (await settle()).ok;`);
       L.aGotB = await A.run(`await settle();return {fromB:db.listPatients({eventId:'all'}).some((p)=>p.last_name==='FromB'),laptops:hub.status().laptops.map((l)=>l.self?'self':'other')};`);
@@ -10304,6 +10306,39 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
           return {entries,moved,tried,url:db.getSyncMeta().url,diag:{code:d.code,movedTo:d.movedTo||''}};`);
       });
 
+      /* v0.0.23: a clinic key the clinic chooses, changed later */
+      await sectionL('own key', async () => {
+        const H10 = laptopL('H10'), J10 = laptopL('J10');
+        L.ownHost = await H10.run(`await call('auth:login',{username:'admin',password:'admin'});
+          const short=err(await call('hub:start',{name:'Own key clinic',key:'clinic1'}));
+          const shortMade=fs.readdirSync(dir).includes(hub.HUB_FILE);
+          const r=await call('hub:start',{name:'Own key clinic',key:'  Lowell Clinic   Day 26 '});
+          if(!r.ok) return {error:r.error};
+          const t=hub.ownTarget();
+          return {short,shortMade,key:t.key,saved:db.getSyncMeta().key,port:hub.status().port,pin:t.lan.pin,hostId:t.lan.hostId,sync:(await settle()).ok};`);
+        const oh = L.ownHost || {};
+        const at = 'https://127.0.0.1:' + oh.port;
+        L.ownJoin = await J10.run(`const r=await call('cloud:join',${JSON.stringify({ url: at, key: 'LOWELL clinic day 26', lan: {} })});
+          if(!r.ok) return {error:r.error};
+          const m=db.getSyncMeta();return {sync:!!(r.data.sync&&r.data.sync.ok),key:m.key,pin:m.lanPin};`);
+        L.ownChange = await H10.run(`const r=await call('hub:setKey',{key:''});
+          if(!r.ok) return {error:r.error};
+          const k=hub.identity().key;
+          const Sqlite=require(path.join(root,'node_modules','better-sqlite3'));
+          const raw=new Sqlite(path.join(dir,'mission-minded.db'),{readonly:true});
+          const audit=raw.prepare("SELECT detail FROM audit_log WHERE action='hub.key'").all().map((x)=>x.detail);raw.close();
+          return {key:k,saved:db.getSyncMeta().key,sync:(await settle()).ok,audit};`);
+        const nk = (L.ownChange || {}).key || '';
+        L.ownAfter = await J10.run(`const s=await settle();
+          await call('auth:login',{username:'admin',password:'admin'});
+          const lanT=${JSON.stringify({ pin: oh.pin, hostId: oh.hostId, name: 'Own key clinic' })};
+          const t=await call('cloud:test',{url:${JSON.stringify(at)},key:${JSON.stringify(nk.toLowerCase().replace(/-/g, '  '))},lan:lanT});
+          if(!t.ok) return {stale:s.ok,staleError:s.error||'',error:t.error};
+          const c=await call('cloud:config',{url:${JSON.stringify(at)},key:${JSON.stringify(nk.toLowerCase())},online:true,lan:t.data.lan});
+          const again=await settle();
+          return {stale:s.ok,staleError:s.error||'',config:c.ok?true:c.error,key:db.getSyncMeta().key,sync:again.ok};`);
+      });
+
       /* a look-alike copying the whole beacon, naming ports that never finish a handshake */
       await sectionL('flood', async () => {
         const H7 = laptopL('H7'), F7 = laptopL('F7');
@@ -10398,6 +10433,18 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       'clinic network: a look-alike picked from the list is asked to prove it holds the clinic key before the key is sent — it cannot, never receives it, and the director is pointed to the other entry rather than told the key is wrong' + (P.lookAlike ? ' — ' + P.lookAlike.error : ''));
     log(!!P.aSignedOut && P.aSignedOut.scanOpen === true && /already has its own administrator password/.test(P.dClosed || ''),
       'clinic network: the sign-in screen lists hosts only while Join is open — not once the computer has its own administrator password');
+    log(!!P.bJoin && P.bJoin.keySaved === P.aHost.key,
+      'v0.0.23 clinic network: the key typed off the host\'s screen in small letters, with spaces for dashes, joins — and is saved as the host keeps it' + (P.bJoin && P.bJoin.error ? ' — ' + P.bJoin.error : ''));
+    {
+      const oh = P.ownHost || {}, oj = P.ownJoin || {}, oc = P.ownChange || {}, oa = P.ownAfter || {};
+      log(!P['crash_own key'] && /at least 8 letters or numbers/.test(oh.short || '') && oh.shortMade === false && oh.key === 'lowell clinic day 26' && oh.saved === oh.key && oh.sync === true,
+        'v0.0.23 clinic network: the host can choose its own clinic key — too short a one is refused before anything is made — and syncs with it' + (P['crash_own key'] ? ' — CRASH ' + P['crash_own key'] : '') + (oh.error ? ' — ' + oh.error : ''));
+      log(oj.sync === true && oj.key === 'lowell clinic day 26' && oj.pin === oh.pin,
+        'v0.0.23 clinic network: a laptop joins it typing the chosen key with other capitals and spacing' + (oj.error ? ' — ' + oj.error : ''));
+      log(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(oc.key || '') && oc.saved === oc.key && oc.sync === true && Array.isArray(oc.audit) && oc.audit.length === 1 && !oc.audit.some((d) => d.includes(oc.key))
+        && oa.stale === false && /refused the clinic key/.test(oa.staleError) && oa.config === true && oa.key === oc.key && oa.sync === true,
+        'v0.0.23 clinic network: Change the clinic key moves the host\'s own sync to the new key at once; a joined laptop is refused with the old one, and joins again with the new one typed loosely' + (oc.error ? ' — ' + oc.error : '') + (oa.error ? ' — ' + oa.error : ''));
+    }
     log(!!P.bJoin && P.bJoin.kind === 'lan' && P.bJoin.pin === P.aHost.pin && P.bJoin.host === P.aHost.hostId && P.bJoin.sync === true && P.bJoin.accounts > 0
       && P.bJoin.ana === true && P.bJoin.fromA === true,
       'clinic network: joined from the list and the key, a laptop pins the host\'s certificate, downloads the clinic — staff sign in with their own accounts — and sees the patient registered on the host');
@@ -10896,6 +10943,55 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         'Cloud tab, clinic network: Host the clinic network starts hosting here, named, without a question on a laptop not connected to anything');
       pg.remove();
 
+      // v0.0.23: a key box that shows what is typed; the clinic's own key,
+      // chosen when hosting or changed later.
+      const hubStartWas23 = window.api.hubStart;
+      window.api.hubStart = okWrap(({ name, move, key } = {}) => { callsL.push(['hubStart', name, !!move, key || '']); return { ...hsL, running: true }; }, 'hubStart');
+      window.api.hubSetKey = okWrap(({ key } = {}) => { callsL.push(['hubSetKey', key]); return { ...hsL }; }, 'hubSetKey');
+      stL = { ...baseStL }; hsL = { ...hubNone };
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const join23 = cardL(pg, /Join a clinic network/);
+      const joinKey23 = fieldL(join23, /^Clinic key/);
+      const offer23 = cardL(pg, /Host the clinic network on this laptop/);
+      callsL.length = 0;
+      setL(fieldL(offer23, /^Clinic network name/), 'Lowell clinic network');
+      const ownKeyBox = fieldL(offer23, /^Clinic key/);
+      setL(ownKeyBox, '  Lowell Clinic Day 26 ');
+      pressL(offer23, 'Host the clinic network');
+      await settleL(20);
+      log(!!joinKey23 && joinKey23.type !== 'password' && /Capitals, spaces and dashes do not matter/.test(join23.textContent) && /Show connection code shows it/.test(join23.textContent)
+        && !!ownKeyBox && /Leave it blank, and the app makes a long one/.test(offer23.textContent) && /at least 8 letters or numbers/.test(offer23.textContent)
+        && JSON.stringify(callsL) === JSON.stringify([['hubStart', 'Lowell clinic network', false, 'Lowell Clinic Day 26']]),
+        'v0.0.23 Cloud tab, clinic network: the clinic key is typed in plain sight (capitals, spaces and dashes do not matter), and the host can choose its own key — or leave it blank for one the app makes');
+      pg.remove();
+      stL = { ...baseStL }; hsL = { ...hubRunning, running: false };
+      pg = await cloudPage();
+      pressL(pg, 'Clinic network (no internet)');
+      await settleL(20);
+      const offerAgain23 = cardL(pg, /Host the clinic network on this laptop/);
+      const noKeyAgain = !!offerAgain23 && !fieldL(offerAgain23, /^Clinic key/);
+      pg.remove();
+      stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://127.0.0.1:47800', kind: 'lan',
+        lanPin: PIN_L, lanPinShown: lanL.showPin(PIN_L, 4), lanHost: HOST_L, lanName: 'Lowell clinic network', isHost: true, lastOk: new Date().toISOString() };
+      hsL = { ...hubRunning };
+      pg = await cloudPage();
+      callsL.length = 0;
+      const hostCard23 = cardL(pg, /This laptop hosts the clinic network/);
+      pressL(hostCard23, 'Change the clinic key');
+      await settleL();
+      const keyModal = $all('.modal-overlay').find((m) => /Change the clinic key\?/.test(m.textContent));
+      const keyModalTxt = keyModal ? keyModal.textContent : '';
+      if (keyModal) setInput(keyModal.querySelector('.lan-new-key'), 'Sandy Clinic 2027');
+      if (keyModal) pressL(keyModal, 'Change the key');
+      await settleL(20);
+      log(noKeyAgain && /Every other laptop then joins again with the new key/.test(keyModalTxt) && /leave it blank, and the app makes a new long one/.test(keyModalTxt)
+        && JSON.stringify(callsL) === JSON.stringify([['hubSetKey', 'Sandy Clinic 2027']]) && /The clinic key is changed/.test(lastToastL()),
+        'v0.0.23 Cloud tab, hosting: Change the clinic key takes one the clinic chooses (or makes a new one), saying every other laptop joins again with it; a laptop that hosted before keeps its key when it hosts again');
+      pg.remove();
+      window.api.hubStart = hubStartWas23;
+
       // Hosting here (Windows).
       stL = { ...baseStL, configured: true, enabled: true, mode: 'online', online: true, hasKey: true, url: 'https://127.0.0.1:47800', kind: 'lan',
         lanPin: PIN_L, lanPinShown: lanL.showPin(PIN_L, 4), lanHost: HOST_L, lanName: 'Lowell clinic network', isHost: true, lastOk: new Date().toISOString() };
@@ -11131,6 +11227,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
           ['192.168.1.40:47800', KEY_L, false, {}],
           ['https://192.168.1.23:47800', KEY_L, false, { pin: PIN_L, hostId: HOST_L, name: 'Lowell clinic network' }]]),
         'Join a clinic (sign-in): it lists the clinic networks heard on this Wi-Fi; a host chosen, an address on this Wi-Fi typed, or a clinic network\'s code each join the clinic network');
+
     } finally {
       currentUser = signedL;
       $all('.modal-overlay').forEach((o) => o.remove());

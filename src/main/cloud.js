@@ -207,6 +207,8 @@ async function testClinicNetwork(url, key, t) {
   }
   if (!/^https:/.test(base)) throw new Error(PLAIN_HTTP);
   if (!String(key || '').trim()) throw new Error('Enter the clinic key shown on the host laptop\'s Cloud tab, or paste its connection code.');
+  // As the host keeps it: capitals, spaces and dashes do not matter (v0.0.23).
+  key = lan.canonKey(key);
   if (keyProblem(key)) throw new Error(keyProblem(key));
   let pin = lan.normPin(t.pin);
   let hostId = String(t.hostId || '');
@@ -566,6 +568,9 @@ function applyConfig({ url, key, enabled, mode, online, lan: lanIn }) {
   const patch = {};
   const lanT = lanIn && typeof lanIn === 'object'
     ? { pin: lan.normPin(lanIn.pin), hostId: String(lanIn.hostId || '').slice(0, 64), name: String(lanIn.name || '').slice(0, 80) } : null;
+  // A clinic network's key is saved as its host keeps it (lan.canonKey), so
+  // the key typed with other capitals or spacing is the same key.
+  if (lanT && key) key = lan.canonKey(key);
   if (lanT && (url === undefined || !lanT.pin)) throw new Error('Test the clinic network connection before saving it.');
   const base = url === undefined ? undefined : (lanT ? lanUrl(url) : trimUrl(url));
   if (url !== undefined && isPlainHttp(base)) throw new Error(PLAIN_HTTP);

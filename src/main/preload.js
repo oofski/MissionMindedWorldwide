@@ -31,6 +31,8 @@ const CHANNELS = [
   'cloud:setupServer', 'cloud:updateServer', 'cloud:serverVersion', 'cloud:tokenLink',
   // v0.0.17: the clinic network (no internet).
   'hub:status', 'hub:start', 'hub:stop', 'hub:firewall', 'lan:scan',
+  // v0.0.23: the clinic network's key, chosen or made again.
+  'hub:setKey',
   'data:reset',
 ];
 
