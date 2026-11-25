@@ -28,6 +28,10 @@ function init(userDataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // v0.0.24: what is deleted or overwritten is zeroed on disk, not left in
+  // the free space of a page — so an earlier copy of the survey totals (or a
+  // deleted patient) cannot be read back from the file.
+  db.pragma('secure_delete = ON');
   _colMeta = new Map(); // column facts belong to the database just opened
   _lastStamp = null;    // and so does the last sync stamp it handed out
 
@@ -3168,6 +3172,10 @@ function saveExitSurvey(actor, patientId, data) {
   }
   });
   write();
+  // The write-ahead log keeps every earlier version of a page until it is
+  // checkpointed: with the totals, one survey's answers are the difference
+  // between two. Checkpointed and emptied at once, it holds none.
+  if (anonymous) { try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (_) { /* a reader is busy: the next save tries again */ } }
   // No dirty-marking here on purpose: sync decides dirtiness by hashing a row's
   // syncable columns (see collectSyncRows), so a plain write is enough.
   audit(actor, 'survey.save', 'patient', patientId,
