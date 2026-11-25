@@ -56,8 +56,11 @@ works locally and re-syncs when reconnected.
 `inv_item`, `inv_move` — and, from app 0.0.24 (server 1.9.0):
 - `survey_tally` — one laptop's running totals of the exit survey for one event, with
   **no patient**: `event_uid` set, `patient_uid` null, data `{ device, responses, counts }`
-  (`counts` is `{ question: { answer: n } }` as JSON). Only the laptop it belongs to writes
-  it; reports add every laptop's. No row ever holds one patient's answers. The patient's
+  (`counts` is `{ question: { answer: n } }` as JSON, always in the survey's own question
+  and answer order — never the order answers arrived in). Only the laptop it belongs to
+  writes it; reports add every laptop's. No row holds a patient's answers apart from the
+  others' — though a laptop that has taken a single survey for an event holds a total of
+  one. The patient's
   own `survey` row then says only that it was answered (its `version` ends in `+anon`) and
   carries no answers.
 - `presence` — an account signed in on a laptop: data `{ user_uid, device, computer,

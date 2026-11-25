@@ -1492,6 +1492,26 @@ export function renderAdmin(ctx, params = {}) {
       // v0.0.24: the key the next laptop types, in large print — and wrong
       // tries lately, which the host counts and limits.
       const fails = Number(h.joinFailures) || 0;
+      // A network password still chosen by hand in 0.0.23: said, and offered
+      // to change once every laptop is on 0.0.24 (they join again once).
+      const handBtn = h.handChosen ? el('button', {
+        class: 'btn btn--sm btn--primary',
+        onClick: async () => {
+          const ok = await modal({
+            title: 'Make a new network password?',
+            body: el('div', {}, [
+              el('p', { style: 'margin:0 0 var(--space-3);' }, [`The clinic key stays ${h.joinCode}. The other laptops are signed out of the clinic network once, and join again by typing it — so first update every laptop to 0.0.24 (a laptop still on 0.0.23 can then get back in only with the new connection code).`]),
+            ]),
+            confirmText: 'Make a new password', cancelText: 'Cancel',
+          });
+          if (!ok) return;
+          try { await api.hubSetJoinCode(h.joinCode, true); toast('A new network password is made. The other laptops join again with the clinic key.', 'success'); paint(); }
+          catch (e) { toast(e.message, 'error'); }
+        },
+      }, ['Make a new password']) : null;
+      const handNote = h.handChosen ? el('div', { class: 'banner banner--warn lan-hand-chosen', style: 'margin:0 0 var(--space-3);' }, [icon('alert', { size: 14 }),
+        el('span', {}, ['This clinic network still uses the key chosen in 0.0.23 as its password, which every laptop sends with each sync. A long password made by the app is safer. Once every laptop runs 0.0.24, press Make a new password: the other laptops join again once, typing the same clinic key.']),
+        handBtn]) : null;
       const codePanel = h.joinCode ? el('div', { class: 'lan-code-panel' }, [
         el('div', { class: 'lan-code-label' }, ['Clinic key — type this on each laptop that joins']),
         el('div', { class: 'lan-join-code' }, [h.joinCode]),
@@ -1517,6 +1537,7 @@ export function renderAdmin(ctx, params = {}) {
           `This laptop hosts the clinic network but does not sync with it — it is ${st.configured ? `connected to ${whereNow()}` : 'not connected to any server'}. Its own records do not reach the other laptops, nor theirs this one. Sync it with the clinic network, or stop hosting.`,
         ])]) : null,
         codePanel,
+        handNote,
         el('div', { class: 'kv-grid', style: 'margin:0 0 var(--space-3);' }, [
           kv('Clinic network', h.name || 'Clinic network'),
           kv('Other laptops reach it at', reach.length ? reach[0].url.replace(/^https:\/\//, '') : 'Not on a network', { class: 'kv-val lan-address' }),

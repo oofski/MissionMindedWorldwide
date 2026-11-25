@@ -284,22 +284,6 @@ function setJoinCode(code) {
   state.joins.clear();
   return c;
 }
-// v0.0.24: a host from 0.0.23 whose network password was chosen by hand
-// (Change the clinic key, or a key chosen when it first hosted). That key is
-// what the clinic knows, so it becomes the clinic key the next laptop types —
-// and the network password, which every laptop sends with every sync and
-// which nobody types any more, becomes a long one the app makes. The laptops
-// joined with the old one join again, once, with the key they already know.
-// Returns the new password ('' when there was nothing to do), for the
-// caller to move this laptop's own sync to it (main.js).
-function retireHandChosenKey() {
-  if (!state.dir || !fs.existsSync(hubFile())) return '';
-  open();
-  const k = getMeta('key');
-  if (!k || lan.madeKey(k)) return '';
-  joinCode();
-  return setKey('');
-}
 // The join proof's key, made once for each key (it takes a moment).
 async function proofKeyOf(id) {
   const p = state.proofKey;
@@ -866,8 +850,12 @@ function status() {
   return {
     running: !!state.server, hasData, hosting: getMeta('hosting') === '1',
     name: id.name, port, hostId: id.hostId, pin: id.pin, pinShown: lan.showPin(id.pin),
-    // v0.0.24: what the next laptop types, and wrong tries lately.
-    joinCode: J.showCode(joinCode()), joinFailures: joinFailures(),
+    // v0.0.24: what the next laptop types, and wrong tries lately — and
+    // whether the network's password is still one chosen by hand in 0.0.23
+    // (sent with every sync; the host's card offers to make a long one once
+    // every laptop runs 0.0.24 — never by itself, which would sign out the
+    // laptops still on 0.0.23 with no way back but the connection code).
+    joinCode: J.showCode(joinCode()), joinFailures: joinFailures(), handChosen: !lan.madeKey(id.key),
     addresses: lan.lanAddresses().map((a) => ({ address: a.address, iface: a.iface, preferred: a.preferred, url: port ? `https://${a.address}:${port}` : '' })),
     laptops, error: state.error, beaconError: state.beaconError, computer: os.hostname(),
     // Waiting for the clinic's Wi-Fi (see resume): the networks it hosts on,
@@ -877,7 +865,7 @@ function status() {
 }
 
 module.exports = {
-  HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, retireHandChosenKey, start, stop, resume, erase, shutdown,
+  HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, start, stop, resume, erase, shutdown,
   JOIN_TRIES_PER_ADDRESS, JOIN_TRIES_ALL, AUTH_FAILS_PER_ADDRESS,
   // for the tests
   _resetJoinLimits: () => { state.joinTries = []; state.joins.clear(); state.authFails.clear(); },

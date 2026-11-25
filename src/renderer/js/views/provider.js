@@ -38,7 +38,7 @@ const CLEANING_OPTS = [
 // left out), so the floor lead can send patients to the right chair.
 export function needsLabel(n) {
   if (!n) return '';
-  const parts = [n.filling ? 'Filling' : null, n.extraction ? 'Extraction' : null, n.cleaning ? 'Cleaning' : null].filter(Boolean);
+  const parts = [n.filling ? 'Filling' : null, n.extraction ? 'Extraction' : null].filter(Boolean);
   if (!parts.length && n.other) parts.push('Other procedure');
   return parts.join(' + ');
 }
@@ -293,15 +293,19 @@ export function renderProvider(ctx, params = {}) {
       [['filling', fillingRows], ['extraction', extractRows]].forEach(([tx, rows]) => {
         if (keepTx === tx) return;
         const r = findRow(rows, id);
-        if (r && r.dataset.auto === '1') r.remove();
+        // A row left for a future visit is the dentist's plan, never removed
+        // by a tap on the mouth (the mouth does not show it as today's).
+        if (r && r.dataset.auto === '1' && !isFutureRow(r._get())) r.remove();
       });
       if (keepTx !== 'cleaning' && cleanState.teeth) {
         const i = cleanState.teeth.indexOf(id);
         if (i >= 0) { cleanState.teeth.splice(i, 1); renderCleanTeeth(); }
       }
     }
+    // This visit's row for the tooth — a future visit's is not today's work,
+    // so tagging the tooth adds one for today beside it.
     function findRow(rowsEl, tooth) {
-      return Array.from(rowsEl.children).find((r) => r._get && r._get().tooth === tooth);
+      return Array.from(rowsEl.children).find((r) => r._get && r._get().tooth === tooth && !isFutureRow(r._get()));
     }
     function setRowNote(row, note) { if (row._setNote) row._setNote(note); }
 
@@ -1131,6 +1135,9 @@ export function renderProvider(ctx, params = {}) {
       // for a future visit is listed below, not shown as today's.
       Array.from(fillingRows.children).forEach((r) => { const f = r._get(); if (f.tooth && !isFutureRow(f)) m[f.tooth] = 'filling'; });
       Array.from(extractRows.children).forEach((r) => { const x = r._get(); if (x.tooth && !isFutureRow(x)) m[x.tooth] = 'extraction'; });
+      // ...it stays a tooth of concern (selected, no procedure), so the
+      // printed "Teeth of concern" keeps it.
+      [...fillingRows.children, ...extractRows.children].forEach((r) => { const y = r._get(); if (y.tooth && isFutureRow(y) && !(y.tooth in m)) m[y.tooth] = null; });
       (cleanState.teeth || []).forEach((id) => { if (!m[id]) m[id] = 'cleaning'; });
       return m;
     }
@@ -1282,7 +1289,7 @@ export function renderProvider(ctx, params = {}) {
       // chair (Filling / Extraction), so the dentist decides here — there is
       // no "undecided". Work marked for a future visit is not this visit's.
       if (mode === 'waiting' && !plannedForThisVisit(payload)) {
-        toast('Add the treatment for this visit before moving the patient: use Add filling or Add extraction (or a cleaning, Other or restorative work). Rows marked "Future visit" do not count.', 'error');
+        toast('Add the treatment for this visit before moving the patient: use Add filling or Add extraction (or Other / restorative work). Rows marked "Future visit" do not count. Only a cleaning? Use Transfer to hygienist.', 'error');
         const firstTooth = (fillingRows.firstElementChild && fillingRows.firstElementChild._tooth) || (extractRows.firstElementChild && extractRows.firstElementChild._tooth);
         if (firstTooth && firstTooth.focus) firstTooth.focus();
         return;
@@ -1663,7 +1670,12 @@ export function stillToDo(priorVisits) {
   const open = new Map();
   const key = (kind, tooth) => `${kind}:${String(tooth || '').trim().toUpperCase()}`;
   [...(Array.isArray(priorVisits) ? priorVisits : [])].reverse().forEach((v) => {
-    (v.done || []).forEach((d) => open.delete(key(d.kind, d.tooth)));
+    // Done: that item — and, for a tooth taken out, anything else planned
+    // for it (a filling on a tooth that is gone is never still to do).
+    (v.done || []).forEach((d) => {
+      open.delete(key(d.kind, d.tooth));
+      if (d.kind === 'extraction') open.delete(key('filling', d.tooth));
+    });
     (v.future || []).forEach((f) => {
       if (!String(f.tooth || '').trim()) return;
       open.delete(key(f.kind, f.tooth));
@@ -1679,8 +1691,9 @@ export function plannedForThisVisit(payload) {
   const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
   if (thisVisitRows(payload.fillings).some(has) || thisVisitRows(payload.extractions).some(has)) return true;
   if (String(payload.other_procedures || '').trim()) return true;
-  // A cleaning ticked on this chart — the data layer's rule (didCleaning).
-  if (Object.entries(payload.cleaning || {}).some(([k, v]) => v && k !== 'quad_detail' && k !== 'teeth' && !(Array.isArray(v) && !v.length))) return true;
+  // Not a cleaning: the hygienist and the dentist tick the same boxes, so a
+  // cleaning already done would read as work still waiting for a chair. A
+  // cleaning-only patient goes to the hygienist (Transfer to hygienist).
   return Object.values(payload.restorative || {}).some((v) => v && typeof v === 'object' && v.on);
 }
 // v0.0.24: This visit | Future visit, on each filling and extraction row. A
@@ -1730,8 +1743,10 @@ function flagDot(n) { return el('span', { class: 'flag-dot' }, [icon('flag', { s
 // prior work and per-tooth notes round-trip.
 function initialTeeth(tx, tr) {
   const data = {};
-  (tx.fillings || []).forEach((f) => { if (f.tooth) data[f.tooth] = { tx: 'filling', note: f.note || '' }; });
-  (tx.extractions || []).forEach((x) => { if (x.tooth && !x.other) data[x.tooth] = { tx: 'extraction', note: x.note || '' }; });
+  // v0.0.24: a tooth left for a future visit is a tooth of concern, not
+  // today's filling or extraction.
+  (tx.fillings || []).forEach((f) => { if (f.tooth) data[f.tooth] = { tx: isFutureRow(f) ? null : 'filling', note: f.note || '' }; });
+  (tx.extractions || []).forEach((x) => { if (x.tooth && !x.other) data[x.tooth] = { tx: isFutureRow(x) ? (data[x.tooth] ? data[x.tooth].tx : null) : 'extraction', note: x.note || (data[x.tooth] && data[x.tooth].note) || '' }; });
   toothList(tx.cleaning && tx.cleaning.teeth).forEach((id) => { if (!data[id]) data[id] = { tx: 'cleaning', note: '' }; });
   (tr.teeth || []).forEach((id) => { if (!data[id]) data[id] = { tx: null, note: (tr.teeth_notes && tr.teeth_notes[id]) || '' }; });
   Object.entries(tr.teeth_notes || {}).forEach(([id, note]) => { if (data[id] && !data[id].note) data[id].note = note; });

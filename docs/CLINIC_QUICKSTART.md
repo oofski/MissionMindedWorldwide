@@ -50,8 +50,10 @@ code** (Admin → Cloud → Show connection code on a connected laptop).
    laptop is lost, tick *Also make every other laptop join again*.
 
 Every laptop must run **0.0.24 or later** to join with the short key (or paste the
-connection code). A host whose clinic key was chosen by hand in 0.0.23 keeps that key as
-its clinic key; after updating, the other laptops join again once, typing it.
+connection code). A host whose key was chosen by hand in 0.0.23 keeps that key as its
+clinic key, and the laptops already joined stay joined. Its card then offers **Make a new
+password**: press it once every laptop runs 0.0.24 — they join again once, typing the
+same clinic key.
 
 ## 4. Pre-registration (internet server only)
 - Admin → **Events** → **Pre-reg link**: copy the link, or let patients scan the **QR

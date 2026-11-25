@@ -106,7 +106,8 @@ function showCode(code) {
 function codeProblem(code) {
   const c = canonCode(code);
   if (c.length < 4) return 'Choose a clinic key of at least 4 numbers or letters — 6 or more is safer. Or leave it blank, and the app makes one.';
-  if (c.length > 64) return 'That clinic key is too long — 64 characters at most.';
+  // 100, as a key chosen in 0.0.23 could be — it is kept as the clinic key.
+  if (c.length > 100) return 'That clinic key is too long — 100 characters at most.';
   if (!/^[\x21-\x7e]+$/.test(c)) return 'Use plain numbers and letters in the clinic key — no accented letters or symbols another laptop\'s keyboard may not type the same way.';
   return '';
 }

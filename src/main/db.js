@@ -355,8 +355,11 @@ function migrate() {
   // v0.0.24: the exit survey's answers, kept apart from the patient — as
   // TOTALS, never one row per patient. Each laptop keeps one running tally
   // for each clinic event (how many answered, and how many chose each
-  // answer), so no stored copy — here, on the server, in a backup — holds
-  // anyone's answers on their own to be matched to the patient row's time.
+  // answer, in the survey's own order — canonicalCounts), so no stored copy —
+  // here, on the server, in a backup — holds a patient's answers apart from
+  // the others' to be matched to the patient row's time. (A laptop that has
+  // taken one survey for an event holds a total of one: totals, like any
+  // report, say little for a handful of people.)
   // The patient's own survey row (exit_surveys) says only that it was
   // answered or declined, which is what check-out needs. Synced as
   // 'survey_tally', event-scoped like a report; only the laptop it belongs to
@@ -2024,8 +2027,9 @@ function patientHistory(patientId) {
       DLabels.futureRows(fil).forEach((x) => future.push({ kind: 'filling', ...x }));
       DLabels.futureRows(ext).forEach((x) => future.push({ kind: 'extraction', ...x }));
       if (notTreated) {
+        // (An "Other" extraction is a description, not a tooth's plan.)
         DLabels.thisVisitRows(fil).forEach((x) => { if (x.tooth) future.push({ kind: 'filling', ...x, unfinished: true }); });
-        DLabels.thisVisitRows(ext).forEach((x) => { if (x.tooth) future.push({ kind: 'extraction', ...x, unfinished: true }); });
+        DLabels.thisVisitRows(ext).forEach((x) => { if (x.tooth && !x.other) future.push({ kind: 'extraction', ...x, unfinished: true }); });
       } else {
         DLabels.thisVisitRows(fil).forEach((x) => { if (x.tooth) done.push({ kind: 'filling', tooth: String(x.tooth) }); });
         DLabels.thisVisitRows(ext).forEach((x) => { if (x.tooth) done.push({ kind: 'extraction', tooth: String(x.tooth) }); });
@@ -2058,14 +2062,11 @@ function patientHistory(patientId) {
 // v0.0.24: { filling, extraction, other } — this visit's planned work on a
 // treatment record (rows marked for a future visit left out).
 function treatmentNeeds(tx) {
-  if (!tx) return { filling: false, extraction: false, cleaning: false, other: false };
+  if (!tx) return { filling: false, extraction: false, other: false };
   const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
   return {
     filling: DLabels.thisVisitRows(safeJson(tx.fillings, [])).some(has),
     extraction: DLabels.thisVisitRows(safeJson(tx.extractions, [])).some(has),
-    // A cleaning ticked on the dentist's chart (sealant, scaling…): the
-    // report's own rule (didCleaning).
-    cleaning: didCleaning(tx),
     // Restorative work at a chair (core build-up, re-cement, denture,
     // bridge) and a typed-in procedure are "Other procedure".
     other: !!String(tx.other_procedures || '').trim()
@@ -3176,6 +3177,31 @@ function saveExitSurvey(actor, patientId, data) {
   return getExitSurvey(patientId);
 }
 
+// A tally's counts in one fixed order — the survey's questions and answers
+// as SURVEY_SCHEMA lists them — whatever order they were added in. Kept in
+// the order answers first arrived, the first key under each question was
+// the first patient's answer, readable from any copy however large the
+// totals grew. Zero and unknown counts are dropped; an answer this build
+// does not know (a newer form's) is kept after the known ones, sorted.
+function canonicalCounts(c) {
+  const src = c && typeof c === 'object' ? c : {};
+  const out = {};
+  const qs = [...Object.keys(SURVEY_SCHEMA), ...Object.keys(src).filter((q) => !SURVEY_SCHEMA[q]).sort()];
+  for (const q of qs) {
+    const b = src[q];
+    if (!b || typeof b !== 'object') continue;
+    const known = SURVEY_SCHEMA[q] || [];
+    const o = {};
+    for (const k of [...known, ...Object.keys(b).filter((x) => !known.includes(x)).sort()]) {
+      const n = Number(b[k]);
+      if (Number.isFinite(n) && n > 0) o[k] = n;
+    }
+    if (Object.keys(o).length) out[q] = o;
+  }
+  return out;
+}
+const countsText = (raw) => JSON.stringify(canonicalCounts(typeof raw === 'string' ? safeJson(raw, {}) : raw));
+
 // Add one survey's answers to this laptop's tally for the event: one more
 // response, and one more for each answer chosen (each option of a select-all
 // question). The tally is this laptop's own row, so no other laptop's write
@@ -3188,8 +3214,8 @@ function addToSurveyTally(eventId, answers) {
     const bucket = (counts[q] = counts[q] && typeof counts[q] === 'object' ? counts[q] : {});
     for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (Number(bucket[one]) || 0) + 1;
   }
-  if (row) db.prepare('UPDATE survey_tallies SET responses = ?, counts = ? WHERE id = ?').run((Number(row.responses) || 0) + 1, JSON.stringify(counts), row.id);
-  else db.prepare('INSERT INTO survey_tallies (uid, event_id, device, responses, counts) VALUES (?,?,?,?,?)').run(crypto.randomUUID(), eventId, device, 1, JSON.stringify(counts));
+  if (row) db.prepare('UPDATE survey_tallies SET responses = ?, counts = ? WHERE id = ?').run((Number(row.responses) || 0) + 1, countsText(counts), row.id);
+  else db.prepare('INSERT INTO survey_tallies (uid, event_id, device, responses, counts) VALUES (?,?,?,?,?)').run(crypto.randomUUID(), eventId, device, 1, countsText(counts));
 }
 
 function getExitSurvey(patientId) {
@@ -4076,18 +4102,27 @@ function importClinicBundle(actor, bundle) {
     restoreMany('consents', SYNC_COLS.consent, 'consents');
     restoreMany('xrays', SYNC_COLS.xray, 'xrays');
     restoreOnePerPatient('exit_surveys', SYNC_COLS.survey, 'exit_surveys');
-    // The survey totals, by uid: a newer copy of a tally replaces an older
-    // one; one already here and as new is left as it is.
+    // The survey totals, by uid. A tally only ever grows (its laptop adds
+    // to it, nobody else writes it), so the copy with more responses is the
+    // newer, whatever its stamp — an offline laptop's was never stamped. It
+    // keeps the stamp it came with and is marked as written then (content_rev):
+    // stamped now, it would outrank — on the server and on its own laptop —
+    // every survey that laptop has added since the backup was made.
     for (const r of (Array.isArray(b.survey_tallies) ? b.survey_tallies : [])) {
       if (!r || !r.uid) continue;
-      const counts = typeof r.counts === 'string' ? r.counts : JSON.stringify(r.counts || {});
-      const here = db.prepare('SELECT id, updated_at FROM survey_tallies WHERE uid = ?').get(r.uid);
+      const counts = countsText(r.counts);
+      const responses = Number(r.responses) || 0;
+      const stamp = r.updated_at || '1970-01-01T00:00:00.000Z@import';
+      const here = db.prepare('SELECT id, responses FROM survey_tallies WHERE uid = ?').get(r.uid);
+      if (here && (Number(here.responses) || 0) >= responses) continue;
       if (!here) {
         db.prepare('INSERT INTO survey_tallies (uid, event_id, device, responses, counts, updated_at) VALUES (?,?,?,?,?,?)')
-          .run(r.uid, eventId, String(r.device || ''), Number(r.responses) || 0, counts, r.updated_at || null);
-      } else if (r.updated_at && (!here.updated_at || String(r.updated_at) > String(here.updated_at))) {
-        db.prepare('UPDATE survey_tallies SET responses = ?, counts = ?, updated_at = ? WHERE id = ?').run(Number(r.responses) || 0, counts, r.updated_at, here.id);
+          .run(r.uid, eventId, String(r.device || ''), responses, counts, stamp);
+      } else {
+        db.prepare('UPDATE survey_tallies SET responses = ?, counts = ?, updated_at = ? WHERE id = ?').run(responses, counts, stamp, here.id);
       }
+      const row = db.prepare('SELECT * FROM survey_tallies WHERE uid = ?').get(r.uid);
+      db.prepare('UPDATE survey_tallies SET content_rev = ?, synced_rev = NULL WHERE id = ?').run(sig(buildData('survey_tally', row)), row.id);
     }
     return eventId;
   });
@@ -5210,6 +5245,10 @@ function applyRemoteRows(remoteRows) {
     // Rebuild an ordered data object so the applied sig matches the origin's.
     const data = {};
     for (const col of SYNC_COLS[entity]) data[col] = env.data[col] === undefined ? null : env.data[col];
+    // Survey totals are kept in one fixed order (canonicalCounts), whatever
+    // order a copy arrives in — before the signature, so the copy stays as
+    // its own laptop sent it and is never pushed back from here.
+    if (entity === 'survey_tally' && data.counts != null) data.counts = countsText(data.counts);
     const rowSig = sig(data);
     // Resolve parent local id. A child whose parent has not arrived yet is
     // parked and retried; but a child whose parent was deliberately DELETED here
@@ -5598,6 +5637,11 @@ function notePresence(user, { computer = '', signedOut = false } = {}) {
     db.prepare(`UPDATE user_sessions SET computer = COALESCE(?, computer), last_seen = ?,
       signed_in_at = CASE WHEN signed_out_at IS NOT NULL THEN ? ELSE signed_in_at END, signed_out_at = NULL WHERE id = ?`)
       .run(name, t, t, row.id);
+  }
+  // Signing out also closes this computer's sign-ins recorded under an older
+  // device id (after a Disconnect), so no laptop is told it is in use here.
+  if (signedOut && name) {
+    db.prepare('UPDATE user_sessions SET signed_out_at = ? WHERE user_uid = ? AND computer = ? AND device != ? AND signed_out_at IS NULL').run(t, userUid, name, device);
   }
   return uid;
 }

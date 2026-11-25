@@ -5377,19 +5377,18 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       // After review: a cleaning at the chair counts; a tooth left for later
       // is not drawn as today's; a visit the patient left before a chair
       // leaves its planned work still to do.
-      log(provM.needsLabel({ cleaning: true }) === 'Cleaning' && provM.needsLabel({ filling: true, cleaning: true }) === 'Filling + Cleaning'
-        && provM.plannedForThisVisit({ fillings: [], extractions: [], cleaning: { sealant: true } }) === true
-        && provM.plannedForThisVisit({ fillings: [], extractions: [], cleaning: { teeth: ['3'], quad_detail: 'UR' } }) === false,
-        'v0.0.24: a cleaning ticked on the dentist\'s chart is treatment for a chair (Cleaning) — the teeth tapped and the quadrant note are not');
+      log(provM.plannedForThisVisit({ fillings: [], extractions: [], cleaning: { sealant: true } }) === false
+        && provM.needsLabel({ filling: true, cleaning: true }) === 'Filling',
+        'v0.0.24: a cleaning alone is not work waiting for a chair — the hygienist ticks the same boxes, so one already done would read as still to do (a cleaning-only patient goes to the hygienist)');
       const cl = mkB('Cleo', 'Cleanonly');
-      db.saveTreatment(currentUser, cl.id, { cleaning: { quad_deep_scaling: true, quad_detail: 'UR' } }, 'waiting');
-      log(db.getPatient(cl.id).status === 'treatment_waiting' && (db.listPatients({}).find((p) => p.id === cl.id) || {}).needs.cleaning === true,
-        'v0.0.24: a patient needing only scaling at a dental chair can wait for one, listed as Cleaning');
+      db.saveTreatment(currentUser, cl.id, { cleaning: { adult_prophy: true } }, 'waiting');
+      log(provM.needsLabel((db.listPatients({}).find((p) => p.id === cl.id) || {}).needs) === '',
+        'v0.0.24: and the Treatment column does not list a cleaning the hygienist has done');
       const provMarks = await view('provider.js', 'renderProvider', { id: next.id });
       const toothEl = (n) => Array.from(provMarks.querySelectorAll('.odo-tooth')).find((g) => g.getAttribute('data-id') === String(n) || g.dataset.id === String(n));
       const t5 = toothEl(5), t3 = toothEl(3);
-      log(!!t3 && t3.classList.contains('mark-filling') && !!t5 && !t5.classList.contains('mark-filling'),
-        'v0.0.24: the mouth shows this visit\'s filling, not the one left for a future visit');
+      log(!!t3 && t3.classList.contains('mark-filling') && !!t5 && !t5.classList.contains('mark-filling') && t5.classList.contains('sel'),
+        'v0.0.24: the mouth shows this visit\'s filling, not the one left for a future visit — that tooth stays a tooth of concern');
       provMarks.remove();
       const evLeft = db.createEvent(currentUser, { name: 'Left Early Clinic', location: 'Sandy' });
       db.setActiveEvent(currentUser, evLeft.id);
@@ -5406,6 +5405,43 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       log(!!carryLeft && /Extraction #9/.test(carryLeft.textContent) && /not done — the patient left before a chair/.test(carryLeft.textContent),
         'v0.0.24: and says why: planned for that day, not done');
       provLeft.remove();
+      const gone = provM.stillToDo([
+        { event_name: 'Later', created_at: '2026-09-01', future: [], done: [{ kind: 'extraction', tooth: '12' }] },
+        { event_name: 'Earlier', created_at: '2026-04-01', future: [{ kind: 'filling', tooth: '12', surfaces: ['O'] }, { kind: 'filling', tooth: '13' }], done: [] },
+      ]);
+      log(gone.length === 1 && gone[0].tooth === '13', 'v0.0.24: a tooth taken out since is not offered for a filling');
+
+      // Survey totals in one fixed order, whatever order the answers came in:
+      // the first key under each question is never the first patient's answer.
+      const evO = db.createEvent(currentUser, { name: 'Order Clinic', location: 'Sandy' });
+      db.setActiveEvent(currentUser, evO.id);
+      const o1 = mkB('Ord', 'One'), o2 = mkB('Ord', 'Two');
+      db.saveExitSurvey(currentUser, o1.id, { answers: { living_situation: 'homeless', first_time: 'not_sure' } });
+      db.saveExitSurvey(currentUser, o2.id, { answers: { first_time: 'yes', living_situation: 'own' } });
+      const rawO = rawDb();
+      const tO = rawO.prepare('SELECT * FROM survey_tallies WHERE event_id = ?').get(evO.id);
+      const evOUid = rawO.prepare('SELECT uid FROM events WHERE id = ?').get(evO.id);
+      rawO.close();
+      const cO = JSON.parse(tO.counts);
+      log(JSON.stringify(Object.keys(cO)) === '["first_time","living_situation"]' && JSON.stringify(Object.keys(cO.first_time)) === '["yes","not_sure"]'
+        && JSON.stringify(Object.keys(cO.living_situation)) === '["own","homeless"]',
+        'v0.0.24: the survey totals are kept in the survey\'s own order, never the order patients answered in (that gave away the first patient\'s answers)');
+      // A backup with an older copy of this laptop's tally does not undo it;
+      // a copy of another laptop's keeps its own stamp and never outranks it.
+      const bO = db.exportClinicBundle(evO.id);
+      const older = { ...bO, survey_tallies: [{ ...bO.survey_tallies[0], responses: 1, counts: JSON.stringify({ first_time: { not_sure: 1 } }) },
+        { uid: 'other-laptop-tally', device: 'other', responses: 4, counts: JSON.stringify({ living_situation: { shelter: 1, own: 3 }, first_time: { no: 4 } }), updated_at: '2026-11-20T10:00:00.000Z@other' }] };
+      db.importClinicBundle(currentUser, older);
+      const rawO2 = rawDb();
+      const mine = rawO2.prepare('SELECT responses FROM survey_tallies WHERE uid = ?').get(tO.uid);
+      const theirs = rawO2.prepare('SELECT * FROM survey_tallies WHERE uid = ?').get('other-laptop-tally');
+      rawO2.close();
+      const pushedO = db.collectSyncRows(5000).rows.find((r) => r.uid === 'other-laptop-tally');
+      log(mine.responses === 2 && !!theirs && JSON.stringify(Object.keys(JSON.parse(theirs.counts))) === '["first_time","living_situation"]'
+        && !!pushedO && pushedO.updated_at === '2026-11-20T10:00:00.000Z@other',
+        'v0.0.24: restoring a backup never shrinks a tally, puts its totals in order, and sends another laptop\'s copy with its own stamp — so it never outranks that laptop\'s later totals');
+      void evOUid;
+      db.setActiveEvent(currentUser, evB.id);
       db.setActiveEvent(currentUser, evB.id);
     }
 
@@ -11559,6 +11595,23 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       log(!!failsBanner && /6 wrong clinic key tries in the last 10 minutes/.test(failsBanner.textContent) && /someone on this Wi-Fi may be guessing/.test(failsBanner.textContent)
         && JSON.stringify(callsL) === JSON.stringify([['hubSetJoinCode', '', true]]) && /The clinic key is now 135-791\. Every other laptop joins again with it\./.test(lastToastL()),
         'v0.0.24 Cloud tab, hosting: wrong clinic key tries are shown, and a new key can sign every other laptop out (a laptop lost)');
+      pg.remove();
+      // A network password still chosen by hand in 0.0.23: said on the
+      // card, and replaced only when the administrator chooses.
+      hsL = { ...hubRunning, handChosen: true, joinCode: 'sandy clinic day 2026' };
+      pg = await cloudPage();
+      callsL.length = 0;
+      const handCard = cardL(pg, /This laptop hosts the clinic network/);
+      const handBanner = handCard && handCard.querySelector('.lan-hand-chosen');
+      if (handBanner) pressL(handBanner, 'Make a new password');
+      await settleL();
+      const handOv = $all('.modal-overlay').find((m) => /Make a new network password\?/.test(m.textContent));
+      const handTxt = handOv ? handOv.textContent : '';
+      if (handOv) pressL(handOv, 'Make a new password');
+      await settleL(20);
+      log(!!handBanner && /still uses the key chosen in 0\.0\.23 as its password/.test(handBanner.textContent) && /update every laptop to 0\.0\.24/.test(handTxt)
+        && JSON.stringify(callsL) === JSON.stringify([['hubSetJoinCode', 'sandy clinic day 2026', true]]),
+        'v0.0.24 Cloud tab, hosting: a password chosen by hand in 0.0.23 is flagged, and replaced only when the administrator presses Make a new password (keeping the clinic key)');
       pg.remove();
       window.api.hubSetJoinCode = hubSetJoinCodeWas;
       window.api.hubStart = hubStartWas23;

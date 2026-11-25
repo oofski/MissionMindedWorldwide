@@ -413,6 +413,11 @@ was lost or stolen, tick **Also make every other laptop join again**: the
 network's password is made again too, and every other laptop joins again with
 the new key; their records are kept.
 
+A host whose key was **chosen by hand in 0.0.23** keeps that key as its clinic key, and
+the laptops already joined stay joined. Its card says the key is still the network's
+password and offers **Make a new password**: press it once every laptop runs 0.0.24 —
+the clinic key stays the same, and the other laptops join again once, typing it.
+
 **Show connection code** still gives a code to paste instead of typing — it
 holds the network's password, so like the internet server's, **the connection
 code is the clinic's password**. Every laptop must run **0.0.24 or later** to

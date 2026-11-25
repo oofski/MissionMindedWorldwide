@@ -600,7 +600,7 @@ function eventSlots(raw, startDate, endDate) {
   if (!first) return null;
   const last = day(endDate) && day(endDate) >= first ? day(endDate) : first;
   const days = [];
-  for (let t = Date.parse(first + 'T00:00:00Z'); days.length < 7; t += 86400000) {
+  for (let t = Date.parse(first + 'T00:00:00Z'); days.length < 31; t += 86400000) {
     const d = new Date(t).toISOString().slice(0, 10);
     if (d > last) break;
     days.push(d);
@@ -615,7 +615,10 @@ function eventSlots(raw, startDate, endDate) {
   const past = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 10);
   const list = [];
   days.filter((d) => d >= past).forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
-  return list.length ? { perHour: per, list } : null;
+  // Every day over: the clinic is, and the form says so (never an open form
+  // with no time to choose and no limit).
+  if (!list.length) return times.length ? { perHour: per, list, over: true } : null;
+  return { perHour: per, list };
 }
 // How many pre-registrations each slot has, counted by the database — one
 // row back for each hour, not every patient — and on the event's own index
@@ -653,6 +656,7 @@ async function handleCheckinGet(eventUid, env, url) {
   if (!ev) return htmlResponse(checkinErrorPage(), 404);
   if (!ev.active) return htmlResponse(checkinClosedPage(ev.name), 410);
   const lang = (url && url.searchParams && url.searchParams.get('lang') === 'es') ? 'es' : 'en';
+  if (ev.slots && ev.slots.over) return htmlResponse(checkinClosedPage(ev.name), 410);
   const slots = ev.slots ? { ...ev.slots, counts: await slotCounts(env, eventUid) } : null;
   return htmlResponse(checkinFormPage(eventUid, ev.name, lang, ev.cities, ev.state, slots));
 }
@@ -660,7 +664,7 @@ async function handleCheckinGet(eventUid, env, url) {
 async function handleCheckinPost(eventUid, request, env) {
   const ev = await getEventRow(env, eventUid);
   if (!ev) return json({ ok: false, error: 'This pre-registration link is not valid.' }, 404);
-  if (!ev.active) {
+  if (!ev.active || (ev.slots && ev.slots.over)) {
     return json({ ok: false, error: 'This clinic has closed and is no longer taking pre-registrations. / Esta clínica ha cerrado y ya no acepta pre-registros.' }, 410);
   }
 

@@ -140,15 +140,6 @@ function buildMenu() {
 // laptops find it again by its beacon. Opened away from the clinic's Wi-Fi
 // it waits until it is back there (hub.resume), and follows then.
 async function resumeHosting() {
-  // v0.0.24: a network password chosen by hand in 0.0.23 is replaced by a
-  // long one (hub.retireHandChosenKey); this laptop's own sync moves with it.
-  try {
-    const k = hub.retireHandChosenKey();
-    const m = k ? db.getSyncMeta() : null;
-    // Saved as it is, not through cloud.applyConfig: that starts a sync at
-    // once, before the host is listening again (see below).
-    if (k && m && m.configured && m.lanHost && m.lanHost === hub.ownHostId()) db.setSyncMeta({ key: k });
-  } catch (_) { /* hosting carries on with the key it has */ }
   const follow = (st) => { if (st && st.running) { const t = hub.ownTarget(); cloud.repointLan(t.url, t.lan.pin, t.lan.name); } };
   try {
     await hub.resume({ version: app.getVersion(), selfDevice: db.ensureDeviceId(), onStarted: follow });

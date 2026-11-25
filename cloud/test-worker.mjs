@@ -1430,7 +1430,9 @@ async function main() {
     await call(envS, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [
       { entity: 'event', uid: 'evt-past', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Past Clinic', active: 1, start_date: '2020-03-07', location: 'Sandy, OR', slots: slotsJson } }] } });
     const fPast = await getS('evt-past');
-    check('v1.9.0: hours on a day already over are not offered', fPast.status === 200 && !/prereg_slot"/.test(fPast.text));
+    const postPast = await call(envS, 'POST', '/checkin/evt-past', { body: { ...REQ, first_name: 'Late', last_name: 'Comer', dob: '1990-01-01', gender: 'female', city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'L C', signature_png: 'data:image/png;base64,AAAA' } });
+    check('v1.9.0: an event with time slots whose days are all over says it is closed, and takes no more sign-ups',
+      fPast.status === 410 && !/prereg_slot"/.test(fPast.text) && postPast.status === 410);
     const fNo = await getS('evt-noslots');
     check('v1.9.0: an event without time slots asks no arrival time', fNo.status === 200 && !/When will you arrive/.test(fNo.text) && !/prereg_slot"/.test(fNo.text));
     const sub = (uid, slot, n) => call(envS, 'POST', '/checkin/' + uid, { body: { ...REQ, first_name: 'Slot', last_name: 'P' + n, dob: '1990-01-01', gender: 'female',
@@ -1597,11 +1599,15 @@ async function hubChecks() {
     for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
     check('v0.0.24 clinic network hub: an address refused a hand-chosen password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check (another address, and the host itself, are not) — and one the app made is never held back',
       madeLimited === false && hubMod._authLimited(fakeReq('::ffff:192.168.1.77')) === true && hubMod._authLimited(fakeReq('192.168.1.78')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
+    // "Make a new password" on the host's card: the same clinic key, a long
+    // password made by the app (ipc hub:setJoinCode with signOutOthers).
     const codeBefore = hubMod.status().joinCode;
-    const retired = hubMod.retireHandChosenKey();
-    check('v0.0.24 clinic network hub: a hand-chosen password is replaced by a long one the app makes (the clinic key is kept), and its limits cleared',
-      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(retired) && hubMod.identity().key === retired && hubMod.status().joinCode === codeBefore
-      && hubMod._authLimited(fakeReq('192.168.1.77')) === false && hubMod.retireHandChosenKey() === '');
+    const flagged = hubMod.status().handChosen;
+    hubMod.setJoinCode(codeBefore);
+    const renewed = hubMod.setKey('');
+    check('v0.0.24 clinic network hub: a hand-chosen password is flagged on the host\'s card, and "Make a new password" keeps the clinic key, makes a long password, and clears its limits',
+      flagged === true && /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(renewed) && hubMod.status().handChosen === false && hubMod.status().joinCode === codeBefore
+      && hubMod._authLimited(fakeReq('192.168.1.77')) === false);
     await hubMod.stop();
     await hubMod.erase();
   } finally {
@@ -1625,12 +1631,10 @@ async function hubChecks() {
       f.close();
       hubMod.init(dir2);
       const c = hubMod.status().joinCode;
-      // Started by 0.0.24 (main.js resumeHosting): a hand-chosen password is
-      // retired, and the clinic types the key it already knows.
-      const retiredOld = hubMod.retireHandChosenKey();
-      check(`v0.0.24 clinic network hub: a host from 0.0.23 with a network password ${label} is given its clinic key (${label === 'chosen by hand' ? 'that password, and a new long password' : 'a new six-digit one, keeping its password'})`,
-        expect(c) && hubMod.status().joinCode === c
-        && (label === 'chosen by hand' ? /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(retiredOld) && hubMod.identity().key === retiredOld : retiredOld === '' && hubMod.identity().key === key));
+      // Nothing changes by itself at start-up: a laptop still on 0.0.23
+      // stays joined. A hand-chosen password is flagged on the host's card.
+      check(`v0.0.24 clinic network hub: a host from 0.0.23 with a network password ${label} is given its clinic key (${label === 'chosen by hand' ? 'that password, flagged to be replaced' : 'a new six-digit one'}) and keeps its password`,
+        expect(c) && hubMod.status().joinCode === c && hubMod.identity().key === key && hubMod.status().handChosen === (label === 'chosen by hand'));
     } finally {
       hubMod.shutdown();
       rmSync(dir2, { recursive: true, force: true });

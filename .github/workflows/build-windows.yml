@@ -269,9 +269,9 @@ jobs:
               connected — Synced … min ago* (or *not reaching it*, or *Not
               connected*), and the Cloud tab says "You're in".
             - Every laptop needs this version to join with the short key.
-              A host whose clinic key was chosen by hand in 0.0.23 keeps
-              that key as its clinic key; after updating, the other laptops
-              join again once, typing it.
+              A host whose key was chosen by hand in 0.0.23 keeps that key as
+              its clinic key, and joined laptops stay joined; its card offers
+              **Make a new password** for once every laptop is updated.
 
             **Pre-registration**
 
