@@ -325,9 +325,14 @@ function connectionCode() {
       if (!url) throw new Error('This laptop is not on a network, so no other laptop can reach it. Connect it to the clinic\'s Wi-Fi first.');
     }
     const lanT = { pin: m.lanPin, hostId: m.lanHost, name: m.lanName };
-    // The key itself rides along for the dialog: a laptop that picks this
-    // host from the list found types it instead of pasting the code.
-    return { code: encodeConnectionCode(url, m.key, lanT), url, lan: true, key: m.key, name: m.lanName };
+    // v0.0.24: what a laptop picking this host from the list types is the
+    // short clinic key, which only the host has — the network's password
+    // (in the code) is never typed. So the dialog shows it on the host.
+    const hub = require('./hub');
+    const own = !!m.lanHost && hub.ownHostId() === m.lanHost;
+    let joinCode = '';
+    if (own) { try { joinCode = hub.status().joinCode || ''; } catch (_) { joinCode = ''; } }
+    return { code: encodeConnectionCode(url, m.key, lanT), url, lan: true, joinCode, name: m.lanName };
   }
   return { code: encodeConnectionCode(m.url, m.key), url: trimUrl(m.url) };
 }

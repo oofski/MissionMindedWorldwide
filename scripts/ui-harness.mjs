@@ -5486,6 +5486,62 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       try { window.localStorage.removeItem('mmw.wristband.label'); } catch (_) { /* none */ }
     }
 
+    /* ---- v0.0.24: one account signed in on two laptops ---- */
+    {
+      db.createUser(currentUser, { username: 'shared_acct', full_name: 'Sha Red', role: 'checkout', password: 'x' });
+      const sh = db.login('shared_acct', 'x');
+      const rawP = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).all(...a); } finally { r.close(); } };
+      const myUid = db.notePresence(sh, { computer: 'REG-1' });
+      const userUid = rawP('SELECT uid FROM users WHERE id = ?', sh.id)[0].uid;
+      log(/^presence:[^:]+:/.test(myUid) && rawP('SELECT computer, signed_out_at FROM user_sessions WHERE uid = ?', myUid)[0].computer === 'REG-1'
+        && db.otherSessions(sh).length === 0,
+        'v0.0.24 sign-in: this laptop records the account signed in here — and does not count itself as another laptop');
+      const fresh = new Date().toISOString();
+      const old = new Date(Date.now() - 20 * 60000).toISOString();
+      const pres = (dev, computer, last, out = null) => ({ entity: 'presence', uid: `presence:${dev}:${userUid}`, event_uid: null, patient_uid: null, deleted: 0,
+        updated_at: new Date().toISOString() + '@' + dev, data: { user_uid: userUid, device: dev, computer, signed_in_at: last, last_seen: last, signed_out_at: out } });
+      const ap = db.applyRemoteRows([pres('dev-vitals', 'VITALS-2', fresh), pres('dev-old', 'OLD-LAPTOP', old), pres('dev-out', 'SIGNED-OUT', fresh, fresh)]);
+      const others = db.otherSessions(sh);
+      log(ap.applied === 3 && others.length === 1 && others[0].computer === 'VITALS-2',
+        'v0.0.24 sign-in: another laptop where the account was active in the last 15 minutes, and not signed out, counts — one quiet for 20 minutes, or signed out, does not');
+      db.notePresence(sh, { computer: 'REG-1', signedOut: true });
+      const pushedP = db.collectSyncRows(5000).rows.filter((r) => r.entity === 'presence' && r.uid === myUid);
+      log(pushedP.length === 1 && pushedP[0].event_uid === null && pushedP[0].patient_uid === null && !!pushedP[0].data.signed_out_at
+        && Object.keys(pushedP[0].data).join() === 'user_uid,device,computer,signed_in_at,last_seen,signed_out_at',
+        'v0.0.24 sign-in: signing out is recorded, and travels to the other laptops with the computer name and times only');
+      // The sign-in screen asks.
+      const { renderLogin } = await import('../src/renderer/js/views/login.js');
+      const loginWas = window.api.authLogin, logoutWas = window.api.authLogout;
+      let navL = null, logouts = 0;
+      window.api.authLogin = async () => ({ ok: true, data: { ...sh, otherSessions: [{ computer: 'VITALS-2', last_seen: new Date(Date.now() - 3 * 60000).toISOString() }] } });
+      window.api.authLogout = async () => { logouts++; return { ok: true }; };
+      try {
+        for (const choice of ['Cancel', 'Sign in anyway']) {
+          navL = null;
+          const lv = renderLogin({ navigate: (v) => { navL = v; }, afterLogin: null });
+          document.body.append(lv);
+          await settle(4);
+          const ins = lv.querySelectorAll('input');
+          setInput(ins[0], 'shared_acct'); setInput(ins[1], 'x');
+          const signBtn = lv.querySelector('.btn--primary.btn--block');
+          signBtn.click();
+          await settle(8);
+          const ov = $all('.modal-overlay').pop();
+          const txt = ov ? ov.textContent : '';
+          if (ov) Array.from(ov.querySelectorAll('button')).find((b) => b.textContent.trim() === choice).click();
+          await settle(10);
+          log(/This account is signed in on another laptop/.test(txt) && /VITALS-2/.test(txt) && /active 3 min ago/.test(txt) && /their own account/.test(txt)
+            && (choice === 'Cancel' ? navL === null && logouts === 1 : navL === 'dashboard' && logouts === 1),
+            choice === 'Cancel'
+              ? 'v0.0.24 sign-in: signing in with an account in use on another laptop says where, and Cancel signs out again'
+              : 'v0.0.24 sign-in: "Sign in anyway" goes on in — a volunteer who moved laptops still gets in');
+          lv.remove();
+          $all('.modal-overlay').forEach((o) => o.remove());
+        }
+      } finally { window.api.authLogin = loginWas; window.api.authLogout = logoutWas; }
+      currentUser = signInAdmin();
+    }
+
     if (prevEventId && db.listEvents().some((e) => e.id === prevEventId)) db.setActiveEvent(currentUser, prevEventId);
   }
 
@@ -10824,6 +10880,8 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
     log(!!P.aCode && /^MMW1-/.test(P.aCode.code || '') && !!readL.lan && readL.lan.pin === P.aHost.pin && readL.key === P.aHost.key
       && readL.url === 'https://127.0.0.1:' + P.aHost.port && readL.lan.hostId === P.aHost.hostId && readL.lan.name === 'Lowell clinic network',
       'clinic network: the host\'s connection code carries the address the others reach it at (never its own 127.0.0.1 shortcut), the key and the certificate pin — and the screens read it back');
+    log(!!P.aCode && /^\d{3}-\d{3}$/.test(P.aCode.joinCode || '') && P.aCode.key === undefined,
+      'v0.0.24 clinic network: beside the code, the host offers the short clinic key to type — never the network\'s password on its own');
     const beaconsL = capturedL.slice(0, L.beaconsBeforeReview == null ? capturedL.length : L.beaconsBeforeReview)
       .map((c) => ({ raw: c.text, b: lanL.readBeacon(Buffer.from(c.text, 'utf8'), c.rinfo) }));
     log(beaconsL.length >= 2 && beaconsL.every((x) => !!x.b && x.b.hostId === (P.aHost || {}).hostId && x.b.fp === String((P.aHost || {}).pin).slice(0, 16)
@@ -11275,7 +11333,7 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         : { ok: true, service: 'mmw-sync', version: '1.7.0' };
     }, 'cloudTest');
     window.api.cloudConfig = okWrap((cfg = {}) => { callsL.push(['config', cfg.url, cfg.key, cfg.lan || null]); return { ...stL }; }, 'cloudConfig');
-    window.api.cloudConnectionCode = okWrap(() => ({ code: CODE_L, url: 'https://192.168.1.23:47800', lan: true, key: KEY_L, name: 'Lowell clinic network' }), 'cloudConnectionCode');
+    window.api.cloudConnectionCode = okWrap(() => ({ code: CODE_L, url: 'https://192.168.1.23:47800', lan: true, joinCode: '482-913', name: 'Lowell clinic network' }), 'cloudConnectionCode');
     const joinsL = [];
     window.api.cloudJoin = async ({ url, key, move, lan } = {}) => { joinsL.push([url, key, !!move, lan || null]); return { ok: true, data: { ok: true, service: 'mmw-sync', version: '1.7.0', sync: { ok: true }, needsSetup: false, accounts: 2 } }; };
     window.api.authNeedsSetup = async () => ({ ok: true, data: { needsSetup: false, defaultAdmin: { username: 'admin', password: 'admin' } } });
@@ -11450,8 +11508,9 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       pressL(pg, 'Show connection code');
       await settleL();
       const ovL = $all('.modal-overlay').pop();
-      log(!!ovL && (ovL.querySelector('input.cloud-code') || {}).value === CODE_L && (ovL.querySelector('input.cloud-key') || {}).value === KEY_L && /password/.test(ovL.textContent),
-        'Cloud tab, hosting: Show connection code reveals the code — and the key, for a laptop that picks this host from its list — in the dialog that calls it a password');
+      log(!!ovL && (ovL.querySelector('input.cloud-code') || {}).value === CODE_L && (ovL.querySelector('input.cloud-key') || {}).value === '482-913'
+        && !ovL.textContent.includes(KEY_L) && /password/.test(ovL.textContent),
+        'Cloud tab, hosting: Show connection code reveals the code — and the short clinic key (v0.0.24), never the network\'s password, for a laptop that picks this host from its list — in the dialog that calls it a password');
       if (ovL) pressL(ovL, 'Done');
       await settleL();
       callsL.length = 0;
@@ -11596,6 +11655,19 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
         && bErr.text === 'Clinic network: not reaching it' && bErr.tone === 'warn' && bOff.text === 'Not connected' && bOff.tone === 'off'
         && bNet.text === 'Cloud: connected' && bNet.sub === 'Synced just now',
         'v0.0.24 sidebar: the sync badge says "Clinic network: connected · Synced 3 min ago", "not reaching it", or "Not connected"');
+      const { updateBannerText } = await import('../src/renderer/js/app.js');
+      const uA = updateBannerText({ status: 'available', version: '0.0.25' }, '0.0.24', false);
+      const uD = updateBannerText({ status: 'downloaded', version: '0.0.25' }, '0.0.24', true);
+      const uDs = updateBannerText({ status: 'downloaded', version: '0.0.25' }, '0.0.24', false);
+      const uP = updateBannerText({ status: 'downloading', version: '0.0.25', percent: 40 }, '0.0.24', true);
+      log(/A new version of Mission Minded is ready: 0\.0\.25 \(this laptop has 0\.0\.24\)/.test(uA.text) && uA.action === 'Update now'
+        && uD.action === 'Restart & install' && /downloaded/.test(uD.text) && uDs.action === null && /Ask an administrator/.test(uDs.note)
+        && /40%/.test(uP.text) && updateBannerText({ status: 'available', version: '0.0.24' }, '0.0.24', true) === null && updateBannerText({}, '0.0.24', true) === null,
+        'v0.0.24 updates: a new version found online is said on every screen — ready, downloading, or downloaded and waiting for a restart (only an administrator installs)');
+      const appSrc24 = fs.readFileSync(new URL('../src/renderer/js/app.js', import.meta.url), 'utf8');
+      log(/`App \$\{appInfo\.version/.test(appSrc24) && !/`Version \$\{appInfo\.version/.test(appSrc24) && /The sync server has its own, separate number \(1\.x/.test(appSrc24)
+        && /checkOnlineQuietly\(\); \};/.test(appSrc24),
+        'v0.0.24 updates: the version shown is labelled the app\'s, the update window tells it from the sync server\'s 1.x number, and each sign-in checks for an update quietly');
       // Moving to the internet from the clinic network asks, naming it.
       pressL(pg, 'Internet server');
       await settleL(20);

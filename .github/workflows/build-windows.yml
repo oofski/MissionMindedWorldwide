@@ -236,29 +236,61 @@ jobs:
 
             ### New in this build
 
-            **Joining a clinic network with its key is easier.**
+            **App 0.0.24 (sync server 1.9.0).** The app and the sync server
+            have separate version numbers: 0.0.x is the app, 1.x the server.
 
-            - **The clinic key no longer has to be typed exactly.** Capitals,
-              spaces and dashes do not matter, so `abcde fghjk …` joins a
-              clinic network whose key is `ABCDE-FGHJK-…`. Before, any
-              difference was refused with "could not show it holds this clinic
-              key", even when the key was right.
-            - **The key box shows what you type**, so a typo can be seen and
-              fixed. It used to hide every character.
-            - **Choose your own clinic key.** When a laptop first hosts the
-              clinic network, it can take a key that is easy to read out and
-              type (at least 8 letters or numbers; capitals do not matter), or
-              leave it blank for one the app makes.
-            - **Change the clinic key** on the host's card sets a new one,
-              chosen or made, at any time. The host carries on by itself; the
-              other laptops join again with the new key or the new connection
-              code.
-            - A key you choose is protected with a slower check, so a short
-              key cannot be guessed quickly by someone on the Wi-Fi. Every
-              laptop needs this version to join a host with a chosen key.
-            - The error now says where to find the key on the host (**Admin →
-              Cloud → Show connection code**), and suggests pasting the whole
-              connection code instead, which needs no typing.
+            **Dental Triage and Treatment Waiting**
+
+            - The **Treatment waiting** list is in the order patients were
+              moved there (numbered), says what each needs (**Filling**,
+              **Extraction**, both, or Other procedure) before Status, and can
+              be filtered to only fillings or only extractions.
+            - Moving a patient to Treatment Waiting needs this visit's
+              treatment chosen — Add filling / Add extraction. There is no
+              "undecided".
+            - Each filling and extraction is **This visit** or **Future
+              visit**. Future work stays on the chart, prints apart as still
+              to do, is not counted or given after-care today, and is offered
+              at the patient's next clinic under "Still to do from an earlier
+              visit".
+
+            **Clinic network (no internet)**
+
+            - The **clinic key is short**: six digits by default, like
+              `482-913`, or one you choose (4 or more). Spaces and dashes do
+              not matter. The host shows it in large numbers.
+            - The key is **never sent over the Wi-Fi**: the laptop and the
+              host check they hold the same key without sending it, then the
+              host hands over the network's own long password. Wrong tries are
+              counted and limited, and the host's card shows them.
+            - Changing the clinic key leaves joined laptops joined (unless you
+              choose to make them all join again, if a laptop is lost).
+            - **"How do I know I'm in?"** The sidebar says *Clinic network:
+              connected — Synced … min ago* (or *not reaching it*, or *Not
+              connected*), and the Cloud tab says "You're in".
+            - Every laptop needs this version to join with the short key.
+
+            **Pre-registration**
+
+            - The link as a **QR code**, on the Events screen and as soon as a
+              new event is created, with a **sign to print** in English and
+              Spanish.
+            - **Time slots**: patients choose the hour they will arrive, each
+              hour taking at most so many. Arrivals shows each patient's time.
+              Needs the sync server updated to 1.9.0 (Admin → Cloud offers it).
+
+            **Also**
+
+            - The **exit survey is anonymous**: answers are saved without the
+              patient's name or record, and the survey says so.
+            - **Wristband labels**: choose this laptop's band or label size and
+              printer (Admin → Events). The barcode is printed at the label's
+              exact size, sharp on a thermal printer. It holds only the
+              six-digit wristband number.
+            - Signing in with an account that is in use on another laptop
+              warns first.
+            - A **banner on every screen** says when a new version is ready,
+              and installs it in one press.
 
             ### Signing in
             Every install now comes with an administrator already set up:

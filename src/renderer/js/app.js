@@ -83,6 +83,58 @@ const ctx = {
 
 // App version + offline-update state, shown in any view.
 const appInfo = { version: '', hasUpdate: false, latest: null, checked: false };
+// v0.0.24: a new version found online, said on every screen until it is
+// installed — it used to be heard only while the Updates window was open,
+// so a laptop could sit a version behind for weeks.
+const onlineUpdate = { status: '', version: '', percent: 0, dismissed: false, checked: false };
+if (api.onUpdateEvent) {
+  try {
+    api.onUpdateEvent((s) => {
+      if (!s) return;
+      if (s.status === 'available' || s.status === 'downloading' || s.status === 'downloaded') {
+        onlineUpdate.status = s.status; onlineUpdate.version = s.version || onlineUpdate.version; onlineUpdate.percent = s.percent || 0;
+        paintUpdateBanner();
+      }
+    });
+  } catch (_) { /* no updater here */ }
+}
+export function updateBannerText(u, current, isAdmin) {
+  if (!u || !u.status || !u.version || u.version === current) return null;
+  if (u.status === 'downloaded') {
+    return { text: `Mission Minded ${u.version} is downloaded. Restart the app to finish updating — the records stay as they are.`,
+      action: isAdmin ? 'Restart & install' : null, note: isAdmin ? '' : 'Ask an administrator to restart and install it.' };
+  }
+  if (u.status === 'downloading') return { text: `Downloading Mission Minded ${u.version}… ${u.percent || 0}%`, action: null, note: '' };
+  return { text: `A new version of Mission Minded is ready: ${u.version} (this laptop has ${current || 'an older one'}). Updating takes a minute, and the records stay as they are.`,
+    action: 'Update now', note: '' };
+}
+function paintUpdateBanner() {
+  const slot = document.getElementById('update-banner-slot');
+  if (!slot) return;
+  const isAdmin = !!(store.user && store.user.role === 'admin');
+  const b = onlineUpdate.dismissed ? null : updateBannerText(onlineUpdate, appInfo.version, isAdmin);
+  if (!b) { slot.replaceChildren(); return; }
+  slot.replaceChildren(el('div', { class: 'banner banner--info update-banner' }, [
+    icon('update', { size: 16 }),
+    el('span', {}, [b.text, b.note ? ' ' + b.note : '']),
+    b.action ? el('button', { class: 'btn btn--sm btn--primary', onClick: async () => {
+      if (onlineUpdate.status === 'downloaded') { try { await api.installOnline(); } catch (e) { toast(e.message, 'error'); } }
+      else openUpdateModal();
+    } }, [b.action]) : null,
+    onlineUpdate.status === 'available' ? el('button', { class: 'btn btn--sm btn--ghost', title: 'Remind me next time', onClick: () => { onlineUpdate.dismissed = true; paintUpdateBanner(); } }, ['Later']) : null,
+  ]));
+}
+// Once a session, after sign-in: ask GitHub (quietly) whether there is one.
+async function checkOnlineQuietly() {
+  if (onlineUpdate.checked || !api.checkOnline) return;
+  onlineUpdate.checked = true;
+  try {
+    const r = await api.checkOnline();
+    if (r && r.hasUpdate && r.latestVersion && !onlineUpdate.status) {
+      onlineUpdate.status = 'available'; onlineUpdate.version = r.latestVersion; paintUpdateBanner();
+    }
+  } catch (_) { /* offline: the banner waits for a check that works */ }
+}
 // Whether the machine is still on the password it shipped with. Re-read after
 // sign-in and on every repaint request, so the warning below disappears as soon
 // as somebody actually changes it rather than lingering until a restart.
@@ -236,7 +288,7 @@ function renderShell(active, contentNode) {
     onClick: openUpdateModal,
     title: 'Version & updates',
   }, [
-    el('span', { class: 'ver-label' }, [appInfo.hasUpdate ? 'Update available' : `Version ${appInfo.version || '…'}`]),
+    el('span', { class: 'ver-label' }, [appInfo.hasUpdate ? 'Update available' : `App ${appInfo.version || '…'}`]),
     icon('update', { size: 14 }),
   ]);
 
@@ -264,7 +316,7 @@ function renderShell(active, contentNode) {
         class: 'btn btn--ghost btn--sm' + (appInfo.hasUpdate ? ' btn--soft' : ''),
         onClick: openUpdateModal,
         title: 'Check for updates',
-      }, [icon('update', { size: 15 }), el('span', { class: 'upd-label' }, [appInfo.hasUpdate ? 'Update' : `v${appInfo.version || '1.0.1'}`])]),
+      }, [icon('update', { size: 15 }), el('span', { class: 'upd-label' }, [appInfo.hasUpdate ? 'Update' : `App ${appInfo.version || '…'}`])]),
       el('div', { class: 'topbar-divider' }),
       el('div', { class: 'topbar-user' }, [
         el('div', { class: 'user-meta' }, [
@@ -293,7 +345,7 @@ function renderShell(active, contentNode) {
 
   const main = el('main', { class: 'main' }, [
     topbar,
-    el('div', { class: 'main-scroll' }, [defaultPwWarning, contentNode].filter(Boolean)),
+    el('div', { class: 'main-scroll' }, [el('div', { id: 'update-banner-slot' }), defaultPwWarning, contentNode].filter(Boolean)),
   ]);
   appRoot.append(sidebar, main);
 
@@ -315,14 +367,15 @@ function updateVersionUI() {
   if (chip) {
     chip.classList.toggle('ver-chip--update', appInfo.hasUpdate);
     const lbl = chip.querySelector('.ver-label');
-    if (lbl) lbl.textContent = appInfo.hasUpdate ? 'Update available' : `Version ${appInfo.version || '1.0.1'}`;
+    if (lbl) lbl.textContent = appInfo.hasUpdate ? 'Update available' : `App ${appInfo.version || '…'}`;
   }
   const btn = document.getElementById('update-btn');
   if (btn) {
     btn.classList.toggle('btn--soft', appInfo.hasUpdate);
     const lbl = btn.querySelector('.upd-label');
-    if (lbl) lbl.textContent = appInfo.hasUpdate ? 'Update' : `v${appInfo.version || '1.0.1'}`;
+    if (lbl) lbl.textContent = appInfo.hasUpdate ? 'Update' : `App ${appInfo.version || '…'}`;
   }
+  paintUpdateBanner();
 }
 
 /* ---------------- Offline updates (reachable from any view) ---------------- */
@@ -422,7 +475,11 @@ async function openUpdateModal() {
   }
 
   body.append(
-    el('p', {}, [el('strong', {}, [`Mission Minded v${appInfo.version || ''}`]), el('br'), el('span', { class: 'subtle small' }, ['The app checks GitHub for new versions and installs them for you — no manual download. A USB/folder option is available when offline.'])]),
+    el('p', {}, [el('strong', {}, [`Mission Minded app ${appInfo.version || ''}`]), el('br'), el('span', { class: 'subtle small' }, ['The app checks GitHub for new versions and installs them for you — no manual download. A USB/folder option is available when offline.'])]),
+    // v0.0.24: the two version numbers, told apart.
+    el('p', { class: 'subtle small version-note', style: 'margin:0 0 12px' }, [
+      `${appInfo.version || 'This'} is the app's version — the same on every laptop once each is updated. The sync server has its own, separate number (1.x, like 1.9.0): Admin → Cloud says when it needs updating too.`,
+    ]),
     onlineSection,
     el('div', { class: 'login-divider', style: 'margin:16px 0' }, [el('span', {}, ['offline option'])]),
     el('div', {}, [el('div', { class: 'field-label' }, ['From USB / folder']), usbStatus, usbActions]),
@@ -442,7 +499,7 @@ async function logout() {
 }
 
 // Expose for the login view to trigger an update-info refresh after sign-in.
-ctx.afterLogin = async () => { await Promise.all([refreshAppInfo(true), refreshSecurity()]); updateVersionUI(); };
+ctx.afterLogin = async () => { await Promise.all([refreshAppInfo(true), refreshSecurity()]); updateVersionUI(); checkOnlineQuietly(); };
 
 // Boot. A fresh install ships with the bootstrap administrator already seeded,
 // so this normally goes straight to sign-in. Setup is still the destination for

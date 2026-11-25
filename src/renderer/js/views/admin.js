@@ -987,10 +987,12 @@ export function renderAdmin(ctx, params = {}) {
       // On the clinic network, a laptop that picks this host from the list
       // it finds types the key instead — so the key is shown here too, in
       // the same dialog, behind the same click.
-      const keyLine = r.lan && r.key ? el('div', { style: 'margin:12px 0 0' }, [
+      // v0.0.24: the short clinic key — on the host, which has it; on a
+      // joined laptop, where to find it.
+      const keyLine = !r.lan ? null : r.joinCode ? el('div', { style: 'margin:12px 0 0' }, [
         el('p', { class: 'subtle small', style: 'margin:0 0 6px' }, [`Or, on the other laptop, pick ${where} from the clinic networks found and type this clinic key:`]),
-        el('input', { class: 'input cloud-key', readonly: true, value: r.key, style: 'font-family:var(--font-mono);font-size:var(--fs-sm)' }),
-      ]) : null;
+        el('input', { class: 'input cloud-key', readonly: true, value: r.joinCode, style: 'font-family:var(--font-mono);font-size:var(--fs-h3)' }),
+      ]) : el('p', { class: 'subtle small', style: 'margin:12px 0 0' }, [`Or, on the other laptop, pick ${where} from the clinic networks found and type the clinic key the host laptop's Cloud tab shows in large numbers.`]);
       await modal({
         title: 'Connection code',
         body: el('div', {}, [
