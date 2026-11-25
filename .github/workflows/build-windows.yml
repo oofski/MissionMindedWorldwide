@@ -269,6 +269,9 @@ jobs:
               connected — Synced … min ago* (or *not reaching it*, or *Not
               connected*), and the Cloud tab says "You're in".
             - Every laptop needs this version to join with the short key.
+              A host whose clinic key was chosen by hand in 0.0.23 keeps
+              that key as its clinic key; after updating, the other laptops
+              join again once, typing it.
 
             **Pre-registration**
 
@@ -281,8 +284,9 @@ jobs:
 
             **Also**
 
-            - The **exit survey is anonymous**: answers are saved without the
-              patient's name or record, and the survey says so.
+            - The **exit survey is anonymous**: answers are never saved with
+              the patient's name or record — only added to the clinic's
+              totals — and the survey says so. Update every laptop.
             - **Wristband labels**: choose this laptop's band or label size and
               printer (Admin → Events). The barcode is printed at the label's
               exact size, sharp on a thermal printer. It holds only the

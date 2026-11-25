@@ -54,10 +54,12 @@ works locally and re-syncs when reconnected.
 ## Entities (sync `entity` values)
 `event`, `patient`, `triage`, `treatment`, `consent`, `xray`, `survey`, `user`, `report`,
 `inv_item`, `inv_move` — and, from app 0.0.24 (server 1.9.0):
-- `survey_answer` — one exit survey's answers, with **no patient**: `event_uid` set,
-  `patient_uid` null, data `{ version, language, answers, created_on }` (a date, no time).
-  The patient's own `survey` row then says only that it was answered (its `version` ends
-  in `+anon`) and carries no answers.
+- `survey_tally` — one laptop's running totals of the exit survey for one event, with
+  **no patient**: `event_uid` set, `patient_uid` null, data `{ device, responses, counts }`
+  (`counts` is `{ question: { answer: n } }` as JSON). Only the laptop it belongs to writes
+  it; reports add every laptop's. No row ever holds one patient's answers. The patient's
+  own `survey` row then says only that it was answered (its `version` ends in `+anon`) and
+  carries no answers.
 - `presence` — an account signed in on a laptop: data `{ user_uid, device, computer,
   signed_in_at, last_seen, signed_out_at }`, no parent. Read by the sign-in screen to warn
   that an account is in use on another laptop.

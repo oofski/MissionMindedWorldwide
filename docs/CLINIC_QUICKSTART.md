@@ -50,7 +50,8 @@ code** (Admin → Cloud → Show connection code on a connected laptop).
    laptop is lost, tick *Also make every other laptop join again*.
 
 Every laptop must run **0.0.24 or later** to join with the short key (or paste the
-connection code).
+connection code). A host whose clinic key was chosen by hand in 0.0.23 keeps that key as
+its clinic key; after updating, the other laptops join again once, typing it.
 
 ## 4. Pre-registration (internet server only)
 - Admin → **Events** → **Pre-reg link**: copy the link, or let patients scan the **QR
@@ -79,8 +80,11 @@ not a UPC), never the name or date of birth.
   needs (Filling / Extraction), and filters to only fillings or only extractions.
 
 ## 7. The exit survey is anonymous
-The answers are saved without the patient's name or record, and nobody can see which
-answers are whose. The survey says so to the patient, in English and Spanish.
+The answers are never saved with the patient's name or record — each laptop only adds
+them to its running totals for the clinic, which the reports add up. The survey says so
+to the patient, in English and Spanish. A survey answered that way cannot be reopened.
+Update **every** laptop: one still on an older version would show such a survey as
+answered with no answers, and let it be taken again.
 
 ## 8. One account per person
 Signing in with an account that is in use on another laptop shows a warning. Give each
