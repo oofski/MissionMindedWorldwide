@@ -554,6 +554,12 @@ function register(getMainWindow) {
     const ownId = hub.ownHostId();
     const onOwn = saved.configured && !!ownId && saved.lanHost === ownId;
     if (saved.configured && !onOwn && !move) return { moveFrom: savedLabel(saved) };
+    // As in hub:setJoinCode: a host whose password is still the key chosen in
+    // 0.0.23 keeps it as its clinic key — a different one would leave the old
+    // key working as the password.
+    if (chosen && ownId && !lan.madeKey(hub.identity().key) && joincode.canonCode(chosen) !== joincode.canonCode(hub.identity().key)) {
+      throw new Error('This clinic network still uses the clinic key chosen in 0.0.23 as its password. Host it with that key, then use Change the clinic key on its card (with "Also make every other laptop join again" ticked).');
+    }
     if (chosen) hub.setJoinCode(chosen);
     await hub.start({ name, version: appVersion(), selfDevice: db.ensureDeviceId() });
     const t = hub.ownTarget();
@@ -590,6 +596,14 @@ function register(getMainWindow) {
     if (!ownId) throw new Error('This laptop does not host a clinic network.');
     const c = String(code == null ? '' : code).trim();
     if (c && joincode.codeProblem(c)) throw new Error(joincode.codeProblem(c));
+    // A host from 0.0.23 whose clinic key was chosen by hand still has that
+    // key as the network's password. A new clinic key alone would leave the
+    // old one working for anyone who knows it — so it comes with a new
+    // password, or not at all.
+    const pw = hub.identity().key;
+    if (!signOutOthers && !lan.madeKey(pw) && joincode.canonCode(c) !== joincode.canonCode(pw)) {
+      throw new Error('This clinic network still uses the clinic key chosen in 0.0.23 as its password, so the old key would keep working. Tick "Also make every other laptop join again" (once every laptop runs 0.0.24), or press Make a new password first.');
+    }
     hub.setJoinCode(c);
     if (signOutOthers) {
       const saved = db.getSyncMeta();

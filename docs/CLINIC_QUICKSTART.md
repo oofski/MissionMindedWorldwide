@@ -63,6 +63,9 @@ same clinic key.
   they will arrive, and each hour takes at most so many (for example 8 an hour,
   8:00 to 12:00). Arrivals shows each patient's time, in that order. Walk-ins are not
   counted.
+- Time slots need the event's **Start date** — and, for a clinic of several days, its
+  **End date**: the times are offered on each day, and after the End date the link says
+  the clinic has closed. The Events list marks an event whose date has passed.
 - The link does not work on the clinic network, which has no internet.
 
 ## 5. Wristbands
@@ -85,6 +88,9 @@ not a UPC), never the name or date of birth.
 The answers are never saved with the patient's name or record — each laptop only adds
 them to its running totals for the clinic, which the reports add up. The survey says so
 to the patient, in English and Spanish. A survey answered that way cannot be reopened.
+The totals are for the clinic's report: someone who looked at them just before and just
+after one patient's survey could still work out that patient's answers, so don't watch
+the survey numbers live during the clinic.
 Update **every** laptop: one still on an older version would show such a survey as
 answered with no answers, and let it be taken again.
 

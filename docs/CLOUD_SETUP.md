@@ -417,6 +417,10 @@ A host whose key was **chosen by hand in 0.0.23** keeps that key as its clinic k
 the laptops already joined stay joined. Its card says the key is still the network's
 password and offers **Make a new password**: press it once every laptop runs 0.0.24 —
 the clinic key stays the same, and the other laptops join again once, typing it.
+Until then, the card counts the sync requests refused that password in the last ten
+minutes (someone may be guessing it — make the new password soon), and **Change the
+clinic key** comes with *Also make every other laptop join again* ticked: a new key
+alone would leave the old one working as the password.
 
 **Show connection code** still gives a code to paste instead of typing — it
 holds the network's password, so like the internet server's, **the connection

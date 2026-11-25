@@ -271,18 +271,23 @@ export function renderProvider(ctx, params = {}) {
       // hygienist's job (still available in the collapsed Cleaning panel).
       txOptions: ['filling', 'extraction'],
       onTag: (id, d) => { if (!locked) syncToothToRows(id, d); },
-      onUntag: (id) => { if (!locked) removeAutoRows(id); },
+      // A tooth left for a future visit stays a tooth of concern while its row
+      // is there (refreshMarks puts it back), as it is when the chart reopens.
+      onUntag: (id) => { if (!locked) { removeAutoRows(id); refreshMarks(); } },
     });
 
     // When a tooth is tagged in the odontogram, fill the matching list row.
     function syncToothToRows(id, d) {
       removeAutoRows(id, d.tx);
       if (d.tx === 'filling') {
-        const existing = findRow(fillingRows, id);
+        const existing = findRow(fillingRows, id) || futureToToday(fillingRows, id);
         if (existing) { setRowNote(existing, d.note); } else { addFilling({ tooth: id, note: d.note }, true); }
       } else if (d.tx === 'extraction') {
-        const existing = findRow(extractRows, id);
+        const existing = findRow(extractRows, id) || futureToToday(extractRows, id);
         if (existing) { setRowNote(existing, d.note); } else { addExtraction({ tooth: id, note: d.note }, true); }
+      } else if (!d.tx) {
+        // A tooth whose rows are left for a future visit: its note is theirs.
+        futureRows(id).forEach((r) => setRowNote(r, d.note));
       } else if (d.tx === 'cleaning') {
         if (!cleanState.teeth) cleanState.teeth = [];
         if (!cleanState.teeth.includes(id)) { cleanState.teeth.push(id); renderCleanTeeth(); }
@@ -306,6 +311,17 @@ export function renderProvider(ctx, params = {}) {
     // so tagging the tooth adds one for today beside it.
     function findRow(rowsEl, tooth) {
       return Array.from(rowsEl.children).find((r) => r._get && r._get().tooth === tooth && !isFutureRow(r._get()));
+    }
+    const futureRows = (tooth) => [...fillingRows.children, ...extractRows.children].filter((r) => r._get && r._get().tooth === tooth && isFutureRow(r._get()));
+    // A tooth tapped for this visit whose row of that kind is left for a future
+    // visit: that row is moved to this visit, surfaces and all — not a second,
+    // empty one put beside it (and the plan offered again at the next clinic).
+    function futureToToday(rowsEl, tooth) {
+      const r = Array.from(rowsEl.children).find((x) => x._get && x._get().tooth === tooth && isFutureRow(x._get()));
+      const btn = r && r.querySelector('.visit-seg-btn[data-visit="now"]');
+      if (!btn || btn.disabled) return null;
+      btn.click();
+      return r;
     }
     function setRowNote(row, note) { if (row._setNote) row._setNote(note); }
 
@@ -1142,7 +1158,15 @@ export function renderProvider(ctx, params = {}) {
       return m;
     }
     // Manual row edits reflect back onto the mouth (silent — no onTag loop).
-    function refreshMarks() { odo.setMarks(computeMarksLive()); paintAddLabels(); paintCarry(); }
+    // The teeth the rows marked last time with no procedure (future-visit rows)
+    // go when no row marks them any more.
+    let rowConcern = [];
+    function refreshMarks() {
+      const m = computeMarksLive();
+      odo.setMarks(m, rowConcern.filter((id) => !(id in m)));
+      rowConcern = Object.keys(m).filter((id) => m[id] === null);
+      paintAddLabels(); paintCarry();
+    }
 
     function collectTreatment() {
       const extractions = Array.from(extractRows.children).map((r) => r._get()).filter((x) => x.tooth);
@@ -1676,8 +1700,13 @@ export function stillToDo(priorVisits) {
       open.delete(key(d.kind, d.tooth));
       if (d.kind === 'extraction') open.delete(key('filling', d.tooth));
     });
+    // A filling left for later on a tooth this same visit took out is stale.
+    // (Not a later filling beside today's — a temporary one now, a permanent
+    // one later — nor a later extraction: a root left for surgery.)
+    const gone = new Set((v.done || []).filter((d) => d.kind === 'extraction').map((d) => key('filling', d.tooth)));
     (v.future || []).forEach((f) => {
       if (!String(f.tooth || '').trim()) return;
+      if (gone.has(key(f.kind, f.tooth))) return;
       open.delete(key(f.kind, f.tooth));
       open.set(key(f.kind, f.tooth), { ...f, from: v.event_name || '', from_at: v.created_at || '' });
     });

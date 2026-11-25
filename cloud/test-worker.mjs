@@ -12,7 +12,7 @@
 
 import worker from './worker.js';
 import { createRequire } from 'module';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 // The walk-in form's own definition of a complete medical history. The online
@@ -1428,11 +1428,27 @@ async function main() {
     check('v1.9.0: a two-day event offers each day\'s hours, from the first arrival, one an hour',
       (f2d.text.match(/name="prereg_slot"/g) || []).length === 4 && /Sat Dec 5 · 9:30 AM/.test(f2d.text) && /Sun Dec 6 · 10:30 AM/.test(f2d.text));
     await call(envS, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [
-      { entity: 'event', uid: 'evt-past', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Past Clinic', active: 1, start_date: '2020-03-07', location: 'Sandy, OR', slots: slotsJson } }] } });
+      { entity: 'event', uid: 'evt-past', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Past Clinic', active: 1, start_date: '2020-03-07', end_date: '2020-03-08', location: 'Sandy, OR', slots: slotsJson } },
+      { entity: 'event', uid: 'evt-pastnoend', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Running Clinic', active: 1, start_date: '2020-03-07', end_date: '', location: 'Sandy, OR', slots: slotsJson } },
+      { entity: 'event', uid: 'evt-badday', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Odd Date Clinic', active: 1, start_date: '2099-02-30', end_date: '', location: 'Sandy, OR', slots: slotsJson } },
+      { entity: 'event', uid: 'evt-long', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Long Clinic', active: 1, start_date: '2020-01-01', end_date: '2099-12-31', location: 'Sandy, OR', slots: slotsJson } }] } });
     const fPast = await getS('evt-past');
     const postPast = await call(envS, 'POST', '/checkin/evt-past', { body: { ...REQ, first_name: 'Late', last_name: 'Comer', dob: '1990-01-01', gender: 'female', city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'L C', signature_png: 'data:image/png;base64,AAAA' } });
-    check('v1.9.0: an event with time slots whose days are all over says it is closed, and takes no more sign-ups',
+    check('v1.9.0: an event with time slots whose end date has passed says it is closed, and takes no more sign-ups',
       fPast.status === 410 && !/prereg_slot"/.test(fPast.text) && postPast.status === 410);
+    // App 0.0.23 had no End date: an event with only a start date may be a
+    // clinic of several days, still running — its form stays open, no times.
+    const fRun = await getS('evt-pastnoend');
+    const postRun = await call(envS, 'POST', '/checkin/evt-pastnoend', { body: { ...REQ, first_name: 'Day', last_name: 'Two', dob: '1990-01-01', gender: 'female', city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'D T', signature_png: 'data:image/png;base64,AAAA' } });
+    check('v1.9.0: an event with no end date whose start day is past keeps its form open (no arrival times) — never "closed" on day 2',
+      fRun.status === 200 && !/When will you arrive/.test(fRun.text) && postRun.status !== 410 && postRun.status < 300);
+    const fBad = await getS('evt-badday');
+    check('v1.9.0: a start date that is not a real day (Feb 30) offers no times, and does not close the form',
+      fBad.status === 200 && !/prereg_slot"/.test(fBad.text));
+    const fLong = await getS('evt-long');
+    const todayIso = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 10);
+    check('v1.9.0: an event longer than 31 days offers the days ahead (not its first 31), and is not closed',
+      fLong.status === 200 && (fLong.text.match(/name="prereg_slot"/g) || []).length === 31 * 4 && fLong.text.includes('value="' + todayIso + 'T08:00"'));
     const fNo = await getS('evt-noslots');
     check('v1.9.0: an event without time slots asks no arrival time', fNo.status === 200 && !/When will you arrive/.test(fNo.text) && !/prereg_slot"/.test(fNo.text));
     const sub = (uid, slot, n) => call(envS, 'POST', '/checkin/' + uid, { body: { ...REQ, first_name: 'Slot', last_name: 'P' + n, dob: '1990-01-01', gender: 'female',
@@ -1488,6 +1504,17 @@ async function hubChecks() {
     check('clinic network hub: a push is stored and comes back from a pull, by the delivery counter',
       push.status === 200 && JSON.parse(push.text).applied === 2 && pull.status === 200
       && pj.rows.map((r) => r.uid).join() === 'evt-hub,pt-hub' && pj.mode === 'seq' && pj.cursor === '2');
+    // The survey totals: the copy a push replaces is not left in the host's
+    // log file, where two copies could be compared (secure_delete clears it in
+    // the database file itself).
+    const walOf = () => { try { return statSync(join(dir, hubMod.HUB_FILE + '-wal')).size; } catch (_) { return 0; } };
+    const tallyRow = (n, at) => ({ entity: 'survey_tally', uid: 'tally-hub', event_uid: 'evt-hub', patient_uid: null, updated_at: at,
+      data: { device: 'hub-test', responses: n, counts: JSON.stringify({ first_time: { yes: n } }) } });
+    const walBefore = walOf();
+    await req('/v1/push', { method: 'POST', headers: auth(id.key), body: JSON.stringify({ device_id: 'hub-test', rows: [tallyRow(1, '2026-10-01T00:00:02.000Z@h')] }) });
+    const pushT = await req('/v1/push', { method: 'POST', headers: auth(id.key), body: JSON.stringify({ device_id: 'hub-test', rows: [tallyRow(2, '2026-10-01T00:00:03.000Z@h')] }) });
+    check('clinic network hub: after a push of survey totals the host\'s log file is cleared, so no earlier copy is left beside the new one',
+      walBefore > 0 && pushT.status === 200 && JSON.parse(pushT.text).applied === 1 && walOf() === 0);
     const wrong = await req('/v1/pull?since=&limit=10', { headers: auth('not the key') });
     check('clinic network hub: a wrong key is refused exactly as online (401 unauthorized)', wrong.status === 401 && JSON.parse(wrong.text).error === 'unauthorized');
     const form = await req('/checkin/evt-hub');
@@ -1596,9 +1623,21 @@ async function hubChecks() {
     for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
     const madeLimited = hubMod._authLimited(fakeReq('192.168.1.77'));
     hubMod.setKey('hand chosen password 1');
+    // .78 is a laptop the password let in lately.
+    hubMod._noteGoodAddress(fakeReq('192.168.1.78'));
     for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
-    check('v0.0.24 clinic network hub: an address refused a hand-chosen password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check (another address, and the host itself, are not) — and one the app made is never held back',
+    check('v0.0.24 clinic network hub: an address refused a hand-chosen password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check (a laptop the password let in, and the host itself, are not) — and one the app made is never held back',
       madeLimited === false && hubMod._authLimited(fakeReq('::ffff:192.168.1.77')) === true && hubMod._authLimited(fakeReq('192.168.1.78')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
+    check('v0.0.24 clinic network hub: and the host\'s card counts the sync requests refused that password, from every address',
+      hubMod.status().authFailures === hubMod.AUTH_FAILS_PER_ADDRESS && hubMod.status().handChosen === true);
+    // One device taking many addresses: each new one had its own budget.
+    hubMod._resetJoinLimits();
+    hubMod._noteGoodAddress(fakeReq('10.0.0.250'));
+    for (let i = 0; i < hubMod.AUTH_FAILS_ALL; i++) hubMod._noteAuthFail(fakeReq('10.0.0.' + i));
+    check('v0.0.24 clinic network hub: past ' + hubMod.AUTH_FAILS_ALL + ' refusals from all addresses together, an address the password has not let in lately is refused unchecked — one that it has is still checked',
+      hubMod._authLimited(fakeReq('10.0.0.200')) === true && hubMod._authLimited(fakeReq('10.0.0.5')) === true
+      && hubMod._authLimited(fakeReq('10.0.0.250')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
+    hubMod._resetJoinLimits();
     // "Make a new password" on the host's card: the same clinic key, a long
     // password made by the app (ipc hub:setJoinCode with signOutOthers).
     const codeBefore = hubMod.status().joinCode;

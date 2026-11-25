@@ -1113,6 +1113,26 @@ async function main() {
     log(/later end time/.test(badSlot1) && /1 to 500/.test(badSlot2) && slotEv.slots === '{"start":"08:00","end":"12:00","per_hour":8}' && !!slotEv.uid
       && kept.slots === slotEv.slots && cleared.slots === null && !!slotRow && slotRow.data.slots === '{"start":"09:00","end":"11:00","per_hour":5}',
       'v0.0.24 time slots: an event keeps its first arrival, last hour and patients per hour — checked, kept by an edit that does not mention them, cleared on purpose — and they sync to the online form');
+    // Time slots are on each day of the event, so they need its date — a blank
+    // one no longer becomes the day the event was made (closed the next day).
+    let noDay = '', backwards = '', clearedDay = '';
+    try { db.createEvent(currentUser, { name: 'No day', slots: { start: '08:00', end: '12:00', per_hour: 8 } }); } catch (e) { noDay = e.message; }
+    try { db.createEvent(currentUser, { name: 'Backwards', start_date: '2026-12-05', end_date: '2026-12-04' }); } catch (e) { backwards = e.message; }
+    try { db.updateEvent(currentUser, slotEv.id, { start_date: '' }); } catch (e) { clearedDay = e.message; }
+    const twoDay = db.createEvent(currentUser, { name: 'Two Day', start_date: '2026-12-05', end_date: '2026-12-06', slots: { start: '08:00', end: '12:00', per_hour: 8 } });
+    const plainEv = db.createEvent(currentUser, { name: 'Plain Day' });
+    log(/need the clinic's date/.test(noDay) && /before the Start date/.test(backwards) && /need the clinic's date/.test(clearedDay)
+      && twoDay.end_date === '2026-12-06' && !!plainEv.start_date && !db.listEvents().some((e) => e.name === 'No day' || e.name === 'Backwards'),
+      'v0.0.24 time slots: an event with time slots needs its Start date, an End date cannot come before it, and an event without slots still defaults to today');
+    db.deleteEvent(currentUser, twoDay.id, { force: true }); db.deleteEvent(currentUser, plainEv.id, { force: true });
+    const { slotsDateProblem } = await import('../src/renderer/js/views/admin.js');
+    const atNoon = new Date(2026, 11, 7, 12, 0, 0);
+    log(slotsDateProblem({ slots: '{}', start_date: '2026-12-05', end_date: '2026-12-06' }, atNoon).includes('now says the clinic has closed')
+      && /offers no arrival times/.test(slotsDateProblem({ slots: '{}', start_date: '2026-12-05', end_date: '' }, atNoon))
+      && slotsDateProblem({ slots: '{}', start_date: '2026-12-07', end_date: '' }, atNoon) === ''
+      && slotsDateProblem({ slots: '{}', start_date: '2026-12-05', end_date: '2026-12-08' }, atNoon) === ''
+      && slotsDateProblem({ slots: null, start_date: '2020-01-01' }, atNoon) === '',
+      'v0.0.24 time slots: the Events screen says when an event\'s date has passed — the form closed after its End date, or offering no times after a Start date alone — and nothing on the clinic\'s own days');
     const { renderAdmin: renderAdminT } = await import('../src/renderer/js/views/admin.js');
     const admT = renderAdminT(ctxQ, { section: 'events' }); document.body.append(admT);
     for (let i = 0; i < 12; i++) await tick();
@@ -1126,6 +1146,14 @@ async function main() {
     setInput(tOv.querySelector('.slots-start'), '08:30');
     setInput(tOv.querySelector('.slots-end'), '11:30');
     setInput(tOv.querySelector('.slots-per'), '6');
+    const askedDay = tOv.querySelector('.ev-date-note').style.display === '' && /need the clinic's date/.test(tOv.querySelector('.ev-date-note').textContent);
+    setInput(tOv.querySelector('.ev-end'), '2099-12-04');
+    setInput(tOv.querySelector('.ev-start'), '2099-12-05');
+    tOv.querySelector('.ev-start').dispatchEvent(new window.Event('change', { bubbles: true }));
+    const endMoved = tOv.querySelector('.ev-end').value === '2099-12-05';
+    setInput(tOv.querySelector('.ev-end'), '2099-12-06');
+    tOv.querySelector('.ev-end').dispatchEvent(new window.Event('change', { bubbles: true }));
+    const noteGone = tOv.querySelector('.ev-date-note').style.display === 'none';
     const shownNow = tOv.querySelector('.slots-row').style.display === '';
     Array.from(tOv.querySelectorAll('button')).find((b) => /^Create$/.test(b.textContent.trim())).click();
     for (let i = 0; i < 20; i++) await tick();
@@ -1133,6 +1161,8 @@ async function main() {
     const formEv = db.listEvents().find((e) => e.name === 'Form Slot Clinic');
     log(hiddenFirst && shownNow && !!formEv && formEv.slots === '{"start":"08:30","end":"11:30","per_hour":6}' && /Walk-ins are not counted/.test(tOv.textContent),
       'v0.0.24 time slots: the event form offers "patients choose an arrival time", with the first arrival, the last hour and patients per hour');
+    log(askedDay && endMoved && noteGone && !!formEv && formEv.start_date === '2099-12-05' && formEv.end_date === '2099-12-06',
+      'v0.0.24 time slots: the event form has an End date (moved up with the Start date, never before it), and says time slots need the clinic\'s date until it is set');
     admT.remove();
     if (formEv) db.deleteEvent(currentUser, formEv.id, { force: true });
     // Arrivals: the time each patient chose, in that order.
@@ -5389,6 +5419,25 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       const t5 = toothEl(5), t3 = toothEl(3);
       log(!!t3 && t3.classList.contains('mark-filling') && !!t5 && !t5.classList.contains('mark-filling') && t5.classList.contains('sel'),
         'v0.0.24: the mouth shows this visit\'s filling, not the one left for a future visit — that tooth stays a tooth of concern');
+      // A future row's tooth typed on the way to another (1, then 16): only
+      // the tooth it ends on stays a tooth of concern.
+      const futRow = Array.from(provMarks.querySelectorAll('.filling-row')).find((r) => r._get().status === 'future');
+      setInput(futRow.querySelector('input'), '1');
+      setInput(futRow.querySelector('input'), '16');
+      await settle();
+      const selNow = (n) => !!toothEl(n) && toothEl(n).classList.contains('sel');
+      log(selNow(16) && !selNow(1) && !selNow(5) && selNow(3) === false && toothEl(3).classList.contains('mark-filling'),
+        'v0.0.24: a future-visit row\'s tooth corrected (5, then 1, then 16) leaves only 16 selected on the mouth — not every number it passed through');
+      // Tapped on the mouth for this visit, a tooth whose filling row is left
+      // for a future visit: that row moves to this visit, surfaces and all.
+      const rowsBefore = provMarks.querySelectorAll('.filling-row').length;
+      toothEl(16).dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await settle(2);
+      const popF = provMarks.querySelector('.odo-pop');
+      Array.from(popF.querySelectorAll('.odo-pop-opt')).find((b) => /Filling/.test(b.textContent)).click(); await settle(3);
+      const rowsAfter = Array.from(provMarks.querySelectorAll('.filling-row'));
+      log(rowsAfter.length === rowsBefore && rowsAfter.some((r) => r === futRow) && futRow._get().tooth === '16' && futRow._get().status !== 'future'
+        && !futRow.classList.contains('tx-row--future') && toothEl(16).classList.contains('mark-filling'),
+        'v0.0.24: tapping Filling on a tooth whose filling was left for a future visit moves that row to this visit — not a second, empty row beside it');
       provMarks.remove();
       const evLeft = db.createEvent(currentUser, { name: 'Left Early Clinic', location: 'Sandy' });
       db.setActiveEvent(currentUser, evLeft.id);
@@ -5410,6 +5459,11 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
         { event_name: 'Earlier', created_at: '2026-04-01', future: [{ kind: 'filling', tooth: '12', surfaces: ['O'] }, { kind: 'filling', tooth: '13' }], done: [] },
       ]);
       log(gone.length === 1 && gone[0].tooth === '13', 'v0.0.24: a tooth taken out since is not offered for a filling');
+      const sameVisitGone = provM.stillToDo([{ event_name: 'V', created_at: '2026-09-01', done: [{ kind: 'extraction', tooth: '14' }], future: [{ kind: 'filling', tooth: '14', surfaces: ['M', 'O'] }] }]);
+      const tempThenPerm = provM.stillToDo([{ event_name: 'V', created_at: '2026-09-01', done: [{ kind: 'filling', tooth: '14' }], future: [{ kind: 'filling', tooth: '14' }] }]);
+      const rootLater = provM.stillToDo([{ event_name: 'V', created_at: '2026-09-01', done: [{ kind: 'extraction', tooth: '14' }], future: [{ kind: 'extraction', tooth: '14' }] }]);
+      log(sameVisitGone.length === 0 && tempThenPerm.length === 1 && rootLater.length === 1,
+        'v0.0.24: a filling left for later on a tooth taken out at the same visit is not still to do — a later filling beside today\'s, or a root left for surgery, is');
 
       // Survey totals in one fixed order, whatever order the answers came in:
       // the first key under each question is never the first patient's answer.
@@ -5438,8 +5492,46 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       rawO2.close();
       const pushedO = db.collectSyncRows(5000).rows.find((r) => r.uid === 'other-laptop-tally');
       log(mine.responses === 2 && !!theirs && JSON.stringify(Object.keys(JSON.parse(theirs.counts))) === '["first_time","living_situation"]'
-        && !!pushedO && pushedO.updated_at === '2026-11-20T10:00:00.000Z@other',
-        'v0.0.24: restoring a backup never shrinks a tally, puts its totals in order, and sends another laptop\'s copy with its own stamp — so it never outranks that laptop\'s later totals');
+        && !!pushedO && pushedO.updated_at.startsWith('2026-11-20T10:00:00.000Z@other') && pushedO.updated_at > '2026-11-20T10:00:00.000Z@other'
+        && pushedO.updated_at < '2026-11-20T10:00:00.001Z@other',
+        'v0.0.24: restoring a backup never shrinks a tally, puts its totals in order, and sends another laptop\'s copy with its own stamp (just above it) — so it never outranks that laptop\'s later totals');
+      // A fuller copy carried with the SAME stamp (that laptop stopped syncing,
+      // and kept taking surveys): it sorts above the emptier one, so the
+      // server and the other laptops take it too.
+      const fuller = { ...bO, survey_tallies: [{ uid: 'other-laptop-tally', device: 'other', responses: 6, counts: JSON.stringify({ first_time: { no: 6 } }), updated_at: '2026-11-20T10:00:00.000Z@other' }] };
+      db.importClinicBundle(currentUser, fuller);
+      const pushedF = db.collectSyncRows(5000).rows.find((r) => r.uid === 'other-laptop-tally');
+      log(!!pushedF && pushedF.data.responses === 6 && pushedF.updated_at > pushedO.updated_at && pushedF.updated_at < '2026-11-20T10:00:00.001Z@other',
+        'v0.0.24: a fuller copy of a tally carried with the same stamp outranks the emptier one everywhere — and still loses to any later stamp of its own laptop');
+      // From the server, a copy with fewer responses than this laptop's is an
+      // older one, whatever its stamp — a tally only grows. And the copy it
+      // replaced is not left in the log file.
+      const walSize = () => { try { return fs.statSync(DB_PATH + '-wal').size; } catch (_) { return 0; } };
+      const fewer = db.applyRemoteRows([{ entity: 'survey_tally', uid: 'other-laptop-tally', event_uid: evOUid.uid, patient_uid: null, deleted: 0,
+        updated_at: '2026-11-21T10:00:00.000Z@other', data: { device: 'other', responses: 3, counts: JSON.stringify({ first_time: { no: 3 } }) } }]);
+      const rawO3 = rawDb();
+      const stillSix = rawO3.prepare('SELECT responses FROM survey_tallies WHERE uid = ?').get('other-laptop-tally').responses;
+      rawO3.close();
+      const more = db.applyRemoteRows([{ entity: 'survey_tally', uid: 'other-laptop-tally', event_uid: evOUid.uid, patient_uid: null, deleted: 0,
+        updated_at: '2026-11-21T11:00:00.000Z@other', data: { device: 'other', responses: 7, counts: JSON.stringify({ first_time: { no: 7 } }) } }]);
+      log(fewer.applied === 0 && stillSix === 6 && more.applied === 1 && walSize() === 0,
+        'v0.0.24: a tally copy with fewer responses than this laptop\'s is refused whatever its stamp; one that arrives clears the log file, so no earlier copy is left to compare');
+      // A clinic deleted, then restored from its backup: the totals come back
+      // above the deletion (or the server keeps the deletion, and the owner's
+      // later surveys are refused for the rest of the day).
+      const bR = db.exportClinicBundle(evO.id);
+      db.setActiveEvent(currentUser, evB.id);
+      db.deleteEvent(currentUser, evO.id, { force: true });
+      const rawO4 = rawDb();
+      const tombO = rawO4.prepare('SELECT updated_at FROM tombstones WHERE uid = ?').get(tO.uid);
+      rawO4.close();
+      db.importClinicBundle(currentUser, bR);
+      const pushedR = db.collectSyncRows(5000).rows.find((r) => r.uid === tO.uid);
+      const rawO5 = rawDb();
+      const undel = rawO5.prepare('SELECT 1 AS y FROM undeletes WHERE uid = ?').get(tO.uid);
+      rawO5.close();
+      log(!!tombO && !!pushedR && !pushedR.deleted && pushedR.updated_at > tombO.updated_at && pushedR.updated_at.startsWith(tombO.updated_at) && !!undel,
+        'v0.0.24: restoring a deleted clinic brings its survey totals back just above the deletion, flagged as a revival — not refused by the deletion on the server');
       void evOUid;
       db.setActiveEvent(currentUser, evB.id);
       db.setActiveEvent(currentUser, evB.id);
@@ -11612,6 +11704,28 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       log(!!handBanner && /still uses the key chosen in 0\.0\.23 as its password/.test(handBanner.textContent) && /update every laptop to 0\.0\.24/.test(handTxt)
         && JSON.stringify(callsL) === JSON.stringify([['hubSetJoinCode', 'sandy clinic day 2026', true]]),
         'v0.0.24 Cloud tab, hosting: a password chosen by hand in 0.0.23 is flagged, and replaced only when the administrator presses Make a new password (keeping the clinic key)');
+      pg.remove();
+      // While it is: sync requests refused that password are counted on the
+      // card, and a new clinic key comes with a new password (the box ticked,
+      // and said why) — or the old key keeps working.
+      hsL = { ...hubRunning, handChosen: true, joinCode: 'sandy clinic day 2026', authFailures: 12 };
+      pg = await cloudPage();
+      callsL.length = 0;
+      const handCard2 = cardL(pg, /This laptop hosts the clinic network/);
+      const handBanner2 = handCard2 && handCard2.querySelector('.lan-hand-chosen');
+      pressL(handCard2, 'Change the clinic key');
+      await settleL();
+      const handKeyOv = $all('.modal-overlay').find((m) => /Change the clinic key\?/.test(m.textContent));
+      const handKeyTicked = !!handKeyOv && handKeyOv.querySelector('.lan-sign-out').checked === true;
+      const handKeyTxt = handKeyOv ? handKeyOv.textContent : '';
+      if (handKeyOv) { setInput(handKeyOv.querySelector('.lan-new-key'), '246810'); pressL(handKeyOv, 'Change the key'); }
+      await settleL(20);
+      log(!!handBanner2 && /12 sync requests refused that password in the last 10 minutes/.test(handBanner2.textContent) && /may be guessing/.test(handBanner2.textContent)
+        && handBanner2.classList.contains('banner--alert'),
+        'v0.0.24 Cloud tab, hosting: with a password chosen by hand, the sync requests refused it lately are counted on the card — someone may be guessing');
+      log(handKeyTicked && /keeps working until every laptop joins again/.test(handKeyTxt)
+        && JSON.stringify(callsL) === JSON.stringify([['hubSetJoinCode', '246810', true]]),
+        'v0.0.24 Cloud tab, hosting: changing the clinic key while the password is the one chosen in 0.0.23 ticks "every other laptop joins again", and says the old key would keep working');
       pg.remove();
       window.api.hubSetJoinCode = hubSetJoinCodeWas;
       window.api.hubStart = hubStartWas23;

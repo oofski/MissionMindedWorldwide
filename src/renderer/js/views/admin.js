@@ -394,7 +394,8 @@ export function renderAdmin(ctx, params = {}) {
           isActive ? el('span', { class: 'pill pill--success', style: 'margin-left:6px' }, [el('span', { class: 'pill-dot' }), 'Active'])
             : (!e.active ? el('span', { class: 'pill pill--neutral', style: 'margin-left:6px' }, ['Off']) : null)]),
         el('td', {}, [e.location || '—']),
-        el('td', {}, [e.start_date || '—']),
+        el('td', {}, [e.start_date || '—', e.end_date && e.end_date !== e.start_date ? ` – ${e.end_date}` : '',
+          slotsDateProblem(e) ? el('span', { class: 'pill pill--warning ev-date-pill', style: 'margin-left:6px', title: slotsDateProblem(e) }, ['Date passed']) : null]),
         el('td', { class: 'num' }, [String(e.patient_count)]),
         el('td', {}, [actions]),
       ]);
@@ -475,7 +476,10 @@ export function renderAdmin(ctx, params = {}) {
   function eventForm(e = {}) {
     const name = el('input', { class: 'input', placeholder: 'e.g. Belize Mission — March 2026', value: e.name || '' });
     const loc = el('input', { class: 'input', placeholder: 'Location', value: e.location || '' });
-    const start = el('input', { class: 'input', type: 'date', value: e.start_date || '' });
+    const start = el('input', { class: 'input ev-start', type: 'date', value: e.start_date || '' });
+    // v0.0.24: the last day of a clinic of several days. The online form
+    // offers arrival times on each day, and closes after the last.
+    const end = el('input', { class: 'input ev-end', type: 'date', value: e.end_date || '' });
     const enabled = new Set((e.languages || 'en,es').split(',').map((s) => s.trim()).filter(Boolean));
     const langChips = el('div', { class: 'chip-row' }, languageList().map((l) =>
       el('button', { type: 'button', class: 'chip-btn' + (enabled.has(l.code) ? ' chip-btn--on' : ''),
@@ -499,11 +503,23 @@ export function renderAdmin(ctx, params = {}) {
       el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['Clinic stops taking arrivals at']), slotEnd]),
       el('label', { class: 'field', style: 'margin:0;max-width:150px' }, [el('span', { class: 'field-label' }, ['Patients per hour']), slotPer]),
     ]);
-    slotsOn.addEventListener('change', () => { slotRow.style.display = slotsOn.checked ? '' : 'none'; });
+    // Said in the form, before patients find out: time slots need the date,
+    // and a date gone by changes what the online form shows.
+    const dateNote = el('div', { class: 'banner banner--warn ev-date-note', style: 'display:none;margin:0' }, [icon('alert', { size: 14 }), el('span')]);
+    const paintDateNote = () => {
+      const msg = slotsOn.checked ? slotsDateProblem({ start_date: start.value, end_date: end.value, slots: '{}' }) : '';
+      dateNote.style.display = msg ? '' : 'none';
+      dateNote.lastChild.textContent = msg;
+    };
+    slotsOn.addEventListener('change', () => { slotRow.style.display = slotsOn.checked ? '' : 'none'; paintDateNote(); });
+    start.addEventListener('change', () => { if (end.value && start.value && end.value < start.value) end.value = start.value; paintDateNote(); });
+    end.addEventListener('change', paintDateNote);
+    paintDateNote();
     const form = el('div', { class: 'form-grid' }, [
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Event name']), name]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Location']), loc]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Start date']), start]),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['End date (a clinic of several days)']), end]),
       el('div', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Language packs offered at check-in']), langChips]),
       el('label', { class: 'field span-2' }, [
         el('span', { class: 'field-label' }, ['Cities offered at check-in (one per line)']),
@@ -514,13 +530,14 @@ export function renderAdmin(ctx, params = {}) {
         el('label', { class: 'check-row', style: 'display:flex;gap:8px;align-items:center' }, [slotsOn,
           el('span', { class: 'field-label', style: 'margin:0' }, ['Pre-registration time slots: patients choose an arrival time'])]),
         slotRow,
+        dateNote,
         el('span', { class: 'field-hint' }, ['On the online pre-registration form, patients choose the hour they will come. Each hour takes at most this many; a full hour is shown as full. Walk-ins are not counted. Hours run from the first arrival, one an hour (8:00, 9:00 … 11:00 for 8:00 to 12:00).']),
       ]),
     ]);
     return {
       form,
       get: () => ({
-        name: name.value.trim(), location: loc.value.trim(), start_date: start.value, languages: Array.from(enabled).join(',') || 'en',
+        name: name.value.trim(), location: loc.value.trim(), start_date: start.value, end_date: end.value, languages: Array.from(enabled).join(',') || 'en',
         cities: cities.value.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
         slots: slotsOn.checked ? { start: slotStart.value, end: slotEnd.value, per_hour: Number(slotPer.value) } : null,
       }),
@@ -1469,13 +1486,17 @@ export function renderAdmin(ctx, params = {}) {
         class: 'btn btn--ghost',
         onClick: async () => {
           const newKey = el('input', { class: 'input lan-new-key', autocomplete: 'off', spellcheck: 'false', inputmode: 'numeric', placeholder: 'Leave blank for a new 6-digit key', style: 'font-family:var(--font-mono);' });
-          const signOut = el('input', { type: 'checkbox', class: 'lan-sign-out' });
+          // A password still chosen by hand in 0.0.23 changes with the key, or
+          // the old key keeps working (ipc refuses the change without it).
+          const signOut = el('input', { type: 'checkbox', class: 'lan-sign-out', checked: !!h.handChosen });
           const ok = await modal({
             title: 'Change the clinic key?',
             body: el('div', {}, [
               el('p', { style: 'margin:0 0 var(--space-3);' }, ['Type the new key — numbers are easiest, at least 4 (6 or more is safer); spaces and dashes do not matter. Or leave it blank, and the app makes a new 6-digit one.']),
               el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['New clinic key']), newKey]),
-              el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0;' }, ['Laptops that have joined already stay joined. The new key is only what the next laptop types.']),
+              h.handChosen
+                ? el('p', { class: 'banner banner--warn lan-key-hand-note', style: 'margin:var(--space-3) 0;' }, ['The key chosen in 0.0.23 is still this network\'s password, and keeps working until every laptop joins again — so leave the box below ticked (first update every laptop to 0.0.24).'])
+                : el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0;' }, ['Laptops that have joined already stay joined. The new key is only what the next laptop types.']),
               el('label', { class: 'check-row', style: 'display:flex; gap:8px; align-items:flex-start;' }, [signOut,
                 el('span', {}, ['Also make every other laptop join again — if a laptop was lost or stolen. They join with the new key; their records are kept.'])]),
             ]),
@@ -1509,8 +1530,12 @@ export function renderAdmin(ctx, params = {}) {
           catch (e) { toast(e.message, 'error'); }
         },
       }, ['Make a new password']) : null;
-      const handNote = h.handChosen ? el('div', { class: 'banner banner--warn lan-hand-chosen', style: 'margin:0 0 var(--space-3);' }, [icon('alert', { size: 14 }),
-        el('span', {}, ['This clinic network still uses the key chosen in 0.0.23 as its password, which every laptop sends with each sync. A long password made by the app is safer. Once every laptop runs 0.0.24, press Make a new password: the other laptops join again once, typing the same clinic key.']),
+      // And sync requests refused that password lately, from every address:
+      // someone may be guessing it.
+      const authFails = Number(h.authFailures) || 0;
+      const handNote = h.handChosen ? el('div', { class: 'banner ' + (authFails >= 5 ? 'banner--alert' : 'banner--warn') + ' lan-hand-chosen', style: 'margin:0 0 var(--space-3);' }, [icon('alert', { size: 14 }),
+        el('span', {}, ['This clinic network still uses the key chosen in 0.0.23 as its password, which every laptop sends with each sync. A long password made by the app is safer. Once every laptop runs 0.0.24, press Make a new password: the other laptops join again once, typing the same clinic key.',
+          authFails ? el('strong', { class: 'lan-auth-fails' }, [` ${authFails} sync ${authFails === 1 ? 'request' : 'requests'} refused that password in the last 10 minutes${authFails >= 5 ? ' — someone on this Wi-Fi may be guessing it; make a new password soon' : ''}.`]) : '']),
         handBtn]) : null;
       const codePanel = h.joinCode ? el('div', { class: 'lan-code-panel' }, [
         el('div', { class: 'lan-code-label' }, ['Clinic key — type this on each laptop that joins']),
@@ -1795,6 +1820,18 @@ export function renderAdmin(ctx, params = {}) {
 // resolution — kept on this laptop (each has its own printer), with a preview
 // and a test band. See components/wristband.js.
 const SAMPLE_BAND = { patient_code: '482913', first_name: 'Maria', last_name: 'Lopez Garcia', dob: '1984-03-09', gender: 'F', demographics: { services: ['Dental'] } };
+// v0.0.24: what an event's dates do to its online pre-registration form, when
+// it has time slots — '' when nothing. The days are the clinic's own (this
+// laptop's), not UTC.
+export function slotsDateProblem(e, now = new Date()) {
+  if (!e || !e.slots) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  if (!e.start_date) return 'Time slots need the clinic\'s date — set the Start date.';
+  if (e.end_date && e.end_date < todayIso) return 'This event\'s End date has passed: its online pre-registration form now says the clinic has closed.';
+  if (!e.end_date && e.start_date < todayIso) return 'This event\'s Start date has passed: its online pre-registration form offers no arrival times. Set the clinic\'s date (and the End date of a clinic of several days).';
+  return '';
+}
 export function wristbandLabelCard() {
   let cur = labelSetting();
   const sizeSel = el('select', { class: 'input wb-size' }, LABEL_SIZES.map((x) => el('option', { value: x.key }, [x.label])));

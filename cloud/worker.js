@@ -595,12 +595,25 @@ function eventSlots(raw, startDate, endDate) {
   const start = hm(o.start), end = hm(o.end);
   const per = Number(o.per_hour);
   if (!start || !end || end <= start || !Number.isInteger(per) || per < 1 || per > 500) return null;
-  const day = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && !isNaN(Date.parse(d + 'T00:00:00Z')) ? String(d) : null);
+  // A real day: '2026-11-31' parses (it rolls over to December), so the date
+  // has to come back as it went in.
+  const day = (d) => {
+    const x = String(d || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(x)) return null;
+    const t = Date.parse(x + 'T00:00:00Z');
+    return !isNaN(t) && new Date(t).toISOString().slice(0, 10) === x ? x : null;
+  };
   const first = day(startDate);
   if (!first) return null;
-  const last = day(endDate) && day(endDate) >= first ? day(endDate) : first;
+  const lastSet = day(endDate) && day(endDate) >= first ? day(endDate) : null;
+  const last = lastSet || first;
+  // A day already over is not offered (with half a day's grace, since the
+  // server does not know the clinic's time zone) — and the 31 days offered at
+  // most are the next ones, so a long event is not cut off after its first 31.
+  const past = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 10);
+  const from = first > past ? first : past;
   const days = [];
-  for (let t = Date.parse(first + 'T00:00:00Z'); days.length < 31; t += 86400000) {
+  for (let t = Date.parse(from + 'T00:00:00Z'); days.length < 31; t += 86400000) {
     const d = new Date(t).toISOString().slice(0, 10);
     if (d > last) break;
     days.push(d);
@@ -610,14 +623,13 @@ function eventSlots(raw, startDate, endDate) {
   for (let m = toMin(start); m < toMin(end) && times.length < 24; m += 60) {
     times.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
   }
-  // A day already over is not offered (with half a day's grace, since the
-  // server does not know the clinic's time zone).
-  const past = new Date(Date.now() - 12 * 3600000).toISOString().slice(0, 10);
   const list = [];
-  days.filter((d) => d >= past).forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
-  // Every day over: the clinic is, and the form says so (never an open form
-  // with no time to choose and no limit).
-  if (!list.length) return times.length ? { perHour: per, list, over: true } : null;
+  days.forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
+  // Every day over: the clinic is, and the form says so — only when the event
+  // has an end date that has passed. One with only a start date may be a clinic
+  // of several days still running (the app had no End date before 0.0.24): its
+  // form stays open, with no time to choose, as before 1.9.0.
+  if (!list.length) return times.length && lastSet && lastSet < past ? { perHour: per, list, over: true } : null;
   return { perHour: per, list };
 }
 // How many pre-registrations each slot has, counted by the database — one

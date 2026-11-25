@@ -313,10 +313,14 @@ export function Odontogram({ mode = 'adult', teeth = {}, selected = [], onChange
     getTeeth: () => get().teeth,
     set: (ids) => { Object.keys(toothData).forEach((k) => delete toothData[k]); (ids || []).forEach((id) => { toothData[id] = { tx: null, note: '' }; }); render(); renderSelectedList(); },
     setTeeth: (obj) => { Object.keys(toothData).forEach((k) => delete toothData[k]); seed(obj, []); render(); renderSelectedList(); },
-    setMarks: (map) => { // back-compat: merge tx marks, preserve existing notes
+    setMarks: (map, drop = []) => { // back-compat: merge tx marks, preserve existing notes
       Object.entries(map || {}).forEach(([id, tx]) => { toothData[id] = { tx, note: (toothData[id] && toothData[id].note) || '' }; });
       // drop marks no longer present that had no note
       Object.keys(toothData).forEach((id) => { if (!map[id] && !toothData[id].note && toothData[id].tx) delete toothData[id]; });
+      // ...and teeth a caller had marked with no procedure (a tooth left for a
+      // future visit) that it no longer marks: a tooth number typed on the way
+      // to another, or a row removed. Teeth picked on the mouth are not in it.
+      (drop || []).forEach((id) => { const d = toothData[id]; if (d && !(id in (map || {})) && !d.tx && !d.note) delete toothData[id]; });
       render(); renderSelectedList();
     },
     setMode: (m) => { curMode = ['adult', 'primary', 'mixed'].includes(m) ? m : 'adult'; modeSel.value = curMode; render(); renderSelectedList(); },

@@ -271,7 +271,8 @@ jobs:
             - Every laptop needs this version to join with the short key.
               A host whose key was chosen by hand in 0.0.23 keeps that key as
               its clinic key, and joined laptops stay joined; its card offers
-              **Make a new password** for once every laptop is updated.
+              **Make a new password** for once every laptop is updated, and
+              counts the sync requests refused that password lately.
 
             **Pre-registration**
 
@@ -281,6 +282,9 @@ jobs:
             - **Time slots**: patients choose the hour they will arrive, each
               hour taking at most so many. Arrivals shows each patient's time.
               Needs the sync server updated to 1.9.0 (Admin → Cloud offers it).
+            - Events have an **End date** for a clinic of several days: the
+              times are offered on each day, and the link closes after it.
+              Time slots need the Start date.
 
             **Also**
 

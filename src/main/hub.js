@@ -80,8 +80,10 @@ const state = {
   // v0.0.24: joining with the short clinic key — the exchanges under way,
   // and every try in the last JOIN_WINDOW_MS, to limit wrong ones.
   joins: new Map(), joinTries: [],
-  // Requests refused the network's password, by address (see authLimited).
-  authFails: new Map(),
+  // Requests refused the network's password, by address (see authLimited);
+  // every one of them, whatever the address; and the addresses the password
+  // has let in lately, which a spent overall budget leaves alone.
+  authFails: new Map(), authFailAll: [], goodAddresses: new Map(),
 };
 // How many wrong clinic key tries the host takes: from one address, and from
 // all of them, in ten minutes. Each try is one guess at the key, so at these
@@ -95,6 +97,11 @@ const MAX_JOINS = 64;
 // Requests refused the network's password from one address in ten minutes,
 // before that address is refused without being checked at all.
 const AUTH_FAILS_PER_ADDRESS = 30;
+// And from every address together: past this many, an address the password
+// has not let in lately is refused without a check. One device can take as
+// many addresses on the Wi-Fi as it likes, each with its own budget.
+const AUTH_FAILS_ALL = 30;
+const MAX_GOOD_ADDRESSES = 256;
 
 /* ---------------- D1, over better-sqlite3 ---------------- */
 
@@ -225,6 +232,9 @@ function open() {
   if (state.sqlite) return;
   const s = new Database(hubFile());
   s.pragma('journal_mode = WAL');
+  // A freed page is cleared, not left as it was: the survey totals (see
+  // onRequest) must leave no earlier copy behind.
+  s.pragma('secure_delete = ON');
   s.exec('CREATE TABLE IF NOT EXISTS hub_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
   state.sqlite = s;
   if (!getMeta('host_id')) {
@@ -258,6 +268,8 @@ function setKey(key) {
   if (state.env) state.env.CLINIC_KEY = k;
   state.proofKey = null;
   state.authFails.clear();
+  state.authFailAll = [];
+  state.goodAddresses.clear();
   return k;
 }
 // v0.0.24: the short clinic key people type to join (joincode.js). A host
@@ -429,7 +441,14 @@ async function onRequest(req, res, worker, env) {
     if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
     if (req.headers['content-type']) headers['content-type'] = String(req.headers['content-type']);
     const response = await worker.fetch(new Request(u.href, { method, headers, body }), env, { waitUntil() {}, passThroughOnException() {} });
-    if (authed && method !== 'OPTIONS' && response.status !== 401) noteLaptop(req);
+    if (authed && method !== 'OPTIONS' && response.status !== 401) { noteLaptop(req); noteGoodAddress(req); }
+    // The survey totals: each copy a laptop pushes differs from the one before
+    // by its latest surveys, so the copy it replaced must not linger in the log
+    // file, where the two could be compared (secure_delete clears it in the
+    // database itself).
+    if (authed && method === 'POST' && body && body.includes('"survey_tally"')) {
+      try { state.sqlite.pragma('wal_checkpoint(TRUNCATE)'); } catch (_) { /* a reader is busy: the next push clears it */ }
+    }
     const out = Buffer.from(await response.arrayBuffer());
     const h = {};
     response.headers.forEach((v, k) => { h[k] = v; });
@@ -498,6 +517,7 @@ async function onJoin(req, res, pathname) {
   j.tryRec.ok = true;
   // A laptop that has just joined is not one guessing the password.
   state.authFails.delete(address);
+  noteGoodAddress(req);
   return sendJson(res, 200, { ok: true, sealed: J.seal(j.ke, sid, { key: identity().key }) });
 }
 
@@ -513,10 +533,19 @@ function recentAuthFails(address, now) {
 // password after "make every other laptop join again" — refusing its new one
 // too, as if it were wrong.
 const passwordGuessable = () => { const k = state.env && state.env.CLINIC_KEY; return !!k && !lan.madeKey(k); };
+function recentAuthFailAll(now) {
+  state.authFailAll = state.authFailAll.filter((t) => now - t < JOIN_WINDOW_MS);
+  return state.authFailAll;
+}
 function authLimited(req) {
   const a = addressOf(req);
   if (isLoopback(a) || !passwordGuessable()) return false;
-  return recentAuthFails(a, Date.now()).length >= AUTH_FAILS_PER_ADDRESS;
+  const now = Date.now();
+  if (recentAuthFails(a, now).length >= AUTH_FAILS_PER_ADDRESS) return true;
+  // The overall budget spent: only an address the password let in lately is
+  // checked (a laptop syncing with the right password never fails, so it is
+  // never refused). Not by address alone, which the oldest are dropped from.
+  return recentAuthFailAll(now).length >= AUTH_FAILS_ALL && !state.goodAddresses.has(a);
 }
 function noteAuthFail(req) {
   const a = addressOf(req);
@@ -527,7 +556,20 @@ function noteAuthFail(req) {
   state.authFails.set(a, list);
   // Never without end: the oldest addresses go first.
   while (state.authFails.size > 1024) state.authFails.delete(state.authFails.keys().next().value);
+  const all = recentAuthFailAll(now);
+  all.push(now);
+  if (all.length > AUTH_FAILS_ALL * 2) all.splice(0, all.length - AUTH_FAILS_ALL * 2);
 }
+function noteGoodAddress(req) {
+  const a = addressOf(req);
+  if (!a || isLoopback(a)) return;
+  state.goodAddresses.delete(a);
+  state.goodAddresses.set(a, Date.now());
+  while (state.goodAddresses.size > MAX_GOOD_ADDRESSES) state.goodAddresses.delete(state.goodAddresses.keys().next().value);
+}
+// Requests refused the password in the last ten minutes, from every address
+// together, for the host's card — only while it is one chosen by hand.
+const authFailures = () => (passwordGuessable() ? recentAuthFailAll(Date.now()).length : 0);
 
 // The limits above, applied as each connection arrives — before TLS starts
 // on it (prepended, so the TLS server's own listener runs only for the ones
@@ -856,6 +898,7 @@ function status() {
     // every laptop runs 0.0.24 — never by itself, which would sign out the
     // laptops still on 0.0.23 with no way back but the connection code).
     joinCode: J.showCode(joinCode()), joinFailures: joinFailures(), handChosen: !lan.madeKey(id.key),
+    authFailures: authFailures(),
     addresses: lan.lanAddresses().map((a) => ({ address: a.address, iface: a.iface, preferred: a.preferred, url: port ? `https://${a.address}:${port}` : '' })),
     laptops, error: state.error, beaconError: state.beaconError, computer: os.hostname(),
     // Waiting for the clinic's Wi-Fi (see resume): the networks it hosts on,
@@ -866,10 +909,10 @@ function status() {
 
 module.exports = {
   HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, start, stop, resume, erase, shutdown,
-  JOIN_TRIES_PER_ADDRESS, JOIN_TRIES_ALL, AUTH_FAILS_PER_ADDRESS,
+  JOIN_TRIES_PER_ADDRESS, JOIN_TRIES_ALL, AUTH_FAILS_PER_ADDRESS, AUTH_FAILS_ALL,
   // for the tests
-  _resetJoinLimits: () => { state.joinTries = []; state.joins.clear(); state.authFails.clear(); },
-  _authLimited: authLimited, _noteAuthFail: noteAuthFail,
+  _resetJoinLimits: () => { state.joinTries = []; state.joins.clear(); state.authFails.clear(); state.authFailAll = []; state.goodAddresses.clear(); },
+  _authLimited: authLimited, _noteAuthFail: noteAuthFail, _noteGoodAddress: noteGoodAddress,
   status, shareUrl, ownTarget, ownHostId, runningHostId, networkOf,
   makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS, PER_ADDRESS, HANDSHAKE_MS,
   firewallScript, firewallCommand, allowThroughFirewall, FIREWALL_RULE,

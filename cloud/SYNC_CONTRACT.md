@@ -60,7 +60,11 @@ works locally and re-syncs when reconnected.
   and answer order — never the order answers arrived in). Only the laptop it belongs to
   writes it; reports add every laptop's. No row holds a patient's answers apart from the
   others' — though a laptop that has taken a single survey for an event holds a total of
-  one. The patient's
+  one. A tally only grows, so a laptop refuses a copy with fewer responses than its own,
+  whatever its stamp. A copy restored from a clinic backup keeps the stamp it came with,
+  followed by `~` and its response count (so of two copies with one stamp the fuller wins,
+  and the owner's next stamp still beats it) — or sorts just above the clinic's deletion,
+  when a deleted clinic is restored. The patient's
   own `survey` row then says only that it was answered (its `version` ends in `+anon`) and
   carries no answers.
 - `presence` — an account signed in on a laptop: data `{ user_uid, device, computer,
@@ -68,8 +72,12 @@ works locally and re-syncs when reconnected.
   that an account is in use on another laptop.
 - `event` data gains `slots` — `{ start, end, per_hour }` as JSON, or null — the online
   pre-registration form's arrival times (one an hour from `start`, before `end`, on each
-  day of the event). A pre-registration then carries `demographics.prereg_slot`
-  (`"2026-12-05T09:00"`), and the form refuses an hour that has `per_hour` already.
+  day of the event from `start_date` to `end_date`: the days not yet over, 31 at most).
+  A pre-registration then carries `demographics.prereg_slot` (`"2026-12-05T09:00"`), and
+  the form refuses an hour that has `per_hour` already. Once an event's `end_date` is over
+  the form says the clinic has closed (410). An event with only a `start_date`, that day
+  over, keeps its form open with no arrival times: it may be a clinic of several days made
+  by an app before 0.0.24, which had no End date. The app needs a `start_date` for slots.
 The server stores any entity as sent; these need no server change, except the form's time
 slots (1.9.0).
 

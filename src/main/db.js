@@ -1374,14 +1374,23 @@ function sanitizeSlots(v) {
   return JSON.stringify({ start, end, per_hour: per });
 }
 
+// v0.0.24: an event's days. Time slots are offered on each of them, so they
+// need a date: one left blank no longer becomes the day it was made (the
+// online form closed, or offered no times, from the next morning).
+function checkEventDays(start, end, slots) {
+  if (end && start && String(end) < String(start)) throw new Error('The End date is before the Start date.');
+  if (slots && !start) throw new Error('Time slots need the clinic\'s date — set the Start date.');
+}
 function createEvent(actor, { name, location, start_date, end_date, languages, cities, slots }) {
   if (!name) throw new Error('Event name is required.');
+  const slotsVal = sanitizeSlots(slots);
+  checkEventDays(start_date || (slotsVal ? '' : today()), end_date, slotsVal);
   // Its sync id now, not at the next sync: its pre-registration link is made
   // from it, and is shown as soon as the event is (v0.0.24).
   const info = db.prepare(
     `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, cities, slots)
      VALUES (?,?,?,?,?,?,1,?,?,?)`
-  ).run(crypto.randomUUID(), name, location || '', start_date || today(), end_date || '', languages || 'en,es', now(), sanitizeCities(cities), sanitizeSlots(slots));
+  ).run(crypto.randomUUID(), name, location || '', start_date || today(), end_date || '', languages || 'en,es', now(), sanitizeCities(cities), slotsVal);
   audit(actor, 'create', 'event', info.lastInsertRowid, name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(info.lastInsertRowid);
 }
@@ -1406,10 +1415,13 @@ function updateEvent(actor, id, { name, location, start_date, end_date, language
   if (!e) throw new Error('Event not found.');
   // An update that does not mention cities leaves the list alone; an empty
   // one clears it (back to the free-text box). Time slots the same.
+  const slotsVal = slots === undefined ? e.slots : sanitizeSlots(slots);
+  const startVal = start_date ?? e.start_date, endVal = end_date ?? e.end_date;
+  checkEventDays(startVal, endVal, slotsVal);
   db.prepare(
     `UPDATE events SET name=?, location=?, start_date=?, end_date=?, languages=?, cities=?, slots=? WHERE id=?`
-  ).run(name ?? e.name, location ?? e.location, start_date ?? e.start_date, end_date ?? e.end_date, languages ?? e.languages,
-    cities === undefined ? e.cities : sanitizeCities(cities), slots === undefined ? e.slots : sanitizeSlots(slots), id);
+  ).run(name ?? e.name, location ?? e.location, startVal, endVal, languages ?? e.languages,
+    cities === undefined ? e.cities : sanitizeCities(cities), slotsVal, id);
   audit(actor, 'update', 'event', id, name || e.name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
 }
@@ -4116,11 +4128,22 @@ function importClinicBundle(actor, bundle) {
     // keeps the stamp it came with and is marked as written then (content_rev):
     // stamped now, it would outrank — on the server and on its own laptop —
     // every survey that laptop has added since the backup was made.
+    //   Two refinements. The responses ride in the stamp, just after the time
+    // it came with: the server and every laptop take a copy only over an OLDER
+    // stamp, so a fuller copy carried with the same stamp the server holds
+    // already (an owner that synced, then stopped syncing, and kept taking
+    // surveys; or a second backup of a laptop that never synced) was refused
+    // everywhere but here. Any stamp the owner makes later still wins: its time
+    // is later. And a tally whose clinic was DELETED here sorts just above that
+    // deletion — the deletion was the newer thing, and the owner's copy went
+    // with it — or the restored totals lost to the deletion on the server.
     for (const r of (Array.isArray(b.survey_tallies) ? b.survey_tallies : [])) {
       if (!r || !r.uid) continue;
       const counts = countsText(r.counts);
       const responses = Number(r.responses) || 0;
-      const stamp = r.updated_at || '1970-01-01T00:00:00.000Z@import';
+      let stamp = (r.updated_at || '1970-01-01T00:00:00.000Z@import') + '~' + String(responses).padStart(10, '0');
+      const tomb = db.prepare('SELECT updated_at FROM tombstones WHERE uid = ?').get(r.uid);
+      if (tomb && tomb.updated_at && String(tomb.updated_at) >= stamp) stamp = justAbove(tomb.updated_at);
       const here = db.prepare('SELECT id, responses FROM survey_tallies WHERE uid = ?').get(r.uid);
       if (here && (Number(here.responses) || 0) >= responses) continue;
       if (!here) {
@@ -5250,6 +5273,14 @@ function applyRemoteRows(remoteRows) {
     if (!env.data) { skipped++; return; }
     const existing = db.prepare(`SELECT id, updated_at FROM ${table} WHERE uid = ?`).get(env.uid);
     if (existing && existing.updated_at && env.updated_at && existing.updated_at >= env.updated_at) { skipped++; return; }
+    // A tally only grows. A copy with fewer responses than this laptop's is an
+    // older one, whatever its stamp: one restored from a backup can sort above
+    // the owner's own stamp (see importClinicBundle), and the owner may have
+    // added a survey since it last stamped its copy.
+    if (entity === 'survey_tally' && existing && env.data) {
+      const mine = db.prepare('SELECT responses FROM survey_tallies WHERE id = ?').get(existing.id);
+      if (mine && (Number(mine.responses) || 0) > (Number(env.data.responses) || 0)) { skipped++; return; }
+    }
     // Rebuild an ordered data object so the applied sig matches the origin's.
     const data = {};
     for (const col of SYNC_COLS[entity]) data[col] = env.data[col] === undefined ? null : env.data[col];
@@ -5408,10 +5439,18 @@ function applyRemoteRows(remoteRows) {
   };
   // Each row is applied in its own transaction so one malformed/poison row can
   // never roll back or wedge the whole pull batch — it is counted and skipped.
+  let tallyIn = false;
   for (const env of list) {
+    const before = applied;
     try { db.transaction(applyOne)(env); }
     catch (e) { skipped++; }
+    if (applied > before && env.entity === 'survey_tally') tallyIn = true;
   }
+  // The survey totals: each copy that arrives differs from the one before by
+  // one laptop's latest surveys, so the copy it replaced must not linger in
+  // the log, where the two could be compared (secure_delete, set at start-up,
+  // clears the freed page in the database itself) — as saveExitSurvey does.
+  if (tallyIn) { try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (_) { /* a reader is busy: the next one clears it */ } }
   // If any event synced in, re-resolve the clinic's active event so a "Set active"
   // performed on another laptop takes effect here too (highest selected_at wins).
   if (list.some((e) => e.entity === 'event')) resolveActiveEvent();
