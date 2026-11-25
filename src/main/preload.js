@@ -34,6 +34,7 @@ const CHANNELS = [
   // v0.0.23: the clinic network's key, chosen or made again.
   'hub:setKey',
   'hub:setJoinCode',
+  'qr:make',
   'data:reset',
 ];
 

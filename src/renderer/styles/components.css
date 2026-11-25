@@ -728,6 +728,38 @@ body:has(.chart-actions-bar) .toast-host, body:has(.next-step-bar) .toast-host{ 
 .wb-code{ margin-top:2px; }
 .wb-code svg{ display:block; max-width:100%; height:auto; }
 
+/* v0.0.24: a wristband or label printed on its own stock — the page is the label */
+.wristband--stock{ box-sizing:border-box; background:#fff; border:none; border-radius:0; max-width:none; overflow:hidden; color:#000; }
+.wristband--band{ flex-direction:row; align-items:center; justify-content:space-between; gap:3mm; }
+.wristband--band .wb-text{ flex:1; min-width:0; display:flex; flex-direction:column; gap:1mm; }
+.wristband--band .wb-name{ font-size:4.2mm; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.wristband--band .wb-meta{ font-size:2.7mm; gap:2.5mm; flex-wrap:nowrap; white-space:nowrap; color:#000; }
+.wristband--band .wb-id{ font-size:3.4mm; letter-spacing:.08em; }
+.wristband--small{ flex-direction:column; align-items:center; justify-content:space-between; gap:.5mm; }
+.wristband--small .wb-name{ font-size:3.2mm; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.wristband--stock .wb-code, .wristband--print .wb-code{ margin:0; flex:none; }
+.wristband--stock .wb-code svg, .wristband--print .wb-code svg{ max-width:none; }
+.wristband--large{ box-sizing:border-box; padding:4mm; overflow:hidden; }
+.wb-label-preview{ background:var(--surface-sunken); border:1px dashed var(--border-strong); border-radius:var(--radius-sm); padding:12px; overflow:auto; }
+.wb-label-preview .wristband--stock, .wb-label-preview .wristband--large{ outline:1px solid var(--border-strong); }
+
+/* v0.0.24: the pre-registration QR code, and the sign printed with it */
+.prereg-qr-row{ display:flex; gap:16px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+.prereg-qr{ background:#fff; padding:6px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); line-height:0; min-width:200px; min-height:200px; }
+.prereg-qr-side{ flex:1; min-width:180px; }
+.prereg-sign{ width:180mm; margin:0 auto; text-align:center; color:#000; font-family:var(--font-sans); }
+.prereg-sign-logo{ height:18mm; width:auto; margin:4mm 0; }
+.prereg-sign h1{ font-size:13mm; line-height:1.1; margin:2mm 0 0; }
+.prereg-sign h2{ font-size:9mm; line-height:1.1; margin:2mm 0 5mm; font-weight:600; color:#222; }
+.prereg-sign-event{ font-size:7mm; font-weight:700; }
+.prereg-sign-when{ font-size:5mm; margin-top:1mm; }
+.prereg-sign-qr{ margin:6mm auto; }
+.prereg-sign-qr svg{ width:115mm; height:115mm; }
+.prereg-sign-how{ font-size:5mm; margin:2mm 0; }
+.prereg-sign-link{ font-family:var(--font-mono); font-size:3.6mm; margin-top:5mm; word-break:break-all; }
+
+.crm-chip--slot{ background:var(--info-soft); color:var(--info); border-color:var(--info-border); display:inline-flex; align-items:center; gap:3px; }
+
 /* ---- Printing ----
    Only the band goes to paper. Hiding every other top-level node (rather than
    restyling the app) keeps toasts, modals and the sidebar off the label. */
@@ -917,6 +949,13 @@ body.survey-open{ overflow:hidden; }
 .survey-lede p{ margin:0; font-size:var(--fs-base); line-height:1.55; }
 .survey-privacy{ display:flex; align-items:center; gap:8px; margin-top:10px !important; color:var(--text-muted); font-size:var(--fs-sm); }
 .survey-privacy .icon{ flex:none; }
+/* v0.0.24: the survey is anonymous — said first, and on the header */
+.survey-anon{ display:flex; align-items:flex-start; gap:10px; margin:0 0 12px !important; padding:12px 14px; border-radius:var(--radius-sm);
+  background:var(--success-soft); border:1px solid var(--success-border); color:var(--text); font-size:var(--fs-base); line-height:1.4; }
+.survey-anon .icon{ flex:none; margin-top:2px; color:var(--success); }
+.survey-anon-pill{ display:inline-flex; align-items:center; gap:5px; margin-top:6px; padding:3px 10px; border-radius:999px; font-size:var(--fs-xs);
+  font-weight:var(--fw-semibold); background:var(--success-soft); color:var(--success); border:1px solid var(--success-border); }
+.survey-anon-note{ display:flex; align-items:flex-start; gap:6px; }
 .survey-prefilled{ display:flex; align-items:flex-start; gap:8px; margin-top:10px !important; padding:8px 10px; border-radius:var(--radius-sm); background:var(--teal-soft); color:var(--teal-deep); font-size:var(--fs-sm); }
 .survey-prefilled .icon{ flex:none; margin-top:2px; }
 

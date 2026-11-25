@@ -124,6 +124,11 @@ function makeFakeD1() {
           }
           return { results };
         }
+        // v1.9.0: an event's patient rows, for its time slots' counts.
+        if (/^SELECT data FROM sync_rows WHERE entity = 'patient' AND event_uid = \? AND deleted = 0$/.test(s)) {
+          const ev = this._binds[0];
+          return { results: Array.from(store.values()).filter((r) => r.entity === 'patient' && r.event_uid === ev && !r.deleted).map((r) => ({ data: r.data })) };
+        }
         // Pull, v1.8.0: the next rows' sizes, then the rows up to a seq.
         const sized = /^SELECT seq, (?:octet_)?length\(data\) AS n FROM sync_rows WHERE seq > \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
         const ranged = /^SELECT uid, entity, event_uid, patient_uid, deleted, updated_at, data, seq FROM sync_rows WHERE seq > \? AND seq <= \?( AND event_uid = \?)? ORDER BY seq ASC, uid ASC LIMIT \?$/.exec(s);
@@ -238,7 +243,7 @@ async function main() {
       h.data &&
       h.data.ok === true &&
       h.data.service === 'mmw-sync' &&
-      h.data.version === '1.8.0' &&
+      h.data.version === '1.9.0' &&
       h.data.seq === true &&
       typeof h.data.time === 'string'
   );
@@ -1395,6 +1400,52 @@ async function main() {
       r.status === 200 && r.data.rows.some((x) => x.uid === 'o-1'));
   }
 
+  // --- v1.9.0: pre-registration time slots, with a limit an hour ---
+  {
+    const envS = { CLINIC_KEY, DB: await makeD1() };
+    const slotsJson = JSON.stringify({ start: '08:00', end: '12:00', per_hour: 2 });
+    await call(envS, 'POST', '/v1/push', { auth: CLINIC_KEY, body: { rows: [
+      { entity: 'event', uid: 'evt-slots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Slot Clinic', active: 1, start_date: '2026-12-05', end_date: '', location: 'Sandy, OR', slots: slotsJson } },
+      { entity: 'event', uid: 'evt-noslots', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Walk-in Clinic', active: 1, start_date: '2026-12-06', location: 'Sandy, OR', slots: null } },
+      { entity: 'event', uid: 'evt-twodays', event_uid: null, updated_at: '2026-11-01T00:00:00.000Z@a', data: { name: 'Weekend Clinic', active: 1, start_date: '2026-12-05', end_date: '2026-12-06', location: 'Sandy, OR', slots: JSON.stringify({ start: '09:30', end: '11:00', per_hour: 5 }) } },
+    ] } });
+    const getS = async (uid, q = '') => {
+      const res = await activeWorker.fetch(new Request('https://sync.example.com/checkin/' + uid + q, { method: 'GET' }), envS, {});
+      return { status: res.status, text: await res.text() };
+    };
+    const f1 = await getS('evt-slots');
+    check('v1.9.0: an event with time slots asks "When will you arrive?" — one choice an hour, each with the places left',
+      f1.status === 200 && /When will you arrive\?/.test(f1.text) && (f1.text.match(/name="prereg_slot"/g) || []).length === 4
+      && /Sat Dec 5 · 8:00 AM <small>2 left<\/small>/.test(f1.text) && /Sat Dec 5 · 11:00 AM/.test(f1.text) && !/12:00 PM/.test(f1.text));
+    const f2d = await getS('evt-twodays');
+    check('v1.9.0: a two-day event offers each day\'s hours, from the first arrival, one an hour',
+      (f2d.text.match(/name="prereg_slot"/g) || []).length === 4 && /Sat Dec 5 · 9:30 AM/.test(f2d.text) && /Sun Dec 6 · 10:30 AM/.test(f2d.text));
+    const fNo = await getS('evt-noslots');
+    check('v1.9.0: an event without time slots asks no arrival time', fNo.status === 200 && !/When will you arrive/.test(fNo.text) && !/prereg_slot"/.test(fNo.text));
+    const sub = (uid, slot, n) => call(envS, 'POST', '/checkin/' + uid, { body: { ...REQ, first_name: 'Slot', last_name: 'P' + n, dob: '1990-01-01', gender: 'female',
+      city: 'Sandy', state: 'OR', visit_type: 'cleaning', consent_agree: true, signer_name: 'Slot P', signature_png: 'data:image/png;base64,AAAA',
+      ...(slot === undefined ? {} : { prereg_slot: slot }) } });
+    const none = await sub('evt-slots', undefined, 0);
+    const bogus = await sub('evt-slots', '2026-12-05T13:00', 0);
+    const a = await sub('evt-slots', '2026-12-05T09:00', 1);
+    const b = await sub('evt-slots', '2026-12-05T09:00', 2);
+    const c = await sub('evt-slots', '2026-12-05T09:00', 3);
+    const d = await sub('evt-slots', '2026-12-05T10:00', 4);
+    const walkIn = await sub('evt-noslots', '2026-12-05T09:00', 5);
+    const rowsOf = (uid) => Array.from(envS.DB._store.values()).filter((r) => r.entity === 'patient' && r.event_uid === uid);
+    const slotOf = (r) => JSON.parse(JSON.parse(r.data).demographics).prereg_slot;
+    check('v1.9.0: no arrival time, or one the event does not have, is refused; the time chosen is kept with the patient',
+      none.status === 400 && /choose the time you will arrive/.test(none.data.error) && bogus.status === 400
+      && a.status === 200 && b.status === 200 && d.status === 200 && rowsOf('evt-slots').filter((r) => slotOf(r) === '2026-12-05T09:00').length === 2);
+    check('v1.9.0: an hour with its places taken is refused, and the patient asked to choose another',
+      c.status === 409 && /just filled up/.test(c.data.error) && rowsOf('evt-slots').length === 3);
+    check('v1.9.0: on an event without time slots a time posted is not kept', walkIn.status === 200 && slotOf(rowsOf('evt-noslots')[0]) === undefined);
+    const f2 = await getS('evt-slots', '?lang=es');
+    check('v1.9.0: the form shows a full hour as full, and it cannot be chosen — in Spanish too',
+      /value="2026-12-05T09:00" disabled>sáb 5 dic · 9:00 <small>Lleno<\/small>/.test(f2.text) && /¿A qué hora llegará\?/.test(f2.text)
+      && /value="2026-12-05T10:00">sáb 5 dic · 10:00 <small>quedan 1<\/small>/.test(f2.text));
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,7 +1464,7 @@ async function hubChecks() {
     const h = await req('/health');
     const hj = JSON.parse(h.text);
     check('clinic network hub: /health over HTTPS is this worker.js\'s own answer (service, version, seq)',
-      h.status === 200 && hj.ok === true && hj.service === 'mmw-sync' && hj.version === '1.8.0' && hj.seq === true);
+      h.status === 200 && hj.ok === true && hj.service === 'mmw-sync' && hj.version === '1.9.0' && hj.seq === true);
     check('clinic network hub: the key is one the host made — long, and plain letters, numbers and dashes',
       /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(id.key) && id.key !== CLINIC_KEY);
     const ev = { entity: 'event', uid: 'evt-hub', event_uid: null, updated_at: '2026-10-01T00:00:00.000Z@h', data: { name: 'Hub Clinic', active: 1 } };

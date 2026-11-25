@@ -149,6 +149,8 @@ export const api = {
   // v0.0.23: a clinic key the clinic chooses — or, blank, a new one made here.
   hubSetKey: (key) => call('hubSetKey', { key: key || '' }),
   hubSetJoinCode: (code, signOutOthers) => call('hubSetJoinCode', { code: code || '', signOutOthers: !!signOutOthers }),
+  // v0.0.24: the grid of a QR code for `text` ({ size, rows }).
+  qrMake: (text) => call('qrMake', { text }),
   hubStop: (erase) => call('hubStop', { erase: !!erase }),
   hubFirewall: () => call('hubFirewall'),
   lanScan: (ms) => call('lanScan', { ms }),

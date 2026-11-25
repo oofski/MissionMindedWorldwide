@@ -52,7 +52,21 @@ works locally and re-syncs when reconnected.
   server, and a row revived after a deletion holds exactly what the restore sent.
 
 ## Entities (sync `entity` values)
-`event`, `patient`, `triage`, `treatment`, `consent`, `xray`. (Users/auth are NOT synced.)
+`event`, `patient`, `triage`, `treatment`, `consent`, `xray`, `survey`, `user`, `report`,
+`inv_item`, `inv_move` — and, from app 0.0.24 (server 1.9.0):
+- `survey_answer` — one exit survey's answers, with **no patient**: `event_uid` set,
+  `patient_uid` null, data `{ version, language, answers, created_on }` (a date, no time).
+  The patient's own `survey` row then says only that it was answered (its `version` ends
+  in `+anon`) and carries no answers.
+- `presence` — an account signed in on a laptop: data `{ user_uid, device, computer,
+  signed_in_at, last_seen, signed_out_at }`, no parent. Read by the sign-in screen to warn
+  that an account is in use on another laptop.
+- `event` data gains `slots` — `{ start, end, per_hour }` as JSON, or null — the online
+  pre-registration form's arrival times (one an hour from `start`, before `end`, on each
+  day of the event). A pre-registration then carries `demographics.prereg_slot`
+  (`"2026-12-05T09:00"`), and the form refuses an hour that has `per_hour` already.
+The server stores any entity as sent; these need no server change, except the form's time
+slots (1.9.0).
 
 ## Row envelope (used by both push and pull)
 ```json
@@ -70,7 +84,7 @@ works locally and re-syncs when reconnected.
 ## HTTP API (Worker)
 Base URL = the deployed Worker, e.g. `https://mmw-sync.<subdomain>.workers.dev`.
 
-- `GET /health` → `{ ok:true, service:"mmw-sync", version:"1.8.0", seq:true, time:"<iso>" }`
+- `GET /health` → `{ ok:true, service:"mmw-sync", version:"1.9.0", seq:true, time:"<iso>" }`
   (no auth — used by the app's "Test connection").
 - **Auth (all other routes):** header `Authorization: Bearer <CLINIC_KEY>`. The Worker
   compares against the `CLINIC_KEY` secret (constant-time). Mismatch → `401 {ok:false,error}`.

@@ -97,6 +97,7 @@ const PERMS = {
   'cloudSetupServer': ['admin'], 'cloudUpdateServer': ['admin'], 'cloudServerVersion': ['admin'], 'cloudTokenLink': ['admin'],
   'hubSetKey': ['admin'],
   'hubSetJoinCode': ['admin'],
+  'qrMake': ['admin'],
   // v0.0.17: hosting the clinic network is the administrator's.
   'hubStatus': ['admin'], 'hubStart': ['admin'], 'hubStop': ['admin'], 'hubFirewall': ['admin'],
   'cloudStatus': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'], 'cloudSyncNow': ['admin', 'doctor', 'triage', 'emt', 'checkout', 'hygienist', 'registration'],
@@ -158,6 +159,7 @@ window.api = {
   triageSave: okWrap(({ patientId, data }) => db.saveTriage(currentUser, patientId, data), 'triageSave'),
   // Mirrors ipc.js: the channel always saves the check-out stage.
   surveySave: okWrap(({ patientId, data }) => db.saveExitSurvey(currentUser, patientId, { ...(data || {}), stage: 'exit' }), 'surveySave'),
+  qrMake: okWrap(({ text } = {}) => require('../src/main/qr.js').qrMatrix(text), 'qrMake'),
   aftercareGet: okWrap(({ patientId, lang }) => require('../src/main/aftercare.js').aftercareSections(db.getPatient(patientId), lang), 'aftercareGet'),
   inventoryList: okWrap(({ eventId } = {}) => db.listInventory({ eventId }), 'inventoryList'),
   inventoryGet: okWrap(({ id }) => db.getInventoryItem(id), 'inventoryGet'),
@@ -1012,6 +1014,110 @@ async function main() {
     activeEv = evs.find((e) => e.active) || evs[0];
     log(!!activeEv && typeof activeEv.prereg_url === 'string' && /\/checkin\//.test(activeEv.prereg_url) && activeEv.prereg_url.includes(activeEv.uid),
       'v1.5.15: each event exposes a unique /checkin/<event-uid> pre-registration link');
+
+    // v0.0.24: the link as a QR code, and a sign printed with it.
+    const qrM = require('../src/main/qr.js');
+    const mq = qrM.qrMatrix(activeEv.prereg_url);
+    let qrEmpty = '', qrLong = '';
+    try { qrM.qrMatrix(''); } catch (e) { qrEmpty = e.message; }
+    try { qrM.qrMatrix('x'.repeat(1001)); } catch (e) { qrLong = e.message; }
+    log(mq.size >= 21 && mq.size % 4 === 1 && mq.rows.length === mq.size && mq.rows.every((r) => r.length === mq.size && /^[01]+$/.test(r))
+      && mq.rows[0].slice(0, 7) === '1111111' && mq.rows[0].slice(-7) === '1111111' && mq.rows[mq.size - 1].slice(0, 7) === '1111111'
+      && /nothing to put/.test(qrEmpty) && /too long/.test(qrLong),
+      'v0.0.24 pre-registration: the link becomes a QR code — a proper grid with its three corner squares; nothing, or too much, is refused');
+    const QRr = await import('../src/renderer/js/components/qr.js');
+    const qsvg = QRr.qrSvg(mq, { px: 200 });
+    log(qsvg.getAttribute('viewBox') === `0 0 ${mq.size + 8} ${mq.size + 8}` && qsvg.getAttribute('shape-rendering') === 'crispEdges'
+      && /^M\d+ \d+h\d+v1h-\d+z/.test(qsvg.querySelector('path').getAttribute('d')),
+      'v0.0.24 pre-registration: drawn as one crisp SVG path, with the quiet zone a phone camera needs');
+    // The Events screen: the link, its QR code, and the sign.
+    const { renderAdmin: renderAdminQ } = await import('../src/renderer/js/views/admin.js');
+    const ctxQ = { navigate: () => {}, toast: () => {}, store: (await import('../src/renderer/js/store.js')).store, setDetail: () => {} };
+    const admQ = renderAdminQ(ctxQ, { section: 'events' }); document.body.append(admQ);
+    for (let i = 0; i < 12; i++) await tick();
+    const preBtn = Array.from(admQ.querySelectorAll('button')).find((b) => /Pre-reg link/.test(b.textContent));
+    if (preBtn) preBtn.click();
+    for (let i = 0; i < 12; i++) await tick();
+    const preOv = $all('.modal-overlay').pop();
+    const qrIn = preOv && preOv.querySelector('.prereg-qr svg.qr');
+    const printedQ = [];
+    const printWasQ = window.print;
+    window.print = () => { const r = document.getElementById('print-root'); printedQ.push(r ? r.textContent : ''); };
+    try {
+      const signB = preOv && Array.from(preOv.querySelectorAll('button')).find((b) => /Print a sign/.test(b.textContent));
+      if (signB) signB.click();
+      for (let i = 0; i < 12; i++) await tick();
+    } finally { window.print = printWasQ; document.body.classList.remove('printing'); }
+    log(!!qrIn && /not on the clinic network/.test(preOv.textContent) && printedQ.length === 1
+      && /Register before your visit/.test(printedQ[0]) && /Regístrese antes de su visita/.test(printedQ[0]) && printedQ[0].includes(activeEv.prereg_url),
+      'v0.0.24 pre-registration: the Events screen shows the link with its QR code, and prints a sign in English and Spanish');
+    if (preOv) { const done = Array.from(preOv.querySelectorAll('button')).find((b) => /Done/.test(b.textContent)); if (done) done.click(); }
+    for (let i = 0; i < 4; i++) await tick();
+    // New event: its link and QR code straight after Create.
+    Array.from(admQ.querySelectorAll('button')).find((b) => /New event/.test(b.textContent)).click();
+    for (let i = 0; i < 4; i++) await tick();
+    const newOv = $all('.modal-overlay').pop();
+    setInput(newOv.querySelector('input'), 'QR Clinic');
+    Array.from(newOv.querySelectorAll('button')).find((b) => /^Create$/.test(b.textContent.trim())).click();
+    for (let i = 0; i < 20; i++) await tick();
+    const madeOv = $all('.modal-overlay').pop();
+    const madeEv = db.listEvents().find((e) => e.name === 'QR Clinic');
+    log(!!madeOv && /Event created — its pre-registration link/.test(madeOv.textContent) && !!madeOv.querySelector('.prereg-qr')
+      && !!madeEv && madeOv.querySelector('input').value === madeEv.prereg_url,
+      'v0.0.24 pre-registration: a new event shows its link and QR code as soon as it is created'
+        + ` (${madeOv ? madeOv.textContent.slice(0, 120) : 'no dialog'}; ${madeEv ? madeEv.prereg_url : 'no event'}; ${madeOv && madeOv.querySelector('input') ? madeOv.querySelector('input').value : ''})`);
+    if (madeOv) { const done = Array.from(madeOv.querySelectorAll('button')).find((b) => /Done/.test(b.textContent)); if (done) done.click(); }
+    admQ.remove();
+    if (madeEv) db.deleteEvent(currentUser, madeEv.id, { force: true });
+    // On the clinic network there is no link: the host refuses the form.
+    db.setSetting('cloud_lan_pin', 'ab'.repeat(32));
+    const lanEv = db.listEvents().find((e) => e.id === activeEv.id);
+    db.setSetting('cloud_lan_pin', '');
+    log(lanEv.prereg_url === null, 'v0.0.24 pre-registration: no link is offered on the clinic network, where it could not work');
+
+    // v0.0.24: pre-registration time slots, set on the event.
+    let badSlot1 = '', badSlot2 = '';
+    try { db.createEvent(currentUser, { name: 'Bad slots', slots: { start: '12:00', end: '08:00', per_hour: 8 } }); } catch (e) { badSlot1 = e.message; }
+    try { db.createEvent(currentUser, { name: 'Bad slots', slots: { start: '08:00', end: '12:00', per_hour: 0 } }); } catch (e) { badSlot2 = e.message; }
+    const slotEv = db.createEvent(currentUser, { name: 'Slot Day', start_date: '2026-12-05', slots: { start: '08:00', end: '12:00', per_hour: 8 } });
+    const kept = db.updateEvent(currentUser, slotEv.id, { name: 'Slot Day' });
+    const cleared = db.updateEvent(currentUser, slotEv.id, { slots: null });
+    db.updateEvent(currentUser, slotEv.id, { slots: { start: '09:00', end: '11:00', per_hour: 5 } });
+    const slotRow = db.collectSyncRows(5000).rows.find((r) => r.entity === 'event' && r.uid === slotEv.uid);
+    log(/later end time/.test(badSlot1) && /1 to 500/.test(badSlot2) && slotEv.slots === '{"start":"08:00","end":"12:00","per_hour":8}' && !!slotEv.uid
+      && kept.slots === slotEv.slots && cleared.slots === null && !!slotRow && slotRow.data.slots === '{"start":"09:00","end":"11:00","per_hour":5}',
+      'v0.0.24 time slots: an event keeps its first arrival, last hour and patients per hour — checked, kept by an edit that does not mention them, cleared on purpose — and they sync to the online form');
+    const { renderAdmin: renderAdminT } = await import('../src/renderer/js/views/admin.js');
+    const admT = renderAdminT(ctxQ, { section: 'events' }); document.body.append(admT);
+    for (let i = 0; i < 12; i++) await tick();
+    Array.from(admT.querySelectorAll('button')).find((b) => /New event/.test(b.textContent)).click();
+    for (let i = 0; i < 4; i++) await tick();
+    const tOv = $all('.modal-overlay').pop();
+    const sOn = tOv.querySelector('.slots-on');
+    const hiddenFirst = tOv.querySelector('.slots-row').style.display === 'none';
+    sOn.checked = true; sOn.dispatchEvent(new window.Event('change', { bubbles: true }));
+    setInput(tOv.querySelector('input'), 'Form Slot Clinic');
+    setInput(tOv.querySelector('.slots-start'), '08:30');
+    setInput(tOv.querySelector('.slots-end'), '11:30');
+    setInput(tOv.querySelector('.slots-per'), '6');
+    const shownNow = tOv.querySelector('.slots-row').style.display === '';
+    Array.from(tOv.querySelectorAll('button')).find((b) => /^Create$/.test(b.textContent.trim())).click();
+    for (let i = 0; i < 20; i++) await tick();
+    $all('.modal-overlay').forEach((o) => o.remove());
+    const formEv = db.listEvents().find((e) => e.name === 'Form Slot Clinic');
+    log(hiddenFirst && shownNow && !!formEv && formEv.slots === '{"start":"08:30","end":"11:30","per_hour":6}' && /Walk-ins are not counted/.test(tOv.textContent),
+      'v0.0.24 time slots: the event form offers "patients choose an arrival time", with the first arrival, the last hour and patients per hour');
+    admT.remove();
+    if (formEv) db.deleteEvent(currentUser, formEv.id, { force: true });
+    // Arrivals: the time each patient chose, in that order.
+    const { slotText } = await import('../src/renderer/js/views/arrivals.js');
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const local = new Date(); const todayLocal = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
+    log(slotText(`${todayLocal}T09:00`) === 'Arriving 9:00 AM' && slotText(`${todayLocal}T13:30`) === 'Arriving 1:30 PM'
+      && /^Arriving .+, 8:00 AM$/.test(slotText('2030-01-02T08:00')) && slotText('nonsense') === '',
+      'v0.0.24 time slots: Arrivals says "Arriving 9:00 AM" — with the day when it is not today');
+    void todayIso;
+    db.deleteEvent(currentUser, slotEv.id, { force: true });
     db.setSetting('cloud_url', ''); db.setSetting('cloud_key', '');
 
     // Simulate what the Worker writes when a patient pre-registers: a checked-in
@@ -2505,16 +2611,20 @@ async function main() {
         totally_unknown_question: 'x',
       },
     });
-    log(saved.answers.first_time === 'yes' && saved.answers.rate_care === '5',
-      'MMW survey: answers are stored against the patient');
-    log(JSON.stringify(saved.answers.assistance) === JSON.stringify(['snap', 'wic']),
+    // v0.0.24: the answers are kept apart from the patient (survey_answers).
+    const anonRowsSv = () => { const r = rawDb(); try { return r.prepare('SELECT answers FROM survey_answers ORDER BY id').all().map((x) => JSON.parse(x.answers)); } finally { r.close(); } };
+    const stored = anonRowsSv().pop() || {};
+    log(stored.first_time === 'yes' && stored.rate_care === '5' && saved.anonymous === true && Object.keys(saved.answers).length === 0,
+      'MMW survey: answers are stored — since v0.0.24 apart from the patient, whose record keeps only that the survey was answered');
+    log(JSON.stringify(stored.assistance) === JSON.stringify(['snap', 'wic']),
       'MMW survey: a repeated tick on a select-all question is only counted once');
-    log(JSON.stringify(saved.answers.access_barriers) === JSON.stringify(['cost']),
+    log(JSON.stringify(stored.access_barriers) === JSON.stringify(['cost']),
       'MMW survey: an option the question does not offer is dropped');
-    log(saved.answers.employment === undefined && saved.answers.totally_unknown_question === undefined,
+    log(stored.employment === undefined && stored.totally_unknown_question === undefined && saved.answers.employment === undefined,
       'MMW survey: unknown questions and impossible values never reach the database');
-    log(db.getPatient(sp1.id).exit_survey.answers.living_situation === 'homeless',
-      'MMW survey: the survey comes back on the patient record');
+    log(db.getPatient(sp1.id).exit_survey.exit_status === 'completed' && db.getPatient(sp1.id).exit_survey.anonymous === true
+      && db.getPatient(sp1.id).exit_survey.answers.living_situation === undefined,
+      'MMW survey: the patient record says the survey was completed — anonymously, with no answers on it');
 
     // Declining is an answer. Without it a required survey would force staff to
     // invent responses for a patient who does not want to disclose their income.
@@ -2523,12 +2633,13 @@ async function main() {
     log(dec.declined === true && Object.keys(dec.answers).length === 0,
       'MMW survey: declining records a refusal and stores no answers');
 
-    // Re-answering corrects rather than duplicating, or a household would be
-    // counted twice in a grant return.
-    db.saveExitSurvey(currentUser, sp1.id, { answers: { first_time: 'no' } });
-    const again = db.getExitSurvey(sp1.id);
-    log(again.answers.first_time === 'no' && again.answers.rate_care === undefined,
-      'MMW survey: answering again replaces the response rather than adding a second one');
+    // Answering again would count a household twice in a grant return — and
+    // since v0.0.24 the first answers cannot be found to replace. Refused.
+    const nAnon = anonRowsSv().length;
+    let againErr = '';
+    try { db.saveExitSurvey(currentUser, sp1.id, { answers: { first_time: 'no' } }); } catch (e) { againErr = e.message; }
+    log(/answered the survey already/.test(againErr) && anonRowsSv().length === nAnon && db.getExitSurvey(sp1.id).exit_status === 'completed',
+      'MMW survey: answering again is refused rather than adding a second response (v0.0.24: the first is anonymous)');
 
     // The aggregate: counts only, and nothing that belongs to a person.
     const sum = db.buildEventSummary();
@@ -2545,7 +2656,7 @@ async function main() {
     const merged = db.mergeSummaries([sum, sum]);
     log(merged.survey.responses === sum.survey.responses * 2,
       'MMW survey: merging two clinics adds their survey totals together');
-    log(merged.survey.answers.first_time.no === (sum.survey.answers.first_time.no || 0) * 2,
+    log(sum.survey.answers.first_time.yes >= 1 && merged.survey.answers.first_time.yes === sum.survey.answers.first_time.yes * 2,
       'MMW survey: merging adds option counts question by question');
   }
 
@@ -5236,6 +5347,143 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
       await settle(16);
       log(Array.from(cardTitled(qv, 'Treatment waiting').querySelectorAll('tbody tr')).length === wRows.length, 'v0.0.24: All shows everyone again');
       db.setActiveEvent(currentUser, evB.id);
+    }
+
+    /* ---- v0.0.24: the exit survey is anonymous ---- */
+    {
+      const evS = db.createEvent(currentUser, { name: 'Survey Clinic', location: 'Sandy' });
+      db.setActiveEvent(currentUser, evS.id);
+      const rawS = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).all(...a); } finally { r.close(); } };
+      const rawRun = (sql, ...a) => { const r = rawDb(); try { return r.prepare(sql).run(...a); } finally { r.close(); } };
+      const sp = mkB('Sara', 'Survey');
+      const before = db.buildEventSummary(evS.id).survey;
+      db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', language: 'es', answers: { first_time: 'yes', assistance: ['snap', 'wic'] }, declined: false, stage: 'exit' });
+      const svS = db.getPatient(sp.id).exit_survey;
+      const anonRows = rawS('SELECT * FROM survey_answers WHERE event_id = ?', evS.id);
+      const cols = rawS('PRAGMA table_info(survey_answers)').map((c) => c.name);
+      log(svS.exit_status === 'completed' && svS.anonymous === true && JSON.stringify(svS.answers) === '{}'
+        && anonRows.length === 1 && JSON.parse(anonRows[0].answers).first_time === 'yes' && /^\d{4}-\d{2}-\d{2}$/.test(anonRows[0].created_on)
+        && !cols.some((c) => /patient|name|by/.test(c)),
+        'v0.0.24: a finished survey leaves only "answered" on the patient\'s record; the answers are a separate row for the clinic, with no patient, name or time of day');
+      const after = db.buildEventSummary(evS.id).survey;
+      log(after.responses === before.responses + 1 && after.answers.first_time.yes === 1 && after.answers.assistance.snap === 1 && after.answers.assistance.wic === 1,
+        'v0.0.24: the report counts the anonymous answers exactly as before');
+      let again = '';
+      try { db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', answers: { first_time: 'no' }, declined: false, stage: 'exit' }); } catch (e) { again = e.message; }
+      let declineAfter = '';
+      try { db.saveExitSurvey(currentUser, sp.id, { version: 'mmw-exit-v2', declined: true, stage: 'exit' }); } catch (e) { declineAfter = e.message; }
+      log(/answered the survey already/.test(again) && /saved anonymously/.test(declineAfter)
+        && rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 1,
+        'v0.0.24: an anonymous survey cannot be taken again or declined afterwards — the patient would be counted twice, and their answers cannot be found');
+      const dp = mkB('Dex', 'Decliner');
+      db.saveExitSurvey(currentUser, dp.id, { version: 'mmw-exit-v2', declined: true, stage: 'exit' });
+      log(db.getPatient(dp.id).exit_survey.exit_status === 'declined' && rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 1,
+        'v0.0.24: a declined survey stores no answers anywhere');
+      // An answer from before 0.0.24, kept on the patient's row: shown to check,
+      // and moved to an anonymous row when the survey is finished.
+      const lp = mkB('Lena', 'Legacysurvey');
+      rawRun("INSERT INTO exit_surveys (patient_id, version, language, answers, declined, exit_status, completed_at, created_at) VALUES (?, 'mmw-exit-v2', 'en', ?, 0, 'completed', ?, ?)",
+        lp.id, JSON.stringify({ first_time: 'no' }), new Date().toISOString(), new Date().toISOString());
+      const legacySum = db.buildEventSummary(evS.id).survey;
+      db.saveExitSurvey(currentUser, lp.id, { version: 'mmw-exit-v2', answers: { first_time: 'not_sure' }, declined: false, stage: 'exit' });
+      const legacyAfter = db.buildEventSummary(evS.id).survey;
+      log(legacySum.answers.first_time.no === 1 && JSON.stringify(db.getPatient(lp.id).exit_survey.answers) === '{}' && db.getPatient(lp.id).exit_survey.anonymous === true
+        && !legacyAfter.answers.first_time.no && legacyAfter.answers.first_time.not_sure === 1 && legacyAfter.responses === legacySum.responses,
+        'v0.0.24: a survey answered before 0.0.24 still counts; corrected now, its answers move off the patient\'s record — counted once');
+      // Sync: the row travels with its clinic and no patient.
+      // (collectSyncRows hands out the uids, the event's included.)
+      const pushedAll = db.collectSyncRows(5000).rows.filter((r) => r.entity === 'survey_answer');
+      const evUid = rawS('SELECT uid FROM events WHERE id = ?', evS.id)[0].uid;
+      const pushed = pushedAll.filter((r) => r.event_uid === evUid);
+      log(pushed.length === 2 && pushedAll.every((r) => !!r.event_uid && r.patient_uid === null && !('patient_id' in r.data) && Object.keys(r.data).join() === 'version,language,answers,created_on'),
+        'v0.0.24: the anonymous answers sync with their clinic event and no patient'
+          + ` (${pushed.length} of ${pushedAll.length}; here ${rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n}; ${JSON.stringify(pushedAll.slice(0, 2)).slice(0, 300)})`);
+      const res = db.applyRemoteRows([{ entity: 'survey_answer', uid: 'peer-survey-1', event_uid: evUid, patient_uid: null, deleted: 0, updated_at: new Date().toISOString() + '@peer',
+        data: { version: 'mmw-exit-v2', language: 'en', answers: JSON.stringify({ first_time: 'yes' }), created_on: '2026-11-20' } }]);
+      log(res.applied === 1 && db.buildEventSummary(evS.id).survey.answers.first_time.yes === 2, 'v0.0.24: and another laptop\'s answers are counted here'
+        + ` (${JSON.stringify(res).slice(0, 200)}; ${JSON.stringify(db.buildEventSummary(evS.id).survey.answers.first_time)})`);
+      const bundle = db.exportClinicBundle(evS.id);
+      log(Array.isArray(bundle.survey_answers) && bundle.survey_answers.length === 3 && bundle.survey_answers.every((r) => !('patient_id' in r) && !('event_id' in r)),
+        'v0.0.24: the USB clinic backup carries the anonymous answers, with no patient in them' + ` (${(bundle.survey_answers || []).length})`);
+      // On screen: said first, in both languages.
+      const { openExitSurvey, surveyStatus } = await import('../src/renderer/js/components/exitSurvey.js');
+      const pr = openExitSurvey({ id: dp.id }, { lang: 'es' });
+      await settle(4);
+      const ov = document.querySelector('.survey-overlay');
+      const esTxt = ov ? ov.textContent : '';
+      if (ov) Array.from(ov.querySelectorAll('button')).find((b) => b.title === 'Cerrar').click();
+      await pr;
+      log(/Esta encuesta es anónima/.test(esTxt) && /Anónima/.test(esTxt) && !!(ov && ov.querySelector('.survey-anon')),
+        'v0.0.24: the survey says first, in large print, that it is anonymous — in Spanish too');
+      const stA = surveyStatus(db.getPatient(sp.id).exit_survey);
+      log(stA.key === 'done' && stA.label === 'Completed · answers kept anonymously' && stA.anonymous === true,
+        'v0.0.24: check-out says the survey was completed with its answers kept anonymously');
+      const coS = await view('checkout.js', 'renderCheckout', { id: sp.id });
+      log(/saved anonymously, apart from this record, so they cannot be opened or changed/.test(coS.textContent) && !btnIn(coS, /review or change answers/),
+        'v0.0.24: and offers no way to reopen it');
+      // Deleting the clinic takes its answers, everywhere.
+      const ansUids = rawS('SELECT uid FROM survey_answers WHERE event_id = ?', evS.id).map((r) => r.uid);
+      db.setActiveEvent(currentUser, evB.id);
+      db.deleteEvent(currentUser, evS.id, { force: true });
+      log(rawS('SELECT COUNT(*) AS n FROM survey_answers WHERE event_id = ?', evS.id)[0].n === 0
+        && ansUids.every((u) => rawS('SELECT 1 FROM tombstones WHERE uid = ?', u).length === 1),
+        'v0.0.24: deleting the clinic event deletes its anonymous answers on every laptop (its totals are kept in the report)');
+    }
+
+    /* ---- v0.0.24: wristband labels — the printer's stock and resolution ---- */
+    {
+      const WB = await import('../src/renderer/js/components/wristband.js');
+      const BC = await import('../src/renderer/js/components/barcode.js');
+      try { window.localStorage.removeItem('mmw.wristband.label'); } catch (_) { /* none */ }
+      const def = WB.labelSetting();
+      log(def.key === 'sheet' && def.dpi === 203 && !def.w, 'v0.0.24 labels: a laptop starts on a sheet of paper and a 203 dpi printer');
+      log(BC.code128Width('482913') === 88 && Math.abs(WB.moduleFor('482913', 60, 203) - 4 * 25.4 / 203) < 1e-9 && Math.abs(WB.moduleFor('482913', 25, 203) - 2 * 25.4 / 203) < 1e-9
+        && Math.abs(WB.moduleFor('482913', 60, 300) - 6 * 25.4 / 300) < 1e-9,
+        'v0.0.24 labels: the narrowest bar is a whole number of the printer\'s dots — 4 dots (0.5 mm) at 203 dpi where it fits, 2 on a small label, 6 at 300 dpi');
+      WB.saveLabelSetting({ key: 'band-1x11', dpi: 300, offset: 30 });
+      const band = WB.labelSetting();
+      WB.saveLabelSetting({ key: 'custom', w: 'abc', h: 40 });
+      const junk = WB.labelSetting();
+      log(band.w === 279.4 && band.h === 25.4 && band.dpi === 300 && band.offset === 30 && WB.labelLayout(band) === 'band'
+        && junk.w === 101.6 && junk.h === 40 && WB.labelLayout({ w: 50.8, h: 25.4 }) === 'small' && WB.labelLayout({ w: 101.6, h: 152.4 }) === 'large' && WB.labelLayout({}) === 'sheet',
+        'v0.0.24 labels: a 1 × 11 in band, a 2 × 1 in label, a 4 × 6 in label or a size typed in — a nonsense size falls back');
+      const sample = { patient_code: '482913', first_name: 'Maria', last_name: 'Lopez', dob: '1984-03-09', demographics: {} };
+      const bandNode = WB.wristbandLabel(sample, { forPrint: true, label: band });
+      const svgB = bandNode.querySelector('svg');
+      const widths = Array.from(svgB.querySelectorAll('rect')).slice(1).map((r) => Number(r.getAttribute('width')));
+      log(bandNode.classList.contains('wristband--band') && /^279\.4mm$/.test(bandNode.style.width) && bandNode.style.paddingLeft === '31.5mm'
+        && /mm$/.test(svgB.getAttribute('width')) && svgB.getAttribute('shape-rendering') === 'crispEdges' && widths.every((x) => Number.isInteger(x))
+        && Math.abs(parseFloat(svgB.getAttribute('width')) - 88 * WB.moduleFor('482913', Math.min(70, (279.4 - 30) * 0.45), 300)) < 0.01,
+        'v0.0.24 labels: a band prints at its own size, past the clasp, with a barcode drawn in millimetres, crisp, in whole modules');
+      const smallNode = WB.wristbandLabel(sample, { forPrint: true, label: { key: 'label-2x1', w: 50.8, h: 25.4, dpi: 203, offset: 0 } });
+      log(smallNode.classList.contains('wristband--small') && /Maria Lopez/.test(smallNode.textContent) && parseFloat(smallNode.querySelector('svg').getAttribute('width')) <= 50.8 - 3,
+        'v0.0.24 labels: a 2 × 1 in label carries the name and a barcode that fits inside it');
+      const printedWb = [];
+      const printWasWb = window.print;
+      window.print = () => { printedWb.push((document.getElementById('wb-page-size') || {}).textContent || ''); };
+      try {
+        WB.saveLabelSetting({ key: 'band-1x11', dpi: 203, offset: 0 });
+        WB.printWristband(sample);
+        WB.saveLabelSetting({ key: 'sheet', dpi: 203 });
+        WB.printWristband(sample);
+      } finally { window.print = printWasWb; document.body.classList.remove('printing'); }
+      log(printedWb[0] === '@media print{ @page{ size:279.4mm 25.4mm; margin:0; } }' && printedWb[1] === '',
+        'v0.0.24 labels: printing makes the page exactly the label, with no margin — and a sheet keeps the usual page');
+      // Admin → Events: the card, a change saved on this laptop, the preview.
+      const evView = await view('admin.js', 'renderAdmin', { section: 'events' });
+      const card = cardTitled(evView, 'Wristband labels on this laptop');
+      const sizeSel = card && card.querySelector('.wb-size');
+      if (sizeSel) setInput(sizeSel, 'label-2x1');
+      await settle(2);
+      log(!!card && /never the name or date of birth/.test(card.textContent) && WB.labelSetting().key === 'label-2x1'
+        && !!card.querySelector('.wb-label-preview .wristband--small') && /50\.8 × 25\.4 mm label/.test(card.textContent)
+        && card.querySelector('.wb-custom').style.display === 'none' && !!btnIn(card, /Print a test band/),
+        'v0.0.24 labels: Admin → Events → Wristband labels keeps this laptop\'s label size, shows a preview, says what the barcode holds, and prints a test band');
+      if (sizeSel) setInput(sizeSel, 'custom');
+      await settle(2);
+      log(card.querySelector('.wb-custom').style.display === '' , 'v0.0.24 labels: "Another size" asks for its width and height in millimetres');
+      evView.remove();
+      try { window.localStorage.removeItem('mmw.wristband.label'); } catch (_) { /* none */ }
     }
 
     if (prevEventId && db.listEvents().some((e) => e.id === prevEventId)) db.setActiveEvent(currentUser, prevEventId);
@@ -8292,14 +8540,18 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     await settle(10);
     await pend;
     sv2 = db.getExitSurvey(two.id);
-    log(sv2.exit_status === 'completed' && sv2.answers.household_size === '4' && sv2.answers.food_insecurity === 'yes'
-      && sv2.answers.rate_care === '5' && JSON.stringify(sv2.answers.assistance) === '["medicaid"]',
-      'survey: Finish stores what was on the form — the confirmed registration answers and the new ones');
-    log(sv2.answers.income === undefined,
+    // v0.0.24: the answers go to an anonymous row; the patient's keeps none.
+    const lastAnon = () => { const r = rawDb(); try { const x = r.prepare('SELECT * FROM survey_answers ORDER BY id DESC LIMIT 1').get(); return x ? { ...x, answers: JSON.parse(x.answers) } : { answers: {} }; } finally { r.close(); } };
+    const an2 = lastAnon();
+    log(sv2.exit_status === 'completed' && sv2.anonymous === true && JSON.stringify(sv2.answers) === '{}'
+      && an2.answers.household_size === '4' && an2.answers.food_insecurity === 'yes'
+      && an2.answers.rate_care === '5' && JSON.stringify(an2.answers.assistance) === '["medicaid"]',
+      'survey: Finish stores what was on the form — the confirmed registration answers and the new ones — apart from the patient (v0.0.24)');
+    log(an2.answers.income === undefined,
       'survey: an answer the patient took off the pre-filled form is removed, not kept behind their back');
-    log(sv2.version === 'mmw-exit-v2' && sv2.language === 'es' && sv2.registration_status === 'completed',
-      'survey: the row records v2, the language it was answered in, and keeps its registration history');
-    log(surveyStatus(sv2).label === 'Completed · 4 of 34 answered', 'survey: the desk sees "n of 34" once it is taken');
+    log(sv2.version === 'mmw-exit-v2+anon' && an2.version === 'mmw-exit-v2' && an2.language === 'es' && sv2.language === 'es' && sv2.registration_status === 'completed',
+      'survey: the answers record v2 and the language they were given in; the patient\'s row says they were given anonymously, and keeps its registration history');
+    log(surveyStatus(sv2).label === 'Completed · answers kept anonymously', 'survey: the desk sees it was taken, with its answers kept anonymously');
 
     // Declining with answers on the form warns first, then clears everything.
     const dec = legacyPt('Dee', { household_size: '2', employment: 'retired' });
@@ -8331,22 +8583,26 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     db.setActiveEvent(currentUser, db.createEvent(currentUser, { name: 'Survey Scratch' }).id);
     const late = db.createPatient(currentUser, { first_name: 'Late', last_name: 'Row', demographics: {}, medical_history: {}, dental_history: {} });
     db.saveExitSurvey(currentUser, late.id, { stage: 'exit', answers: { rate_care: '4' } });
+    const lateAnon = lastAnon();
     db.saveExitSurvey(currentUser, late.id, { stage: 'registration', answers: { income: 'pna' } });
     const lsv = db.getExitSurvey(late.id);
-    log(lsv.answers.rate_care === '4' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
-      && lsv.registration_status === 'completed' && lsv.declined === false,
+    log(lateAnon.answers.rate_care === '4' && lsv.answers.income === 'pna' && lsv.exit_status === 'completed'
+      && lsv.registration_status === 'completed' && lsv.declined === false && lastAnon().id === lateAnon.id,
       'survey (legacy): a registration-stage save (db.createPatient\'s legacy path) after check-out adds to the record and erases nothing');
     db.saveExitSurvey(currentUser, late.id, { stage: 'registration', declined: true });
-    log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).answers.rate_care === '4',
+    log(db.getExitSurvey(late.id).declined === false && db.getExitSurvey(late.id).exit_status === 'completed' && lastAnon().answers.rate_care === '4',
       'survey (legacy): a registration-stage "skip" neither clears answers nor marks check-out declined');
-    log(db.saveExitSurvey(currentUser, late.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2',
+    const verP = db.createPatient(currentUser, { first_name: 'Vera', last_name: 'Version', demographics: {}, medical_history: {}, dental_history: {} });
+    log(db.saveExitSurvey(currentUser, verP.id, { answers: { rate_care: '3' } }).version === 'mmw-exit-v2+anon' && lastAnon().version === 'mmw-exit-v2',
       'survey: a save that names no version is recorded as v2');
 
     // Over the survey:save channel every save is the check-out stage, which
     // REPLACES the answers: no survey role can send the merge-only
     // 'registration' stage and slip answers onto a row.
-    const viaChannel = await window.api.surveySave({ patientId: late.id, data: { stage: 'registration', answers: { rate_care: '2' } } });
-    log(viaChannel.ok && JSON.stringify(db.getExitSurvey(late.id).answers) === '{"rate_care":"2"}',
+    const chP = db.createPatient(currentUser, { first_name: 'Chan', last_name: 'Nel', demographics: {}, medical_history: {}, dental_history: {} });
+    const viaChannel = await window.api.surveySave({ patientId: chP.id, data: { stage: 'registration', answers: { rate_care: '2' } } });
+    log(viaChannel.ok && JSON.stringify(db.getExitSurvey(chP.id).answers) === '{}' && db.getExitSurvey(chP.id).exit_status === 'completed'
+      && JSON.stringify(lastAnon().answers) === '{"rate_care":"2"}',
       'survey: a save over the channel is always the check-out stage, even when it names "registration"');
     log(/handle\('survey:save', \(\{ patientId, data \}\) => db\.saveExitSurvey\(currentUser, patientId, \{ \.\.\.\(data \|\| \{\}\), stage: 'exit' \}\)\)/
       .test(fs.readFileSync(new URL('../src/main/ipc.js', import.meta.url), 'utf8')),
@@ -8379,8 +8635,9 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
       data: { version: 'mmw-exit-v1', language: 'en', answers: JSON.stringify({ income: '0_15k' }), declined: 0, completed_at: null,
         completed_by_name: null, created_at: '2000-01-01T00:00:00.000Z', registration_status: 'completed', exit_status: null } }]);
     const ssv = db.getExitSurvey(syncP.id);
-    log(!!svUid && oldReg.applied === 0 && oldReg.skipped === 1 && ssv.exit_status === 'completed' && ssv.answers.rate_care === '5'
-      && ssv.answers.household_size === '2' && ssv.answers.income === undefined,
+    const syncAnon = (() => { const r = rawDb(); try { return r.prepare('SELECT answers FROM survey_answers').all().map((x) => JSON.parse(x.answers)); } finally { r.close(); } })();
+    log(!!svUid && oldReg.applied === 0 && oldReg.skipped === 1 && ssv.exit_status === 'completed' && ssv.anonymous === true
+      && syncAnon.some((a) => a.rate_care === '5' && a.household_size === '2') && ssv.answers.income === undefined,
       'survey (legacy): an older registration row arriving by sync is refused whole (last writer wins) — the check-out answers survive');
 
     // A v0.0.14 row: household half at registration, then declined at check-out
@@ -11988,8 +12245,10 @@ process.stdin.on('end',()=>{try{hub.shutdown();}catch(_){}process.exit(0);});
       const progS = ovS.querySelector('.survey-progress-text').textContent;
       clickText('Finish', ovS); await settle19(10); await pendS;
       const svS = db.getExitSurvey(sp.id);
+      // v0.0.24: stored apart from the patient — the newest anonymous row.
+      const anonS = (() => { const r = rawDb(); try { const x = r.prepare('SELECT answers FROM survey_answers ORDER BY id DESC LIMIT 1').get(); return x ? JSON.parse(x.answers) : {}; } finally { r.close(); } })();
       log(sTaps === 34 && progS === '34 of 34 answered' && !ovS.querySelector('select') && svS.exit_status === 'completed'
-        && Object.keys(svS.answers).length === 34,
+        && svS.anonymous === true && Object.keys(anonS).length === 34,
         'v0.0.19 survey: all 34 questions answered in 34 taps (it was about 65), no dropdowns, every answer stored');
     } finally {
       window.print = printWas;

@@ -122,7 +122,10 @@ export function renderArrivals(ctx) {
       tab = waitingIn(true) ? 'prereg' : (waitingIn(false) ? 'walkin' : 'prereg');
     }
     const inTab = checkedIn.filter((p) => (tab === 'prereg' ? p.preregistered : !p.preregistered));
-    const allWaiting = inTab.filter((p) => !p.arrived_at).sort(byName);
+    // v0.0.24: pre-registered patients who chose an arrival time come in
+    // that order — the 8:00s first — then everyone else A–Z.
+    const bySlot = (a, b) => (a.prereg_slot && b.prereg_slot ? a.prereg_slot.localeCompare(b.prereg_slot) : (a.prereg_slot ? -1 : b.prereg_slot ? 1 : 0)) || byName(a, b);
+    const allWaiting = inTab.filter((p) => !p.arrived_at).sort(tab === 'prereg' ? bySlot : byName);
     const allHere = inTab.filter((p) => p.arrived_at).sort(byName);
     const waiting = allWaiting.filter((p) => matches(p, query));
     const here = allHere.filter((p) => matches(p, query));
@@ -139,6 +142,7 @@ export function renderArrivals(ctx) {
 
       const tags = [];
       if (p.preregistered) tags.push(el('span', { class: 'crm-chip crm-chip--prereg', title: 'Pre-registered online' }, ['Pre-reg']));
+      if (p.prereg_slot) tags.push(el('span', { class: 'crm-chip crm-chip--slot', title: 'The arrival time chosen on the pre-registration form' }, [icon('calendar', { size: 10 }), slotText(p.prereg_slot)]));
       tags.push(p.consents_ok
         ? el('span', { class: 'crm-chip crm-chip--ok', title: 'Every consent this visit needs is signed' }, [icon('check', { size: 10 }), 'Consents signed'])
         : el('span', { class: 'crm-chip crm-chip--warn', title: 'A required consent is not signed yet' }, ['Consent missing']));
@@ -291,4 +295,16 @@ export function renderArrivals(ctx) {
   }, 15000);
   if (timer && typeof timer.unref === 'function') timer.unref();
   return root;
+}
+
+// v0.0.24: "Arriving 9:00 AM" — with the day too when it is not today.
+export function slotText(id) {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})$/.exec(String(id || ''));
+  if (!m) return '';
+  const h = Number(m[2]);
+  const clock = `${h % 12 || 12}:${m[3]} ${h < 12 ? 'AM' : 'PM'}`;
+  const d = new Date(`${m[1]}T12:00:00`);
+  const today = new Date();
+  const same = d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate();
+  return same || isNaN(d) ? `Arriving ${clock}` : `Arriving ${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}, ${clock}`;
 }

@@ -5,6 +5,8 @@ import { readConnectionCode } from '../connectionCode.js';
 import { store } from '../store.js';
 import { icon } from '../icons.js';
 import { eventCities } from '../components/intakeSections.js';
+import { qrFor, preregSign, printNode } from '../components/qr.js';
+import { LABEL_SIZES, PRINTER_DPI, labelSetting, saveLabelSetting, labelLayout, wristbandLabel, printWristband } from '../components/wristband.js';
 
 // Cloud-sync live-update subscription. Kept at module scope so repaints of the
 // Cloud tab can drop the previous listener before adding a new one (no stacking).
@@ -32,6 +34,8 @@ export function renderAdmin(ctx, params = {}) {
   // 'lan'), kept while this page repaints. Unset, it follows what this laptop
   // is connected to.
   let cloudChoice = null;
+  // The Events tab's pre-registration dialog, for New event to open (v0.0.24).
+  let preregLinkFor = async () => {};
 
   const sectionFns = { staff: staffTab, events: eventsTab, data: dataTab, languages: langTab, cloud: cloudTab, audit: auditTab };
 
@@ -353,6 +357,7 @@ export function renderAdmin(ctx, params = {}) {
 
   /* ---- Events ---- */
   async function eventsTab(body) {
+    preregLinkFor = preregLink;
     const events = await api.listEvents();
     const active = await api.activeEvent();
     const rows = events.map((e) => {
@@ -409,6 +414,7 @@ export function renderAdmin(ctx, params = {}) {
           ]),
         ]),
       ]),
+      wristbandLabelCard(),
     );
 
     async function setActive(e) {
@@ -416,19 +422,31 @@ export function renderAdmin(ctx, params = {}) {
     }
     // Share the per-event pre-registration link. Patients open it ahead of time,
     // answer the check-in questions, and appear in THIS event's queue.
-    async function preregLink(e) {
+    async function preregLink(e, { created = false } = {}) {
       const input = el('input', { class: 'input', readonly: true, value: e.prereg_url, style: 'font-family:var(--font-mono);font-size:var(--fs-sm)' });
+      // v0.0.24: the link as a QR code, and a sign to print with it.
+      const qrBox = el('div', { class: 'prereg-qr' });
+      qrFor(e.prereg_url, { px: 200 }).then((svg) => qrBox.replaceChildren(svg)).catch((err) => qrBox.replaceChildren(el('span', { class: 'subtle small' }, [err.message])));
+      const signBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, [icon('print', { size: 14 }), 'Print a sign with the QR code']);
+      signBtn.addEventListener('click', async () => {
+        try { printNode(await preregSign(e)); } catch (err) { toast(err.message, 'error'); }
+      });
       const copyBtn = el('button', { class: 'btn btn--primary', type: 'button' }, [icon('save', { size: 14 }), 'Copy link']);
       copyBtn.addEventListener('click', async () => {
         try { input.select(); if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(e.prereg_url); else document.execCommand('copy'); toast('Link copied', 'success'); }
         catch (_) { input.select(); document.execCommand('copy'); toast('Link copied', 'success'); }
       });
       await modal({
-        title: `Pre-registration link — ${e.name}`,
+        title: created ? `Event created — its pre-registration link` : `Pre-registration link — ${e.name}`,
         body: el('div', {}, [
-          el('p', { class: 'subtle small', style: 'margin:0 0 10px' }, ['Share this link with patients (text, email, flyer QR). Anyone who fills it out is added to this event’s check-in queue with a “Pre-reg” tag. The link is unique to this event.']),
+          created ? el('p', { style: 'margin:0 0 10px' }, [`“${e.name}” is created. Patients can register for it ahead of time with this link or QR code.`]) : null,
+          el('p', { class: 'subtle small', style: 'margin:0 0 10px' }, ['Share this link with patients (text, email, a flyer), or let them scan the QR code. Anyone who fills it out is added to this event’s check-in queue with a “Pre-reg” tag. The link is unique to this event.']),
           el('div', { class: 'inline-row', style: 'gap:8px' }, [input, copyBtn]),
-          el('p', { class: 'subtle', style: 'font-size:var(--fs-2xs);margin:12px 0 0' }, ['Note: pre-registration needs the clinic to be Online (Admin → Cloud). Submissions arrive on the next sync.']),
+          el('div', { class: 'prereg-qr-row' }, [qrBox, el('div', { class: 'prereg-qr-side' }, [
+            el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Scanned with a phone\u2019s camera, the QR code opens the same link. Print a sign for the door or the flyer — in English and Spanish.']),
+            signBtn,
+          ])]),
+          el('p', { class: 'subtle', style: 'font-size:var(--fs-2xs);margin:12px 0 0' }, ['The link and the QR code work only with the internet sync server (Admin → Cloud → Internet server) — not on the clinic network, which has no internet. Submissions arrive on the next sync.']),
         ]),
         confirmText: 'Done',
       });
@@ -468,6 +486,20 @@ export function renderAdmin(ctx, params = {}) {
     // Left empty, City stays a free-text box — nothing changes until an admin
     // sets a list.
     const cities = el('textarea', { class: 'input textarea', rows: 4, placeholder: 'Sandy\nBoring\nEstacada' }, [eventCities(e).join('\n')]);
+    // v0.0.24: pre-registration time slots — patients choose the hour they
+    // will arrive on the online form, and each hour takes at most so many.
+    const sl = (() => { try { return e.slots ? JSON.parse(e.slots) : null; } catch (_) { return null; } })();
+    const slotsOn = el('input', { type: 'checkbox', class: 'slots-on' });
+    slotsOn.checked = !!sl;
+    const slotStart = el('input', { class: 'input slots-start', type: 'time', value: (sl && sl.start) || '08:00' });
+    const slotEnd = el('input', { class: 'input slots-end', type: 'time', value: (sl && sl.end) || '12:00' });
+    const slotPer = el('input', { class: 'input num slots-per', type: 'number', min: '1', max: '500', step: '1', value: String((sl && sl.per_hour) || 8) });
+    const slotRow = el('div', { class: 'field-row slots-row', style: (sl ? '' : 'display:none;') + 'gap:12px' }, [
+      el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['First arrival']), slotStart]),
+      el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['Clinic stops taking arrivals at']), slotEnd]),
+      el('label', { class: 'field', style: 'margin:0;max-width:150px' }, [el('span', { class: 'field-label' }, ['Patients per hour']), slotPer]),
+    ]);
+    slotsOn.addEventListener('change', () => { slotRow.style.display = slotsOn.checked ? '' : 'none'; });
     const form = el('div', { class: 'form-grid' }, [
       el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Event name']), name]),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Location']), loc]),
@@ -478,12 +510,19 @@ export function renderAdmin(ctx, params = {}) {
         cities,
         el('span', { class: 'field-hint' }, ['Leave empty to let patients type their city. "Other" is always offered.']),
       ]),
+      el('div', { class: 'field span-2 slots-field' }, [
+        el('label', { class: 'check-row', style: 'display:flex;gap:8px;align-items:center' }, [slotsOn,
+          el('span', { class: 'field-label', style: 'margin:0' }, ['Pre-registration time slots: patients choose an arrival time'])]),
+        slotRow,
+        el('span', { class: 'field-hint' }, ['On the online pre-registration form, patients choose the hour they will come. Each hour takes at most this many; a full hour is shown as full. Walk-ins are not counted. Hours run from the first arrival, one an hour (8:00, 9:00 … 11:00 for 8:00 to 12:00).']),
+      ]),
     ]);
     return {
       form,
       get: () => ({
         name: name.value.trim(), location: loc.value.trim(), start_date: start.value, languages: Array.from(enabled).join(',') || 'en',
         cities: cities.value.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
+        slots: slotsOn.checked ? { start: slotStart.value, end: slotEnd.value, per_hour: Number(slotPer.value) } : null,
       }),
     };
   }
@@ -495,8 +534,13 @@ export function renderAdmin(ctx, params = {}) {
     try {
       const data = f.get();
       if (!data.name) { toast('Event name is required.', 'error'); return; }
-      await api.createEvent(data);
+      const made = await api.createEvent(data);
       toast('Event created. Use “Set active” to make it the current event.', 'success'); paint();
+      // v0.0.24: its pre-registration link and QR code, straight away — when
+      // there is an internet server for them to work on.
+      const listed = made && made.id ? (await api.listEvents()).find((x) => x.id === made.id) : null;
+      if (listed && listed.prereg_url) await preregLinkFor(listed, { created: true });
+      else if (listed) toast('Pre-registration (the link and QR code for patients) needs the internet sync server — Admin → Cloud → Internet server.', 'info');
     } catch (e) { toast(e.message, 'error'); }
   }
 
@@ -1722,4 +1766,59 @@ export function renderAdmin(ctx, params = {}) {
 
   paint();
   return root;
+}
+
+// v0.0.24: the label stock this laptop prints wristbands on, and its printer's
+// resolution — kept on this laptop (each has its own printer), with a preview
+// and a test band. See components/wristband.js.
+const SAMPLE_BAND = { patient_code: '482913', first_name: 'Maria', last_name: 'Lopez Garcia', dob: '1984-03-09', gender: 'F', demographics: { services: ['Dental'] } };
+export function wristbandLabelCard() {
+  let cur = labelSetting();
+  const sizeSel = el('select', { class: 'input wb-size' }, LABEL_SIZES.map((x) => el('option', { value: x.key }, [x.label])));
+  sizeSel.value = cur.key;
+  const dpiSel = el('select', { class: 'input wb-dpi' }, PRINTER_DPI.map((x) => el('option', { value: String(x.key) }, [x.label])));
+  dpiSel.value = String(cur.dpi);
+  const mmIn = (v, cls) => el('input', { class: 'input input--sm num ' + cls, type: 'number', min: '10', max: '600', step: '0.1', value: v == null ? '' : String(v) });
+  const wIn = mmIn(cur.key === 'custom' ? cur.w : '', 'wb-w'), hIn = mmIn(cur.key === 'custom' ? cur.h : '', 'wb-h');
+  const offIn = el('input', { class: 'input input--sm num wb-offset', type: 'number', min: '0', max: '150', step: '1', value: String(cur.offset || 0) });
+  const customRow = el('div', { class: 'field-row wb-custom', style: 'gap:12px' }, [
+    el('label', { class: 'field', style: 'max-width:150px' }, [el('span', { class: 'field-label' }, ['Width (mm)']), wIn]),
+    el('label', { class: 'field', style: 'max-width:150px' }, [el('span', { class: 'field-label' }, ['Height (mm)']), hIn]),
+  ]);
+  const offRow = el('label', { class: 'field wb-offset-row', style: 'max-width:320px' }, [el('span', { class: 'field-label' }, ['Leave blank at the start of the band (mm)']), offIn,
+    el('span', { class: 'field-hint' }, ['For a band whose first part is the clasp or the adhesive tab. 0 prints from the very start.'])]);
+  const preview = el('div', { class: 'wb-label-preview' });
+  const what = el('p', { class: 'subtle small wb-what', style: 'margin:8px 0 0' });
+  function paintCard() {
+    customRow.style.display = sizeSel.value === 'custom' ? '' : 'none';
+    offRow.style.display = labelLayout(cur) === 'band' || labelLayout(cur) === 'small' ? '' : 'none';
+    preview.replaceChildren(wristbandLabel(SAMPLE_BAND, { forPrint: true, label: cur }));
+    what.textContent = cur.w
+      ? `Prints one ${cur.w} × ${cur.h} mm label per patient, with no margins — set the printer to this label size too, and to 100% (no "fit to page").`
+      : 'Prints the band on a sheet of paper, to cut out. For a wristband printer, choose its band size above.';
+  }
+  function change() {
+    const next = { key: sizeSel.value, dpi: Number(dpiSel.value), offset: Number(offIn.value) || 0 };
+    if (next.key === 'custom') { next.w = Number(wIn.value) || 101.6; next.h = Number(hIn.value) || 50.8; }
+    if (!saveLabelSetting(next)) toast('This laptop could not keep the label size.', 'error');
+    cur = labelSetting();
+    paintCard();
+  }
+  [sizeSel, dpiSel, wIn, hIn, offIn].forEach((x) => x.addEventListener('change', change));
+  paintCard();
+  return el('div', { class: 'card wb-label-card' }, [
+    el('h3', { class: 'card-title' }, [icon('print', { size: 15 }), 'Wristband labels on this laptop']),
+    el('p', { class: 'view-sub', style: 'margin:0 0 var(--space-3);' }, ['Choose the band or label your printer holds. Each laptop keeps its own, for its own printer. The barcode holds only the patient\'s six-digit wristband number, printed beside it (Code 128) — never the name or date of birth.']),
+    el('div', { class: 'form-grid' }, [
+      el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Label size']), sizeSel]),
+      el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Printer']), dpiSel,
+        el('span', { class: 'field-hint' }, ['Each bar is printed a whole number of the printer\'s dots wide, so a thermal printer prints them sharp. A wristband printer\'s box or settings page says 203 or 300 dpi.'])]),
+    ]),
+    customRow,
+    offRow,
+    el('div', { class: 'field-label', style: 'margin-top:var(--space-3)' }, ['Preview']),
+    preview,
+    what,
+    el('div', { class: 'action-row' }, [el('button', { class: 'btn btn--ghost', type: 'button', onClick: () => printWristband(SAMPLE_BAND) }, [icon('print', { size: 16 }), 'Print a test band'])]),
+  ]);
 }

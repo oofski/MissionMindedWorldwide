@@ -1,4 +1,4 @@
-import { el } from '../dom.js';
+import { el, modal } from '../dom.js';
 import { t } from '../i18n.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
@@ -44,7 +44,16 @@ export function renderLogin(ctx) {
   async function submit() {
     error.style.display = 'none';
     try {
-      const user = await api.login(username.value, password.value);
+      const signedIn = await api.login(username.value, password.value);
+      // v0.0.24: the same account signed in on another laptop right now. Two
+      // people on one account make the record say one did what the other did,
+      // so it is said, and asked — not refused: a volunteer who moved laptops
+      // without signing out must still get in.
+      const { otherSessions = [], ...user } = signedIn || {};
+      if (otherSessions.length && !(await confirmShared(otherSessions))) {
+        await api.logout().catch(() => {});
+        return;
+      }
       try {
         if (remember.checked && username.value.trim()) {
           window.localStorage.setItem(REMEMBER_KEY, JSON.stringify({ user: username.value.trim() }));
@@ -61,6 +70,20 @@ export function renderLogin(ctx) {
       error.textContent = e.message || t('login.error');
       error.style.display = 'block';
     }
+  }
+
+  async function confirmShared(others) {
+    const ago = (iso) => { const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000)); return isNaN(m) ? '' : m < 1 ? 'just now' : `${m} min ago`; };
+    return modal({
+      title: 'This account is signed in on another laptop',
+      body: el('div', { class: 'shared-login' }, [
+        el('p', { style: 'margin:0 0 8px' }, [`“${username.value.trim()}” is signed in on:`]),
+        el('ul', { style: 'margin:0 0 10px; padding-left:20px' }, others.map((o) => el('li', {}, [el('strong', {}, [o.computer]), ago(o.last_seen) ? ` — active ${ago(o.last_seen)}` : '']))),
+        el('p', { style: 'margin:0 0 8px' }, ['If two people share one account, every record says that one person did what both of them did. Each volunteer should have their own account (Admin → Staff & roles).']),
+        el('p', { class: 'subtle small', style: 'margin:0' }, ['Moved laptops and forgot to sign out over there? Sign in anyway, and sign out on the other laptop when you can.']),
+      ]),
+      confirmText: 'Sign in anyway', cancelText: 'Cancel',
+    });
   }
 
   [username, password].forEach((inp) =>

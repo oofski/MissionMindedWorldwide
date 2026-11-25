@@ -80,20 +80,33 @@ export function code128Modules(text) {
  * again. A quiet zone of 10 modules each side is part of the spec, not padding:
  * without it many scanners will not read the code at all.
  */
+// How many modules wide a code is, quiet zones included.
+export function code128Width(text, quietZone = 10) {
+  return code128Modules(String(text)).reduce((a, b) => a + b, 0) + quietZone * 2;
+}
+
 export function barcodeSVG(text, opts = {}) {
-  const { moduleWidth = 2, height = 56, showText = true, quietZone = 10 } = opts;
+  const { moduleWidth = 2, height = 56, showText = true, quietZone = 10, moduleMm = 0, heightMm = 0 } = opts;
   const modules = code128Modules(String(text));
   const totalModules = modules.reduce((a, b) => a + b, 0) + quietZone * 2;
 
-  const textH = showText ? 16 : 0;
-  const w = totalModules * moduleWidth;
-  const h = height + textH;
+  // v0.0.24: printed, the code is drawn in millimetres — one module a whole
+  // number of the printer's dots (see wristband.js) — so the bars are the
+  // exact width a scanner expects at the printer's own resolution, with no
+  // scaling on the way. On screen it is in pixels, as before.
+  const mm = moduleMm > 0;
+  const mw = mm ? 1 : moduleWidth;
+  const barH = mm ? Math.max(4, (heightMm || 12) / moduleMm) : height;
+  const textH = showText ? (mm ? Math.max(6, 2.8 / moduleMm) : 16) : 0;
+  const w = totalModules * mw;
+  const h = barH + textH;
 
   const NS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  svg.setAttribute('width', String(w));
-  svg.setAttribute('height', String(h));
+  svg.setAttribute('width', mm ? `${(totalModules * moduleMm).toFixed(3)}mm` : String(w));
+  svg.setAttribute('height', mm ? `${(h * moduleMm).toFixed(3)}mm` : String(h));
+  svg.setAttribute('shape-rendering', 'crispEdges');
   svg.setAttribute('class', 'barcode');
   svg.setAttribute('role', 'img');
   svg.setAttribute('aria-label', `Barcode ${text}`);
@@ -106,30 +119,31 @@ export function barcodeSVG(text, opts = {}) {
   bg.setAttribute('fill', '#fff');
   svg.append(bg);
 
-  let x = quietZone * moduleWidth;
+  let x = quietZone * mw;
   let isBar = true;
   for (const width of modules) {
     if (isBar) {
       const r = document.createElementNS(NS, 'rect');
       r.setAttribute('x', String(x));
       r.setAttribute('y', '0');
-      r.setAttribute('width', String(width * moduleWidth));
-      r.setAttribute('height', String(height));
+      r.setAttribute('width', String(width * mw));
+      r.setAttribute('height', String(barH));
       r.setAttribute('fill', '#000');
       svg.append(r);
     }
-    x += width * moduleWidth;
+    x += width * mw;
     isBar = !isBar;
   }
 
   if (showText) {
     const label = document.createElementNS(NS, 'text');
+    const fs = mm ? textH * 0.78 : 14;
     label.setAttribute('x', String(w / 2));
-    label.setAttribute('y', String(height + 13));
+    label.setAttribute('y', String(barH + (mm ? textH * 0.86 : 13)));
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('font-family', 'ui-monospace, Consolas, monospace');
-    label.setAttribute('font-size', '14');
-    label.setAttribute('letter-spacing', '2');
+    label.setAttribute('font-size', String(fs));
+    label.setAttribute('letter-spacing', String(mm ? fs * 0.14 : 2));
     label.setAttribute('fill', '#000');
     label.textContent = String(text);
     svg.append(label);

@@ -29,6 +29,8 @@ const UI = {
     kicker: 'Before you go',
     lede: 'These questions help Mission Minded Worldwide show what this clinic did for the community, and apply for the funding that keeps it free. Everything is optional, and nothing here changes the care you received today.',
     privacy: 'Your answers are reported as totals only — never with your name.',
+    anonymous: 'This survey is anonymous. Your answers are saved without your name or your record, and nobody at the clinic can see which answers are yours.',
+    anonPill: 'Anonymous',
     progress: (a, b) => `${a} of ${b} answered`,
     done: 'Finish',
     decline: 'I would rather not answer',
@@ -39,7 +41,7 @@ const UI = {
     prefilled: 'Some answers are already filled in from what you told us when you registered. Please check them and change anything that is not right.',
     clear: 'Clear',
     langLabel: 'English',
-    saved: 'Thank you — your answers are recorded.',
+    saved: 'Thank you — your answers are recorded anonymously.',
     declined: 'No problem. Thank you for visiting.',
     close: 'Close',
     optional: 'Optional',
@@ -50,6 +52,8 @@ const UI = {
     kicker: 'Antes de irse',
     lede: 'Estas preguntas ayudan a Mission Minded Worldwide a mostrar lo que esta clínica hizo por la comunidad y a solicitar los fondos que la mantienen gratuita. Todo es opcional y nada de esto cambia la atención que recibió hoy.',
     privacy: 'Sus respuestas se reportan solo como totales — nunca con su nombre.',
+    anonymous: 'Esta encuesta es anónima. Sus respuestas se guardan sin su nombre ni su expediente, y nadie en la clínica puede ver cuáles son sus respuestas.',
+    anonPill: 'Anónima',
     progress: (a, b) => `${a} de ${b} respondidas`,
     done: 'Terminar',
     decline: 'Prefiero no responder',
@@ -60,7 +64,7 @@ const UI = {
     prefilled: 'Algunas respuestas ya están completadas con lo que nos dijo al registrarse. Revíselas y cambie lo que no sea correcto.',
     clear: 'Borrar',
     langLabel: 'Español',
-    saved: 'Gracias — sus respuestas quedaron registradas.',
+    saved: 'Gracias — sus respuestas quedaron registradas de forma anónima.',
     declined: 'No hay problema. Gracias por su visita.',
     close: 'Cerrar',
     optional: 'Opcional',
@@ -98,6 +102,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
     const progress = el('div', { class: 'survey-progress' });
     const titleNode = el('h2', {}, ['']);
     const kickerNode = el('span', { class: 'survey-kicker' }, ['']);
+    const anonPill = el('span', { class: 'survey-anon-pill' }, ['']);
     const finishBtn = el('button', { class: 'btn btn--primary btn--lg' }, [icon('checkCircle', { size: 18 }), '']);
     const declineBtn = el('button', { class: 'btn btn--ghost' }, ['']);
 
@@ -166,10 +171,14 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
       const t = UI[L];
       titleNode.textContent = t.title;
       kickerNode.textContent = t.kicker;
+      anonPill.replaceChildren(icon('lock', { size: 13 }), el('span', {}, [t.anonPill]));
       finishBtn.replaceChildren(icon('checkCircle', { size: 18 }), el('span', {}, [t.done]));
       declineBtn.replaceChildren(el('span', {}, [t.decline]));
       body.replaceChildren(
         el('div', { class: 'survey-lede' }, [
+          // v0.0.24: said first, in large print — the answers are saved apart
+          // from the patient (db.saveExitSurvey).
+          el('p', { class: 'survey-anon' }, [icon('lock', { size: 16 }), el('strong', {}, [t.anonymous])]),
           el('p', {}, [t.lede]),
           el('p', { class: 'survey-privacy' }, [icon('lock', { size: 14 }), el('span', {}, [t.privacy])]),
           el('p', { class: 'survey-privacy' }, [icon('check', { size: 14 }), el('span', {}, [t.tapClear])]),
@@ -227,6 +236,7 @@ export function openExitSurvey(patient, { lang = 'en', existing = null, stage = 
             el('img', { class: 'survey-logo', src: '../../assets/mmw-logo.png', alt: 'Mission Minded Free Clinics' }),
             kickerNode,
             titleNode,
+            anonPill,
           ]),
           el('div', { class: 'survey-head-actions' }, [
             langBtn,
@@ -264,5 +274,8 @@ export function surveyStatus(sv) {
       : { key: 'none', label: 'Not yet taken', pill: 'pill--warning' };
   }
   if (sv.exit_status === 'declined') return { key: 'declined', label: 'Patient declined', pill: 'pill--neutral' };
+  // v0.0.24: answered anonymously — the answers are not on the patient's
+  // record, so there is no count to give and nothing to reopen.
+  if (sv.anonymous) return { key: 'done', label: 'Completed · answers kept anonymously', pill: 'pill--success', anonymous: true };
   return { key: 'done', label: `Completed · ${n} of ${mine.length} answered`, pill: 'pill--success' };
 }

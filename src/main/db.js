@@ -295,6 +295,9 @@ function migrate() {
   // JSON array of names. NULL (every existing event) means no list, and City
   // stays the free-text box it has always been.
   addColumn('events', 'cities', 'TEXT');
+  // v0.0.24: pre-registration time slots — { start, end, per_hour } as JSON,
+  // or NULL for none (the online form then asks no arrival time).
+  addColumn('events', 'slots', 'TEXT');
   addColumn('patients', 'dismissed_by_name', 'TEXT');
   // v1.5.24: the front desk confirms the patient is physically here and ready to
   // be seen (consents checked, station assigned). Pre-registered patients can sit
@@ -349,6 +352,25 @@ function migrate() {
              (SELECT MAX(id) FROM event_reports GROUP BY event_id)`);
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_event_unique ON event_reports(event_id)');
   } catch (_e) { /* index already present */ }
+  // v0.0.24: the exit survey's answers, kept apart from the patient. One row
+  // per survey answered, tied to the clinic event and to nobody: no patient
+  // id, no name, no time of day — the date only. The patient's own survey row
+  // (exit_surveys) says only that it was answered or declined, which is what
+  // check-out needs. Synced as 'survey_answer', event-scoped like a report.
+  db.exec(`CREATE TABLE IF NOT EXISTS survey_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+    version TEXT NOT NULL, language TEXT, answers TEXT NOT NULL DEFAULT '{}', created_on TEXT,
+    updated_at TEXT, synced_rev TEXT, content_rev TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_survey_answers_event ON survey_answers(event_id)');
+  // v0.0.24: who is signed in where — one row per laptop and account, kept
+  // fresh while the account is signed in there (notePresence), so signing in
+  // with an account already in use on another laptop can say so. Synced as
+  // 'presence'; it carries the computer's name and times, nothing clinical.
+  db.exec(`CREATE TABLE IF NOT EXISTS user_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, user_uid TEXT, device TEXT, computer TEXT,
+    signed_in_at TEXT, last_seen TEXT, signed_out_at TEXT,
+    updated_at TEXT, synced_rev TEXT, content_rev TEXT)`);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_user_sessions_uid ON user_sessions(uid)');
   addColumn('triage', 'triaged_by_name', 'TEXT');
   addColumn('triage', 'vitals_by_name', 'TEXT');
   addColumn('triage', 'routed_by_name', 'TEXT');
@@ -459,7 +481,7 @@ function resetClinicData() {
     db.transaction(() => {
       // Sync bookkeeping first, so nothing here can resurrect a record later.
       // A leftover tombstone also blocks a legitimate re-import of the same uid.
-      for (const t of ['undeletes', 'tombstones', 'event_reports',
+      for (const t of ['undeletes', 'tombstones', 'event_reports', 'survey_answers', 'user_sessions',
                        'inventory_moves', 'inventory_items',
                        'xrays', 'consents', 'treatments', 'triage', 'exit_surveys', 'patients',
                        'audit_log',   // detail carries patient names
@@ -1290,7 +1312,10 @@ function listEvents() {
   // Per-event public pre-registration link: patients open it ahead of time, fill
   // the check-in questions, and the submission is routed into THIS event. The
   // link lives on the same cloud server the app already syncs against.
-  const base = (getSyncMeta().url || '').replace(/\/+$/, '');
+  // v0.0.24: never on the clinic network — its host refuses the form (it is
+  // not on the internet), so a link to it led nowhere.
+  const sm = getSyncMeta();
+  const base = sm.lanPin ? '' : (sm.url || '').replace(/\/+$/, '');
   return rows.map((e) => ({
     ...e,
     active: !!e.active,
@@ -1322,12 +1347,30 @@ function sanitizeCities(v) {
   return out.length ? JSON.stringify(out) : null;
 }
 
-function createEvent(actor, { name, location, start_date, end_date, languages, cities }) {
+// v0.0.24: pre-registration time slots. Patients choose the hour they will
+// arrive, and each hour takes at most per_hour of them (cloud/worker.js
+// keeps count). { start: '08:00', end: '12:00', per_hour: 8 } gives four
+// slots — 8:00, 9:00, 10:00 and 11:00 — on each day of the event.
+function sanitizeSlots(v) {
+  if (v == null || v === '') return null;
+  const o = typeof v === 'string' ? safeJson(v, null) : v;
+  if (!o || typeof o !== 'object' || o.enabled === false) return null;
+  const hm = (t) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t || '')) ? String(t) : null);
+  const start = hm(o.start), end = hm(o.end);
+  const per = Number(o.per_hour);
+  if (!start || !end || end <= start) throw new Error('Time slots need a start time and a later end time, like 8:00 AM to 12:00 PM.');
+  if (!Number.isInteger(per) || per < 1 || per > 500) throw new Error('Time slots need how many patients each hour can take — a whole number from 1 to 500.');
+  return JSON.stringify({ start, end, per_hour: per });
+}
+
+function createEvent(actor, { name, location, start_date, end_date, languages, cities, slots }) {
   if (!name) throw new Error('Event name is required.');
+  // Its sync id now, not at the next sync: its pre-registration link is made
+  // from it, and is shown as soon as the event is (v0.0.24).
   const info = db.prepare(
-    `INSERT INTO events (name, location, start_date, end_date, languages, active, created_at, cities)
-     VALUES (?,?,?,?,?,1,?,?)`
-  ).run(name, location || '', start_date || today(), end_date || '', languages || 'en,es', now(), sanitizeCities(cities));
+    `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, cities, slots)
+     VALUES (?,?,?,?,?,?,1,?,?,?)`
+  ).run(crypto.randomUUID(), name, location || '', start_date || today(), end_date || '', languages || 'en,es', now(), sanitizeCities(cities), sanitizeSlots(slots));
   audit(actor, 'create', 'event', info.lastInsertRowid, name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(info.lastInsertRowid);
 }
@@ -1347,15 +1390,15 @@ function setActiveEvent(actor, id) {
   return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
 }
 
-function updateEvent(actor, id, { name, location, start_date, end_date, languages, cities }) {
+function updateEvent(actor, id, { name, location, start_date, end_date, languages, cities, slots }) {
   const e = db.prepare('SELECT * FROM events WHERE id = ?').get(id);
   if (!e) throw new Error('Event not found.');
   // An update that does not mention cities leaves the list alone; an empty
-  // one clears it (back to the free-text box).
+  // one clears it (back to the free-text box). Time slots the same.
   db.prepare(
-    `UPDATE events SET name=?, location=?, start_date=?, end_date=?, languages=?, cities=? WHERE id=?`
+    `UPDATE events SET name=?, location=?, start_date=?, end_date=?, languages=?, cities=?, slots=? WHERE id=?`
   ).run(name ?? e.name, location ?? e.location, start_date ?? e.start_date, end_date ?? e.end_date, languages ?? e.languages,
-    cities === undefined ? e.cities : sanitizeCities(cities), id);
+    cities === undefined ? e.cities : sanitizeCities(cities), slots === undefined ? e.slots : sanitizeSlots(slots), id);
   audit(actor, 'update', 'event', id, name || e.name);
   return db.prepare('SELECT * FROM events WHERE id = ?').get(id);
 }
@@ -1412,6 +1455,12 @@ function deleteEvent(actor, id, { force } = {}) {
       recordTombstone(r.uid, 'user', e.uid);
       db.prepare('DELETE FROM users WHERE id = ?').run(r.id);
     }
+    // The event's anonymous survey answers go with it — its totals are kept
+    // in the summary captured above.
+    for (const r of db.prepare('SELECT uid FROM survey_answers WHERE event_id = ?').all(id)) {
+      if (r.uid) recordTombstone(r.uid, 'survey_answer', e.uid);
+    }
+    db.prepare('DELETE FROM survey_answers WHERE event_id = ?').run(id);
     if (!placeholder) recordTombstone(e.uid, 'event', null);
     db.prepare('DELETE FROM patients WHERE event_id = ?').run(id);
     db.prepare('DELETE FROM events WHERE id = ?').run(id);
@@ -2108,7 +2157,7 @@ function getPatient(id) {
     : null;
   p.xrays = db.prepare('SELECT id, station, note, created_at FROM xrays WHERE patient_id = ?').all(id);
   const sv = db.prepare('SELECT * FROM exit_surveys WHERE patient_id = ?').get(id);
-  p.exit_survey = sv ? { ...sv, answers: safeJson(sv.answers, {}), declined: !!sv.declined } : null;
+  p.exit_survey = sv ? { ...sv, answers: safeJson(sv.answers, {}), declined: !!sv.declined, anonymous: isAnonSurvey(sv) } : null;
   p.event = db.prepare('SELECT * FROM events WHERE id = ?').get(p.event_id);
   // v1.0.6 accountability: resolve the staff name for each recorded action.
   // v1.1.0: prefer the denormalized *_by_name column (set by cloud sync from
@@ -2774,6 +2823,10 @@ function listPatients({ eventId, search } = {}) {
       // each chart.
       needs: treatmentNeeds(tx),
       preregistered: !!(pt.demographics && pt.demographics.preregistered),
+      // v0.0.24: the arrival time chosen on the online form ('2026-12-05T09:00'),
+      // when the event has time slots.
+      prereg_slot: pt.demographics && typeof pt.demographics.prereg_slot === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(pt.demographics.prereg_slot)
+        ? pt.demographics.prereg_slot : null,
       // v1.5.24: front-desk arrival state — confirmed present, and whether the
       // consents this visit needs are actually signed.
       arrived_at: p.arrived_at || null,
@@ -3027,8 +3080,15 @@ function inventoryChairUsage(eventId) {
  * could be identified by — which is what lets the aggregate live on past the
  * clinic's own records.
  */
+// v0.0.24: a check-out survey's answers are kept apart from the patient
+// (survey_answers), and the patient's row records only that it was answered —
+// its version carries this mark, so a row answered that way is never opened
+// again: its answers cannot be found, and a second Finish would count the
+// patient twice.
+const ANON_MARK = '+anon';
+const isAnonSurvey = (row) => !!row && String(row.version || '').endsWith(ANON_MARK);
 function saveExitSurvey(actor, patientId, data) {
-  const pt = db.prepare('SELECT id FROM patients WHERE id = ?').get(patientId);
+  const pt = db.prepare('SELECT id, event_id FROM patients WHERE id = ?').get(patientId);
   if (!pt) throw new Error('Patient not found.');
   const d = data || {};
   const stage = d.stage === 'registration' ? 'registration' : 'exit';
@@ -3049,7 +3109,10 @@ function saveExitSurvey(actor, patientId, data) {
   // never comes through here. Nor does it add anything to a row the patient
   // declined at check-out — a decline withdraws every answer, and anything
   // added afterwards would be counted in the grant totals.
-  const prior = db.prepare('SELECT answers, exit_status FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  const prior = db.prepare('SELECT answers, exit_status, version FROM exit_surveys WHERE patient_id = ?').get(patientId);
+  if (stage === 'exit' && isAnonSurvey(prior) && prior.exit_status === 'completed') {
+    throw new Error('This patient has answered the survey already. The answers were saved anonymously — without the patient — so they cannot be opened or changed.');
+  }
   const kept = prior ? safeJson(prior.answers, {}) : {};
   const exitDeclined = !!(prior && prior.exit_status === 'declined');
   const fresh = declined || (stage === 'registration' && exitDeclined) ? {} : sanitizeSurveyAnswers(d.answers);
@@ -3057,11 +3120,21 @@ function saveExitSurvey(actor, patientId, data) {
   const answers = { ...kept };
   for (const k of stageKeys) delete answers[k];
   for (const [k, v] of Object.entries(fresh)) answers[k] = v;
-  const version = String(d.version || 'mmw-exit-v2');
+  // Answered at check-out: the answers go to an anonymous row for the event,
+  // and none stay on the patient's (v0.0.24). Older answers on this row —
+  // given before 0.0.24 and shown for the patient to check — go with them.
+  const anonymous = stage === 'exit' && !declined;
+  const baseVersion = String(d.version || 'mmw-exit-v2').replace(/\+anon$/, '');
+  const version = anonymous ? baseVersion + ANON_MARK : baseVersion;
   const language = d.language ? String(d.language) : null;
   const existing = db.prepare('SELECT id FROM exit_surveys WHERE patient_id = ?').get(patientId);
   const status = declined ? 'declined' : 'completed';
   const col = stage === 'registration' ? 'registration_status' : 'exit_status';
+  if (anonymous) {
+    db.prepare(`INSERT INTO survey_answers (uid, event_id, version, language, answers, created_on) VALUES (?,?,?,?,?,?)`)
+      .run(crypto.randomUUID(), pt.event_id, baseVersion, language, JSON.stringify(answers), today());
+  }
+  const onRow = anonymous ? {} : answers;
   // `declined` stays the EXIT answer: it is what check-out gates on, so a
   // registration row from an older build that was skipped must not set it.
   if (existing) {
@@ -3069,27 +3142,29 @@ function saveExitSurvey(actor, patientId, data) {
       `UPDATE exit_surveys SET version=?, language=?, answers=?, ${col}=?,
          declined = CASE WHEN ? = 'exit' THEN ? ELSE declined END,
          completed_at=?, completed_by=?, completed_by_name=? WHERE patient_id=?`
-    ).run(version, language, JSON.stringify(answers), status, stage, declined, now(),
+    ).run(version, language, JSON.stringify(onRow), status, stage, declined, now(),
           actor ? actor.id : null, actor ? actor.full_name : null, patientId);
   } else {
     db.prepare(
       `INSERT INTO exit_surveys (patient_id, version, language, answers, declined,
          ${col}, completed_at, completed_by, completed_by_name, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`
-    ).run(patientId, version, language, JSON.stringify(answers),
+    ).run(patientId, version, language, JSON.stringify(onRow),
           stage === 'exit' ? declined : 0, status, now(),
           actor ? actor.id : null, actor ? actor.full_name : null, now());
   }
   // No dirty-marking here on purpose: sync decides dirtiness by hashing a row's
   // syncable columns (see collectSyncRows), so a plain write is enough.
   audit(actor, 'survey.save', 'patient', patientId,
-        declined ? `Survey (${stage}) declined by patient` : `Survey (${stage}) completed — ${Object.keys(answers).length} answered in total`);
+        declined ? `Survey (${stage}) declined by patient`
+          : anonymous ? 'Survey (exit) completed — answers kept anonymously, apart from the patient'
+            : `Survey (${stage}) completed — ${Object.keys(answers).length} answered in total`);
   return getExitSurvey(patientId);
 }
 
 function getExitSurvey(patientId) {
   const r = db.prepare('SELECT * FROM exit_surveys WHERE patient_id = ?').get(patientId);
-  return r ? { ...r, answers: safeJson(r.answers, {}), declined: !!r.declined } : null;
+  return r ? { ...r, answers: safeJson(r.answers, {}), declined: !!r.declined, anonymous: isAnonSurvey(r) } : null;
 }
 
 /**
@@ -3824,6 +3899,8 @@ function exportClinicBundle(eventId) {
     consents: kids('consents'),
     xrays: kids('xrays'),
     exit_surveys: kids('exit_surveys'),
+    // v0.0.24: the event's anonymous survey answers — no patient in them.
+    survey_answers: db.prepare('SELECT uid, version, language, answers, created_on, updated_at FROM survey_answers WHERE event_id = ?').all(evId),
   };
 }
 
@@ -3845,11 +3922,12 @@ function importClinicBundle(actor, bundle) {
       eventId = ev.id;
     } else {
       const info = db.prepare(
-        `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at, cities)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO events (uid, name, location, start_date, end_date, languages, active, created_at, selected_at, cities, slots)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
       ).run(b.event.uid || crypto.randomUUID(), b.event.name, b.event.location || '', b.event.start_date || today(),
         b.event.end_date || '', b.event.languages || 'en,es', 0, b.event.created_at || now(), null,
-        b.event.cities == null ? null : sanitizeCities(safeJson(b.event.cities, b.event.cities)));
+        b.event.cities == null ? null : sanitizeCities(safeJson(b.event.cities, b.event.cities)),
+        (() => { try { return sanitizeSlots(b.event.slots); } catch (_) { return null; } })());
       eventId = info.lastInsertRowid;
     }
 
@@ -3968,6 +4046,13 @@ function importClinicBundle(actor, bundle) {
     restoreMany('consents', SYNC_COLS.consent, 'consents');
     restoreMany('xrays', SYNC_COLS.xray, 'xrays');
     restoreOnePerPatient('exit_surveys', SYNC_COLS.survey, 'exit_surveys');
+    // The anonymous answers, by uid: one already here is left as it is.
+    for (const r of (Array.isArray(b.survey_answers) ? b.survey_answers : [])) {
+      if (!r || !r.uid || db.prepare('SELECT 1 FROM survey_answers WHERE uid = ?').get(r.uid)) continue;
+      db.prepare('INSERT INTO survey_answers (uid, event_id, version, language, answers, created_on, updated_at) VALUES (?,?,?,?,?,?,?)')
+        .run(r.uid, eventId, String(r.version || 'mmw-exit-v2'), r.language || null,
+          typeof r.answers === 'string' ? r.answers : JSON.stringify(r.answers || {}), r.created_on || null, r.updated_at || null);
+    }
     return eventId;
   });
   const eventId = tx();
@@ -3979,7 +4064,7 @@ function importClinicBundle(actor, bundle) {
   // deleted the whole clinic again — the restore silently undid itself.
   if (b.event && b.event.uid) uids.push(b.event.uid);
   for (const p of (b.patients || [])) if (p.uid) uids.push(p.uid);
-  for (const t of ['triage', 'treatments', 'consents', 'xrays', 'exit_surveys']) {
+  for (const t of ['triage', 'treatments', 'consents', 'xrays', 'exit_surveys', 'survey_answers']) {
     for (const r of (b[t] || [])) if (r.uid) uids.push(r.uid);
   }
   if (uids.length) {
@@ -4059,7 +4144,7 @@ function foldCityCounts(map) {
   return map;
 }
 
-function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf) {
+function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf, anonymousAnswers = []) {
   const bump = (o, k) => { const key = k || 'Not recorded'; o[key] = (o[key] || 0) + 1; };
   // An impossible age is 'Not recorded', not a band. A date of birth typed after
   // the visit gives a negative number, which would otherwise satisfy `a < 18`
@@ -4183,6 +4268,15 @@ function summarize(event, patients, treatmentOf, xrayCountOf, triageOf, surveyOf
       for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (bucket[one] || 0) + 1;
     }
   }
+  // v0.0.24: the answers kept apart from the patients — counted the same way.
+  // A patient's row says the survey was answered; these say what was answered.
+  for (const raw of (Array.isArray(anonymousAnswers) ? anonymousAnswers : [])) {
+    const ans = typeof raw === 'string' ? safeJson(raw, {}) : (raw || {});
+    for (const [q, v] of Object.entries(ans)) {
+      const bucket = (survey.answers[q] = survey.answers[q] || {});
+      for (const one of (Array.isArray(v) ? v : [v])) bucket[one] = (bucket[one] || 0) + 1;
+    }
+  }
 
   return {
     survey,
@@ -4217,6 +4311,7 @@ function buildEventSummary(eventId) {
     (p) => db.prepare('SELECT COUNT(*) AS n FROM xrays WHERE patient_id = ?').get(p.id).n,
     (p) => db.prepare('SELECT flags, xrays_taken FROM triage WHERE patient_id = ?').get(p.id),
     (p) => db.prepare('SELECT answers, declined, registration_status, exit_status FROM exit_surveys WHERE patient_id = ?').get(p.id),
+    db.prepare('SELECT answers FROM survey_answers WHERE event_id = ?').all(evId).map((r) => r.answers),
   );
 }
 
@@ -4393,7 +4488,8 @@ function rebuildSummaryFromBundle(actor, bundle) {
   (b.xrays || []).forEach((x) => { xrayCount[x.patient_id] = (xrayCount[x.patient_id] || 0) + 1; });
   const patients = b.patients.map((p) => rowToPatient({ ...p }));
   const svBy = new Map((b.exit_surveys || []).map((r) => [r.patient_id, r]));
-  const summary = summarize(b.event, patients, (p) => txBy.get(p.id), (p) => xrayCount[p.id] || 0, (p) => triBy.get(p.id), (p) => svBy.get(p.id));
+  const summary = summarize(b.event, patients, (p) => txBy.get(p.id), (p) => xrayCount[p.id] || 0, (p) => triBy.get(p.id), (p) => svBy.get(p.id),
+    (b.survey_answers || []).map((r) => r && r.answers));
 
   // Attach to the matching local event if there is one; otherwise recreate the
   // event shell (name/date only) so the report has somewhere to live.
@@ -4509,17 +4605,18 @@ function exportEventJson(eventId) {
 /*  fields are hashed) so no write path had to change.                 */
 /* ================================================================== */
 
-const ENTITY_TABLE = { event: 'events', user: 'users', report: 'event_reports', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys', inv_item: 'inventory_items', inv_move: 'inventory_moves' };
+const ENTITY_TABLE = { event: 'events', user: 'users', presence: 'user_sessions', report: 'event_reports', survey_answer: 'survey_answers', patient: 'patients', triage: 'triage', treatment: 'treatments', consent: 'consents', xray: 'xrays', survey: 'exit_surveys', inv_item: 'inventory_items', inv_move: 'inventory_moves' };
 // 'user' is applied right after 'event' (a scoped staff account is parented to an
 // event, exactly like a patient) and before patients.
 // inv_item before inv_move: a movement hangs off an item, so the item has to
 // exist locally first or the movement is deferred for nothing.
-const APPLY_ORDER = ['event', 'user', 'report', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
+const APPLY_ORDER = ['event', 'user', 'presence', 'report', 'survey_answer', 'inv_item', 'inv_move', 'patient', 'triage', 'treatment', 'consent', 'xray', 'survey'];
 // Syncable payload columns per entity (fixed order -> stable content hash).
 const SYNC_COLS = {
   // cities: the check-in City list, so every station and the online form offer
   // the same towns.
-  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at', 'cities'],
+  // slots (v0.0.24): the pre-registration time slots, which the online form reads.
+  event: ['name', 'location', 'start_date', 'end_date', 'languages', 'active', 'created_at', 'selected_at', 'cities', 'slots'],
   // Staff account. salt+hash travel so the account can sign in on every laptop;
   // event scoping travels via event_uid (the parent), NULL for global admins.
   user: ['username', 'full_name', 'role', 'salt', 'hash', 'active', 'created_at'],
@@ -4553,6 +4650,10 @@ const SYNC_COLS = {
   // The exit survey. Closed-choice answers only, so the blob carries no free
   // text a patient could be identified by.
   survey: ['version', 'language', 'answers', 'declined', 'completed_at', 'completed_by_name', 'created_at', 'registration_status', 'exit_status'],
+  // v0.0.24: one survey's answers, with no patient — event-scoped, like a report.
+  survey_answer: ['version', 'language', 'answers', 'created_on'],
+  // v0.0.24: an account signed in on a laptop (see notePresence).
+  presence: ['user_uid', 'device', 'computer', 'signed_in_at', 'last_seen', 'signed_out_at'],
   // Supplies. An item is clinic-wide (no parent); a movement is event-scoped so
   // consumption can be reported per clinic.
   inv_item: ['name', 'category', 'unit', 'par_level', 'active', 'notes', 'created_at'],
@@ -4855,13 +4956,13 @@ function collectSyncRows(max = 400, maxBytes = PUSH_BYTES) {
         // has event_id NULL -> event_uid NULL (no parent, never deferred on apply).
         // A supply movement belongs to the clinic it happened at (NULL for stock
         // received back at base); a supply ITEM belongs to no event at all.
-        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report' || entity === 'inv_move')
+        event_uid: (entity === 'patient' || entity === 'user' || entity === 'report' || entity === 'survey_answer' || entity === 'inv_move')
           ? uidOf('events', row.event_id) : null,
         // patient_uid is the generic parent slot on the wire. For a movement the
         // parent is its ITEM, not a patient — supplies never touch a chart.
         patient_uid: entity === 'inv_move'
           ? uidOf('inventory_items', row.item_id)
-          : ((entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'report' && entity !== 'inv_item')
+          : ((entity !== 'event' && entity !== 'patient' && entity !== 'user' && entity !== 'presence' && entity !== 'report' && entity !== 'survey_answer' && entity !== 'inv_item')
             ? uidOf('patients', row.patient_id) : null),
         deleted: 0, updated_at: updatedAt, data,
       });
@@ -5081,9 +5182,9 @@ function applyRemoteRows(remoteRows) {
     // A supply movement is the one row with TWO parents: the item it moves, and
     // the clinic it moved at. parentCol carries the item; this carries the event.
     let moveEventId;
-    if (entity === 'patient' || entity === 'report') { parentCol = 'event_id'; parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
+    if (entity === 'patient' || entity === 'report' || entity === 'survey_answer') { parentCol = 'event_id'; parentId = localIdByUid('events', env.event_uid); if (!parentId) { noParent(env.event_uid); return; } }
     // A supply item stands alone — clinic property, not part of any event.
-    else if (entity === 'inv_item') { parentCol = null; parentId = null; }
+    else if (entity === 'inv_item' || entity === 'presence') { parentCol = null; parentId = null; }
     else if (entity === 'inv_move') {
       // Parented to its ITEM; the event rides alongside and is optional, because
       // stock received between clinics belongs to no event.
@@ -5432,6 +5533,49 @@ function classifyReceivedTombstones() {
   })();
 }
 
+// v0.0.24: an account signed in on this laptop, kept fresh while it stays
+// signed in (ipc.js calls this at sign-in, every few minutes after, and at
+// sign-out). One row per laptop and account, so the table cannot grow
+// without end.
+const PRESENCE_MS = 15 * 60 * 1000;
+function notePresence(user, { computer = '', signedOut = false } = {}) {
+  if (!user || !user.id) return null;
+  const u = db.prepare('SELECT uid FROM users WHERE id = ?').get(user.id);
+  if (!u) return null;
+  let userUid = u.uid;
+  if (!userUid) { userUid = crypto.randomUUID(); db.prepare('UPDATE users SET uid = ? WHERE id = ?').run(userUid, user.id); }
+  const device = ensureDeviceId();
+  const uid = `presence:${device}:${userUid}`;
+  const t = now();
+  const row = db.prepare('SELECT id, signed_out_at FROM user_sessions WHERE uid = ?').get(uid);
+  const name = String(computer || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || null;
+  if (!row) {
+    db.prepare('INSERT INTO user_sessions (uid, user_uid, device, computer, signed_in_at, last_seen, signed_out_at) VALUES (?,?,?,?,?,?,?)')
+      .run(uid, userUid, device, name, t, t, signedOut ? t : null);
+  } else if (signedOut) {
+    db.prepare('UPDATE user_sessions SET last_seen = ?, signed_out_at = ? WHERE id = ?').run(t, t, row.id);
+  } else {
+    // Signing in again after signing out starts a new session.
+    db.prepare(`UPDATE user_sessions SET computer = COALESCE(?, computer), last_seen = ?,
+      signed_in_at = CASE WHEN signed_out_at IS NOT NULL THEN ? ELSE signed_in_at END, signed_out_at = NULL WHERE id = ?`)
+      .run(name, t, t, row.id);
+  }
+  return uid;
+}
+// Other laptops where this account is signed in now: seen in the last
+// fifteen minutes and not signed out. Known only as far as sync has brought
+// their rows here.
+function otherSessions(user) {
+  if (!user || !user.id) return [];
+  const u = db.prepare('SELECT uid FROM users WHERE id = ?').get(user.id);
+  if (!u || !u.uid) return [];
+  const me = getSetting('cloud_device_id') || '';
+  const cutoff = Date.now() - PRESENCE_MS;
+  return db.prepare('SELECT device, computer, last_seen, signed_out_at FROM user_sessions WHERE user_uid = ?').all(u.uid)
+    .filter((r) => r.device !== me && !r.signed_out_at && Date.parse(r.last_seen) >= cutoff)
+    .map((r) => ({ computer: r.computer || 'Another laptop', last_seen: r.last_seen }));
+}
+
 function ensureDeviceId() {
   let id = getSetting('cloud_device_id');
   if (!id) { id = crypto.randomUUID(); setSetting('cloud_device_id', id); }
@@ -5483,7 +5627,7 @@ module.exports = {
   purgeEventPatients, finishEvent, listEventReports,
   getSetting, setSetting, disconnectCloud, resetClinicData,
   // v1.1.0 cloud sync
-  collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId,
+  collectSyncRows, applyRemoteRows, markSynced, getSyncMeta, setSyncMeta, ensureDeviceId, notePresence, otherSessions, PRESENCE_MS,
   getSyncPending, setSyncPending, resetSyncCursor, markAllUnsent, noteAccountsHere, accountsFromServer,
   // Read-only; lets the harness rebuild a database exactly as v0.0.14 left it.
   SYNC_COLS_BEFORE_V0_0_15,

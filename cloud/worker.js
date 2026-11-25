@@ -15,7 +15,7 @@
 // See ./SYNC_CONTRACT.md for the exact API + schema this implements.
 
 const SERVICE = 'mmw-sync';
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
 
@@ -575,10 +575,75 @@ async function getEventRow(env, uid) {
     // open after "Finish clinic" and kept taking sign-ups into a clinic that had
     // already been closed and had its records removed.
     const active = !(data.active === 0 || data.active === false || data.active === '0');
-    return { name: typeof data.name === 'string' && data.name ? data.name : 'the clinic', active, cities: eventCities(data.cities), state: eventState(data.location) };
+    return { name: typeof data.name === 'string' && data.name ? data.name : 'the clinic', active, cities: eventCities(data.cities), state: eventState(data.location),
+      slots: eventSlots(data.slots, data.start_date, data.end_date) };
   } catch (_e) {
     return null;
   }
+}
+
+// v1.9.0 (app 0.0.24): pre-registration time slots. The event row carries
+// { start, end, per_hour } (the app's Events screen sets it); the form asks
+// each patient the hour they will arrive, on each day of the event, and an
+// hour that has per_hour pre-registrations already is full. null when the
+// event has none, or no valid date to put them on.
+function eventSlots(raw, startDate, endDate) {
+  let o = raw;
+  if (typeof o === 'string') { try { o = JSON.parse(o); } catch (_e) { return null; } }
+  if (!o || typeof o !== 'object') return null;
+  const hm = (t) => (/^([01]\d|2[0-3]):([0-5]\d)$/.test(String(t || '')) ? String(t) : null);
+  const start = hm(o.start), end = hm(o.end);
+  const per = Number(o.per_hour);
+  if (!start || !end || end <= start || !Number.isInteger(per) || per < 1 || per > 500) return null;
+  const day = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && !isNaN(Date.parse(d + 'T00:00:00Z')) ? String(d) : null);
+  const first = day(startDate);
+  if (!first) return null;
+  const last = day(endDate) && day(endDate) >= first ? day(endDate) : first;
+  const days = [];
+  for (let t = Date.parse(first + 'T00:00:00Z'); days.length < 7; t += 86400000) {
+    const d = new Date(t).toISOString().slice(0, 10);
+    if (d > last) break;
+    days.push(d);
+  }
+  const toMin = (x) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3));
+  const times = [];
+  for (let m = toMin(start); m < toMin(end) && times.length < 24; m += 60) {
+    times.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
+  }
+  const list = [];
+  days.forEach((d) => times.forEach((t) => list.push({ id: d + 'T' + t, day: d, time: t })));
+  return list.length ? { perHour: per, list } : null;
+}
+// How many pre-registrations each slot has, from the event's patient rows.
+async function slotCounts(env, eventUid) {
+  const counts = {};
+  try {
+    const r = await env.DB
+      .prepare("SELECT data FROM sync_rows WHERE entity = 'patient' AND event_uid = ? AND deleted = 0")
+      .bind(eventUid)
+      .all();
+    for (const row of (r && r.results) || []) {
+      const data = parseData(row.data) || {};
+      let demo = data.demographics;
+      if (typeof demo === 'string') { try { demo = JSON.parse(demo); } catch (_e) { demo = null; } }
+      const slot = demo && typeof demo.prereg_slot === 'string' ? demo.prereg_slot : '';
+      if (slot) counts[slot] = (counts[slot] || 0) + 1;
+    }
+  } catch (_e) { /* counted as none: the form still opens */ }
+  return counts;
+}
+const SLOT_DAYS = { en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], es: ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'] };
+const SLOT_MONTHS = { en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+  es: ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'] };
+function slotLabel(slot, lang) {
+  const L = lang === 'es' ? 'es' : 'en';
+  const d = new Date(slot.day + 'T12:00:00Z');
+  const h = Number(slot.time.slice(0, 2)), m = slot.time.slice(3);
+  const clock = L === 'es' ? `${h}:${m}` : `${h % 12 || 12}:${m} ${h < 12 ? 'AM' : 'PM'}`;
+  const date = L === 'es'
+    ? `${SLOT_DAYS.es[d.getUTCDay()]} ${d.getUTCDate()} ${SLOT_MONTHS.es[d.getUTCMonth()]}`
+    : `${SLOT_DAYS.en[d.getUTCDay()]} ${SLOT_MONTHS.en[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  return `${date} · ${clock}`;
 }
 
 async function handleCheckinGet(eventUid, env, url) {
@@ -586,7 +651,8 @@ async function handleCheckinGet(eventUid, env, url) {
   if (!ev) return htmlResponse(checkinErrorPage(), 404);
   if (!ev.active) return htmlResponse(checkinClosedPage(ev.name), 410);
   const lang = (url && url.searchParams && url.searchParams.get('lang') === 'es') ? 'es' : 'en';
-  return htmlResponse(checkinFormPage(eventUid, ev.name, lang, ev.cities, ev.state));
+  const slots = ev.slots ? { ...ev.slots, counts: await slotCounts(env, eventUid) } : null;
+  return htmlResponse(checkinFormPage(eventUid, ev.name, lang, ev.cities, ev.state, slots));
 }
 
 async function handleCheckinPost(eventUid, request, env) {
@@ -648,6 +714,18 @@ async function handleCheckinPost(eventUid, request, env) {
     // Required at the kiosk, so required here: it decides who the patient sees
     // and whether the oral-surgery consent is needed.
     if (!clean.dental_history.visit_type) return json({ ok: false, error: L.errVisit }, 400);
+  }
+
+  // v1.9.0: the arrival time, when the event has time slots — one of them,
+  // and not one that is full. (Two patients taking the last place at the same
+  // moment can both have it: the count is read before the write.)
+  if (ev.slots) {
+    const want = typeof body.prereg_slot === 'string' ? body.prereg_slot : '';
+    const slot = ev.slots.list.find((x) => x.id === want);
+    if (!slot) return json({ ok: false, error: L.errSlot }, 400);
+    const counts = await slotCounts(env, eventUid);
+    if ((counts[slot.id] || 0) >= ev.slots.perHour) return json({ ok: false, error: L.errSlotFull, full: slot.id }, 409);
+    clean.demographics.prereg_slot = slot.id;
   }
 
   const iso = nowIso();
@@ -1173,6 +1251,9 @@ const I18N = {
     emName: 'Emergency contact name', emPhone: 'Emergency contact phone',
     need: 'What do you need today?',
     services: 'Services needed today', servicesList: FORM_SERVICES, serviceHint: 'Choose every clinic you need to be seen at.',
+    slotTitle: 'When will you arrive?', slotHint: 'Choose the hour you will come to the clinic. Each hour has a limited number of places.',
+    slotLeft: '{n} left', slotFull: 'Full',
+    errSlot: 'Please choose the time you will arrive.', errSlotFull: 'Sorry — that time has just filled up. Please choose another time.',
     referral: 'How did you hear about us?', referralOther: 'Please specify', referralList: FORM_REFERRALS,
     raceTitle: 'Race and ethnicity', raceHint: 'Optional. Choose any that apply — used only for reporting how the clinic served the community.',
     raceList: [['american_indian_alaska_native', 'American Indian or Alaska Native'], ['asian', 'Asian'], ['black_african_american', 'Black or African American'], ['hispanic_latino', 'Hispanic or Latino'], ['middle_eastern_north_african', 'Middle Eastern or North African'], ['native_hawaiian_pacific_islander', 'Native Hawaiian or Pacific Islander'], ['white', 'White'], ['prefer_not', 'Prefer not to answer']],
@@ -1215,6 +1296,9 @@ const I18N = {
     emName: 'Nombre de contacto de emergencia', emPhone: 'Teléfono de contacto de emergencia',
     need: '¿Qué necesita hoy?',
     services: 'Servicios que necesita hoy', servicesList: FORM_SERVICES_ES, serviceHint: 'Elija todas las clínicas donde necesita ser atendido.',
+    slotTitle: '¿A qué hora llegará?', slotHint: 'Elija la hora en que vendrá a la clínica. Cada hora tiene un número limitado de lugares.',
+    slotLeft: 'quedan {n}', slotFull: 'Lleno',
+    errSlot: 'Por favor elija la hora en que llegará.', errSlotFull: 'Lo sentimos — esa hora acaba de llenarse. Por favor elija otra hora.',
     referral: '¿Cómo se enteró de nosotros?', referralOther: 'Por favor especifique', referralList: FORM_REFERRALS_ES,
     raceTitle: 'Raza y origen étnico', raceHint: 'Opcional. Elija todas las que correspondan — solo se usa para informar cómo la clínica sirvió a la comunidad.',
     raceList: [['american_indian_alaska_native', 'Indígena de América o nativo de Alaska'], ['asian', 'Asiático'], ['black_african_american', 'Negro o afroamericano'], ['hispanic_latino', 'Hispano o latino'], ['middle_eastern_north_african', 'De Medio Oriente o del norte de África'], ['native_hawaiian_pacific_islander', 'Nativo de Hawái o de las islas del Pacífico'], ['white', 'Blanco'], ['prefer_not', 'Prefiero no responder']],
@@ -1288,6 +1372,7 @@ function checkinShell(title, inner) {
     '.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}' +
     '.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;font-size:14px;cursor:pointer;background:#fff}' +
     '.chip input{width:auto;margin:0}.chip.on{border-color:var(--g);background:#eaf5ef;color:var(--g);font-weight:600}' +
+    '.chip small{color:#5a6570;font-weight:400}.chip.full{opacity:.45;cursor:not-allowed;text-decoration:line-through}' +
     '.hint{font-size:12px;color:var(--mut);margin:2px 0 0}' +
     '.btn{width:100%;padding:14px;border:0;border-radius:12px;background:var(--g);color:#fff;font-size:16px;font-weight:700;cursor:pointer;margin-top:8px}' +
     '.btn:disabled{opacity:.6}.req{color:#c0392b}' +
@@ -1308,8 +1393,16 @@ function checkinShell(title, inner) {
     '.sigbar{display:flex;justify-content:space-between;align-items:center;margin-top:6px}.sigbar a{font-size:13px;color:var(--g);text-decoration:underline;cursor:pointer}' +
     '</style></head><body><div class="wrap">' + inner + '</div></body></html>';
 }
-function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
+function checkinFormPage(eventUid, eventName, lang, cities, homeState, slots) {
   const L = I18N[lang] || I18N.en;
+  // v1.9.0: the arrival times, each with the places left; a full one cannot
+  // be chosen.
+  const slotCard = slots ? ('<div class="card" id="slots"><h2>' + htmlEscape(L.slotTitle) + ' <span class="req">*</span></h2><p class="hint" style="margin:0 0 6px">' + htmlEscape(L.slotHint) + '</p><div class="chips">' +
+    slots.list.map((x) => {
+      const left = Math.max(0, slots.perHour - ((slots.counts || {})[x.id] || 0));
+      return '<label class="chip' + (left ? '' : ' full') + '"><input type="radio" name="prereg_slot" value="' + htmlEscape(x.id) + '"' + (left ? '' : ' disabled') + '>' +
+        htmlEscape(slotLabel(x, lang)) + ' <small>' + htmlEscape(left ? L.slotLeft.replace('{n}', String(left)) : L.slotFull) + '</small></label>';
+    }).join('') + '</div></div>') : '';
   const chip = (name, k, label) => '<label class="chip"><input type="checkbox" name="' + name + '" value="' + htmlEscape(k) + '">' + htmlEscape(label) + '</label>';
   const raceChips = L.raceList.map(([k, l]) => chip('race', k, l)).join('');
   const visitOpts = L.visits.map(([k, l]) => '<label class="chip"><input type="radio" name="visit" value="' + htmlEscape(k) + '">' + htmlEscape(l) + '</label>').join('');
@@ -1349,7 +1442,7 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
   const dentalYesNo = L.dentalYesNo.map(([k, l]) => selRow(k, l, ['yes', 'no'])).join('');
   const genConsent = '<h3>' + htmlEscape(L.generalTitle) + '</h3>' + (L.generalMode === 'ol' ? ('<ol>' + L.general.map((c) => '<li>' + htmlEscape(c) + '</li>').join('') + '</ol>') : L.general.map((c) => '<p>' + htmlEscape(c) + '</p>').join(''));
   const surConsent = '<h3>' + htmlEscape(L.surgeryTitle) + '</h3>' + L.surgeryText.map((c) => '<p>' + htmlEscape(c) + '</p>').join('');
-  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh,
+  const T = { errName: L.errName, errDob: L.errDob, errGender: L.errGender, errCity: L.errCity, errState: L.errState, errPhone: L.errPhone, errEmName: L.errEmName, errEmPhone: L.errEmPhone, errServices: L.errServices, errSlot: L.errSlot, errMedical: L.errMedical, errVisit: L.errVisit, errConsent: L.errConsent, errSurgery: L.errSurgery, errSign: L.errSign, errSignSurgery: L.errSignSurgery, errSigner: L.errSigner, submitting: L.submitting, submitLabel: L.submit, thankYou: L.thankYou, done: L.done, netErr: L.netErr, genErr: L.genErr, medNamePh: L.medNamePh,
     condNone: L.condNone, condNoneRest: L.condNoneRest, moreMarked: L.moreMarked, errDeemed: L.errDeemed };
   // The wording each refusal quotes, keyed like firstMissingHistory's ids, so
   // the page names the question it wants exactly as the server would.
@@ -1382,6 +1475,7 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
     '<div id="referralOtherWrap" style="display:none"><label>' + htmlEscape(L.referralOther) + '</label><input type="text" id="referral_other"></div>' +
     '</div>' +
 
+    slotCard +
     '<div class="card"><h2>' + htmlEscape(L.services) + ' <span class="req">*</span></h2><p class="hint" style="margin:0 0 6px">' + htmlEscape(L.serviceHint) + '</p>' +
     '<div class="chips" id="services">' + serviceChips + '</div></div>' +
 
@@ -1465,6 +1559,9 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
     "var gpad=mkpad('gsig');var spad=mkpad('ssig');el('gclear').onclick=function(){if(gpad)gpad.clear();};if(el('sclear'))el('sclear').onclick=function(){if(spad)spad.clear();};" +
     "function syncVisit(){document.querySelectorAll('input[name=visit]').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});var v=(document.querySelector('input[name=visit]:checked')||{}).value||'';var ex=(v==='extraction_pain'||v==='extraction_no_pain');el('surgeryCard').style.display=ex?'block':'none';if(ex&&spad)setTimeout(function(){spad.fit();},0);}" +
     "document.querySelectorAll('input[name=visit]').forEach(function(i){i.addEventListener('change',syncVisit);});" +
+    // v1.9.0: the arrival times light like the visit choice — one at a time.
+    "function syncSlot(){document.querySelectorAll('input[name=prereg_slot]').forEach(function(r){r.closest('.chip').classList.toggle('on',r.checked);});}" +
+    "document.querySelectorAll('input[name=prereg_slot]').forEach(function(i){i.addEventListener('change',syncSlot);});" +
     "var meds=el('meds');function addmed(){var d=document.createElement('div');d.className='med-row';d.innerHTML='<input type=\"text\" list=\"medlist\" autocomplete=\"off\" placeholder=\"'+T.medNamePh+'\"><button type=\"button\">✕</button>';d.querySelector('button').onclick=function(){d.remove();};meds.appendChild(d);}el('addmed').onclick=addmed;" +
     // "Other" reveals typed medications; "No medications" is an answer ABOUT the
     // list, so it clears the ticks and any tick clears it.
@@ -1504,6 +1601,7 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
     "if(!val('phone').replace(/\\D/g,'')){err.textContent=T.errPhone;el('phone').focus();return;}" +
     "if(!val('emergency_name').trim()){err.textContent=T.errEmName;el('emergency_name').focus();return;}" +
     "if(!val('emergency_phone').trim()){err.textContent=T.errEmPhone;el('emergency_phone').focus();return;}" +
+    "if(el('slots')&&!checked('prereg_slot').length){err.textContent=T.errSlot;el('slots').scrollIntoView({block:'center'});return;}" +
     "if(!checked('service').length){err.textContent=T.errServices;el('services').scrollIntoView({block:'center'});return;}" +
     "var visit=(document.querySelector('input[name=visit]:checked')||{}).value||'';var extraction=(visit==='extraction_pain'||visit==='extraction_no_pain');" +
     "if(!visit){err.textContent=T.errVisit;return;}" +
@@ -1523,7 +1621,7 @@ function checkinFormPage(eventUid, eventName, lang, cities, homeState) {
     "if(extraction&&(!spad||!spad.data())){err.textContent=T.errSignSurgery;el('ssig').scrollIntoView({block:'center'});return;}" +
     "var ca={};CONDQ.forEach(function(k){ca[k]=val('cond_'+k);});var mk=checked('med'),none=el('medications_none').checked;" +
     "var payload={form_version:" + FORM_VERSION + ",first_name:fn,last_name:ln,dob:val('dob'),gender:val('gender'),phone:val('phone'),email:val('email'),language:LANG,address:val('address'),city:val('city'),city_other:val('city_other'),state:val('state'),emergency_name:val('emergency_name'),emergency_phone:val('emergency_phone')," +
-    "services:checked('service'),referral:val('referral'),referral_other:val('referral_other')," +
+    "services:checked('service'),referral:val('referral'),referral_other:val('referral_other'),prereg_slot:(checked('prereg_slot')[0]||'')," +
     "visit_type:visit,race:checked('race')," +
     "under_treatment:val('under_treatment'),condition_answers:ca,conditions_other:val('conditions_other')," +
     "med_keys:none?[]:mk.filter(function(k){return k!=='other';}),medications_other:none||mk.indexOf('other')<0?[]:otherMeds(),medications_none:none," +

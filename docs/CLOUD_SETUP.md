@@ -148,7 +148,7 @@ Open the address with `/health` added to the end, for example
 `https://mmw-sync.<your-subdomain>.workers.dev/health`. You should see:
 
 ```json
-{ "ok": true, "service": "mmw-sync", "version": "1.8.0", "seq": true, "time": "2026-10-19T14:02:11.512Z" }
+{ "ok": true, "service": "mmw-sync", "version": "1.9.0", "seq": true, "time": "2026-10-19T14:02:11.512Z" }
 ```
 
 That only proves the server is up — it does not look at the key or the

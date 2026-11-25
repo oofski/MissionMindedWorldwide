@@ -21,6 +21,7 @@ const hub = require('./hub');
 const cfsetup = require('./cfsetup');
 const lan = require('./lan');
 const joincode = require('./joincode');
+const qr = require('./qr');
 const usb = require('./usb');
 const xrayFolder = require('./xrayFolder');
 const zipStore = require('./zipStore');
@@ -175,6 +176,8 @@ const PERMS = {
   // v0.0.23: choosing the clinic network's key, or a new one made here.
   'hub:setKey': ['admin'],
   'hub:setJoinCode': ['admin'],
+  // v0.0.24: the pre-registration link's QR code, on the Events screen.
+  'qr:make': ['admin'],
   'hub:stop': ['admin'],
   'hub:firewall': ['admin'],
   'patients:arrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'],
@@ -256,22 +259,37 @@ function register(getMainWindow) {
     const user = db.createFirstAdmin(payload || {});
     currentUser = user;   // sign the new administrator straight in
     endedBecause = null;
+    presence(false);
     return user;
   });
 
+  // v0.0.24: an account signed in on this laptop, kept fresh every few
+  // minutes while it stays signed in — so another laptop signing in with it
+  // can say "this account is in use on REG-1" (db.otherSessions).
+  const presence = (signedOut = false) => {
+    try { if (currentUser) db.notePresence(currentUser, { computer: os.hostname(), signedOut }); } catch (_) { /* never in the way of signing in or out */ }
+  };
+  const presenceTimer = setInterval(() => presence(false), 4 * 60 * 1000);
+  if (presenceTimer.unref) presenceTimer.unref();
   ipcMain.handle('auth:login', async (_e, { username, password }) => {
     try {
       const user = db.login(username, password);
       if (!user) return { ok: false, error: 'Invalid username or password.' };
       currentUser = user;
       endedBecause = null;
-      return { ok: true, data: user };
+      // Where else it is signed in, read before this laptop's own row is
+      // written — for the sign-in screen to ask about (login.js).
+      let others = [];
+      try { others = db.otherSessions(user); } catch (_) { others = []; }
+      presence(false);
+      return { ok: true, data: { ...user, otherSessions: others } };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   });
   ipcMain.handle('auth:logout', async () => {
     liveSession();   // an account removed elsewhere has no audit line to write
+    presence(true);
     if (currentUser) db.audit(currentUser, 'logout', 'user', currentUser.id, null);
     currentUser = null;
     endedBecause = null;
@@ -558,6 +576,8 @@ function register(getMainWindow) {
       ? 'Clinic network key changed to one chosen here' : 'Clinic network key changed to a new one made here');
     return hub.status();
   });
+
+  handle('qr:make', ({ text } = {}) => qr.qrMatrix(text));
 
   // v0.0.24: the short clinic key the next laptop types — one the clinic
   // chooses, or a new one (left blank). Laptops already joined stay joined,
