@@ -230,6 +230,20 @@ function fillingChip(f) {
   const ap = [f.ant ? 'Ant' : '', f.post ? 'Post' : ''].filter(Boolean).join('/') || esc(f.position || '');
   return `<span>#${esc(f.tooth)}${surf ? ' · ' + esc(surf) : ''}${ap ? ' · ' + esc(ap) : ''}${f.note ? ' — ' + esc(f.note) : ''}</span>`;
 }
+// One extraction: "#17 · Surgical", or an Other one by its description.
+function extractionChip(e) {
+  if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
+  const types = extTypesText(e);
+  return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
+}
+// v0.0.24: what the chart left for a future visit — printed apart from the
+// care done, so the next clinic can pick it up and nobody reads it as done.
+function futureHtml(t) {
+  const f = DL.futureRows(t.fillings).map((x) => fillingChip(x).replace('<span>', '<span>Filling ')).join('');
+  const x = DL.futureRows(t.extractions).map((e) => extractionChip(e).replace('<span>', '<span>Extraction ')).join('');
+  if (!f && !x) return '';
+  return `<div><span class="label">${esc(DL.ROW_STATUS.future)} — still to do</span><div class="chips">${f}${x}</div></div>`;
+}
 // One administration: agent by name, carpules, tooth, injection site. The site
 // is a list key since v0.0.15; older free text prints as it was typed.
 function anesChips(stored) {
@@ -325,12 +339,8 @@ function chartHeading(p, doneHeading) {
 function progressNoteBody(p, lang) {
   const t = p.treatment || {};
   const tr = p.triage || {};
-  const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
-  const extractions = (t.extractions || []).map((e) => {
-    if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = extTypesText(e);
-    return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
-  }).join('') || '<span class="muted">None</span>';
+  const fillings = DL.thisVisitRows(t.fillings).map(fillingChip).join('') || '<span class="muted">None</span>';
+  const extractions = DL.thisVisitRows(t.extractions).map(extractionChip).join('') || '<span class="muted">None</span>';
   const anesthetic = anesChips(t.anesthetic).join('') || '<span class="muted">None</span>';
   const cleaning = cleaningChips(t) || '<span class="muted">None</span>';
   const checklist = Object.entries(tr.checklist || {})
@@ -364,6 +374,7 @@ function progressNoteBody(p, lang) {
     ${chartHeading(p, 'Treatment Provided')}
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
+    ${futureHtml(t)}
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
     <div><span class="label">Anesthetic</span><div class="chips">${anesthetic}</div></div>
     ${restorativeHtml(t)}
@@ -673,13 +684,9 @@ function healthBlock(p) {
 function summaryBody(p) {
   const t = p.treatment || {};
 
-  const fillings = (t.fillings || []).map(fillingChip).join('') || '<span class="muted">None</span>';
+  const fillings = DL.thisVisitRows(t.fillings).map(fillingChip).join('') || '<span class="muted">None</span>';
 
-  const extractions = (t.extractions || []).map((e) => {
-    if (e.other) return `<span>Other: ${esc(e.other)}${e.tooth ? ' · #' + esc(e.tooth) : ''}</span>`;
-    const types = extTypesText(e);
-    return `<span>#${esc(e.tooth)} · ${esc(types)}${e.note ? ' — ' + esc(e.note) : ''}</span>`;
-  }).join('') || '<span class="muted">None</span>';
+  const extractions = DL.thisVisitRows(t.extractions).map(extractionChip).join('') || '<span class="muted">None</span>';
 
   const cleaning = cleaningChips(t) || '<span class="muted">None</span>';
 
@@ -700,6 +707,7 @@ function summaryBody(p) {
     ${chartHeading(p, 'Procedures Performed')}
     <div><span class="label">Fillings</span><div class="chips">${fillings}</div></div>
     <div><span class="label">Extractions</span><div class="chips">${extractions}</div></div>
+    ${futureHtml(t)}
     <div><span class="label">Cleaning</span><div class="chips">${cleaning}</div></div>
     <div><span class="label">Anesthetic</span><div class="chips">${anesthetic}</div></div>
     ${restorativeHtml(t)}

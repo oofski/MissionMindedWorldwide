@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
+const DLabels = require('./dentalLabels');
 
 let db = null;
 
@@ -1954,8 +1955,20 @@ function patientHistory(patientId) {
     const tr = db.prepare('SELECT status FROM triage WHERE patient_id = ?').get(r.id);
     const tx = db.prepare('SELECT fillings, extractions, cleaning, completed_at FROM treatments WHERE patient_id = ?').get(r.id);
     let summary = [];
+    // v0.0.24: what that visit left for a future one, for the next visit's
+    // chart to offer ("Still to do from an earlier visit").
+    const future = [];
+    // ...and the teeth that visit treated, so an item left for "a future
+    // visit" stops being offered once a later visit has done it.
+    const done = [];
     if (tx) {
-      const f = safeJson(tx.fillings, []).length, x = safeJson(tx.extractions, []).length;
+      DLabels.futureRows(safeJson(tx.fillings, [])).forEach((r) => future.push({ kind: 'filling', ...r }));
+      DLabels.futureRows(safeJson(tx.extractions, [])).forEach((r) => future.push({ kind: 'extraction', ...r }));
+      DLabels.thisVisitRows(safeJson(tx.fillings, [])).forEach((r) => { if (r.tooth) done.push({ kind: 'filling', tooth: String(r.tooth) }); });
+      DLabels.thisVisitRows(safeJson(tx.extractions, [])).forEach((r) => { if (r.tooth) done.push({ kind: 'extraction', tooth: String(r.tooth) }); });
+    }
+    if (tx) {
+      const f = countFillings(tx), x = DLabels.thisVisitRows(safeJson(tx.extractions, [])).length;
       // The report's own rule: the teeth tapped on the chart and the quadrant
       // note are not a cleaning. Every dentist save stores teeth: [], which is
       // truthy, so the old test called every prior visit a cleaning.
@@ -1963,6 +1976,7 @@ function patientHistory(patientId) {
       if (f) summary.push(`${f} filling(s)`);
       if (x) summary.push(`${x} extraction(s)`);
       if (c) summary.push('cleaning');
+      if (future.length) summary.push(`${future.length} left for a future visit`);
     }
     // A visit not completed at a treatment chair (the printed record's rule,
     // aftercare.careStage 'not_treated') lists its chart as not confirmed —
@@ -1973,8 +1987,27 @@ function patientHistory(patientId) {
     return {
       id: r.id, event_name: r.event_name, created_at: r.created_at, status: r.status,
       summary: summary.length ? (unconfirmed ? UNCONFIRMED_PREFIX : '') + summary.join(', ') : '—',
+      // This visit's later work: a future item from a visit the patient
+      // left before a chair is still to do.
+      future,
+      done,
     };
   });
+}
+
+// v0.0.24: { filling, extraction, other } — this visit's planned work on a
+// treatment record (rows marked for a future visit left out).
+function treatmentNeeds(tx) {
+  if (!tx) return { filling: false, extraction: false, other: false };
+  const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
+  return {
+    filling: DLabels.thisVisitRows(safeJson(tx.fillings, [])).some(has),
+    extraction: DLabels.thisVisitRows(safeJson(tx.extractions, [])).some(has),
+    // Restorative work at a chair (core build-up, re-cement, denture,
+    // bridge) and a typed-in procedure are "Other procedure".
+    other: !!String(tx.other_procedures || '').trim()
+      || Object.values(safeJson(tx.restorative, {}) || {}).some((v) => v && typeof v === 'object' && v.on),
+  };
 }
 
 // Record that a row was deleted, so the deletion reaches the cloud and every
@@ -2714,7 +2747,7 @@ function listPatients({ eventId, search } = {}) {
   return db.prepare(sql).all(...args).map((p) => {
     const pt = rowToPatient(p);
     const tr = db.prepare('SELECT status, complaint, flags, assigned_to, route, bp_systolic, bp_diastolic, heart_rate, blood_thinner, emt_signed_off, vitals_at, routed_at, treatment_waiting_at FROM triage WHERE patient_id = ?').get(p.id);
-    const tx = db.prepare("SELECT locked, unlocked_at, completed_at, provider_name, cleaning, (provider_signature IS NOT NULL AND provider_signature != '') AS signed FROM treatments WHERE patient_id = ?").get(p.id);
+    const tx = db.prepare("SELECT locked, unlocked_at, completed_at, provider_name, cleaning, fillings, extractions, other_procedures, restorative, (provider_signature IS NOT NULL AND provider_signature != '') AS signed FROM treatments WHERE patient_id = ?").get(p.id);
     return {
       id: pt.id,
       first_name: pt.first_name,
@@ -2735,6 +2768,11 @@ function listPatients({ eventId, search } = {}) {
       assigned_to: tr ? tr.assigned_to : null,
       route: tr ? tr.route : null,
       has_vitals: !!(tr && (tr.bp_systolic != null || tr.heart_rate != null)),
+      // v0.0.24: what the patient needs at a treatment chair this visit, from
+      // the plan Dental Triage made — the Treatment Waiting list's category,
+      // so an oral surgeon can take only the extractions without opening
+      // each chart.
+      needs: treatmentNeeds(tx),
       preregistered: !!(pt.demographics && pt.demographics.preregistered),
       // v1.5.24: front-desk arrival state — confirmed present, and whether the
       // consents this visit needs are actually signed.
@@ -3969,10 +4007,12 @@ function importClinicBundle(actor, bundle) {
 // the totals kept when a clinic is finished, a report rebuilt from a backup —
 // goes through these, so a clinic can never be shown two different answers to
 // the same question depending on which screen it is read from.
-const countFillings = (t) => (t ? safeJson(t.fillings, []).length : 0);
+// v0.0.24: a filling or extraction marked for a future visit was not done at
+// this one, and is not counted (DLabels.thisVisitRows).
+const countFillings = (t) => (t ? DLabels.thisVisitRows(safeJson(t.fillings, [])).length : 0);
 // An extraction row with 'other' ticked and no tooth number is a note, not a
 // procedure — the live tab has always excluded those, so the kept totals must too.
-const countExtractions = (t) => (t ? safeJson(t.extractions, []).filter((e) => !e.other || e.tooth).length : 0);
+const countExtractions = (t) => (t ? DLabels.thisVisitRows(safeJson(t.extractions, [])).filter((e) => !e.other || e.tooth).length : 0);
 // A cleaning counts once per patient, and only if something was actually
 // recorded — 'quad_detail' and 'teeth' are notes attached to a cleaning, not
 // evidence that one happened.

@@ -4948,6 +4948,8 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
     // hygienist's list routes them there, as an admin move does.
     const hp = mkB('Hugo', 'Hygparked', 'hygienist');
     const provHp = await view('provider.js', 'renderProvider', { id: hp.id });
+    // v0.0.24: the chair needs this visit's treatment chosen first.
+    setInput(provHp.querySelector('.filling-row input'), '19');
     btnIn(provHp, /Move Patient to Treatment Waiting/).click();
     await settle();
     const hpA = db.getPatient(hp.id);
@@ -5093,6 +5095,147 @@ process.stdout.write('\\n@@T@@'+JSON.stringify(out),()=>process.exit(0));
         + (readBacks.length ? ': read back ' + readBacks.join(',') : '') + (resPull[0].applied === 4 && resPull[1].applied === 1 ? '' : ': applied ' + resPull.map((r) => r.applied).join('+')));
     log(db.listXrays(db.listPatients({}).find((p) => p.last_name === 'Xraypeer').id).length === 3,
       'sync safety: and those rows are applied');
+
+    /* ---- v0.0.24: what each waiting patient needs, and work left for a future visit ---- */
+    {
+      const provM = await import('../src/renderer/js/views/provider.js');
+      log(JSON.stringify(DLr.ROW_STATUS) === JSON.stringify(DLm.ROW_STATUS) && DLr.ROW_STATUS.future === 'Future visit' && DLr.ROW_STATUS.now === 'This visit',
+        'v0.0.24: "This visit" / "Future visit" are one pair of words, shared by the chart and the printed record');
+      const rowsMix = [{ tooth: '1' }, { tooth: '2', status: 'future' }, null, 'x', { tooth: '3', status: 'done' }];
+      log(DLr.thisVisitRows(rowsMix).map((r) => r.tooth).join() === '1,3' && DLm.thisVisitRows(rowsMix).map((r) => r.tooth).join() === '1,3'
+        && DLr.futureRows(rowsMix).map((r) => r.tooth).join() === '2' && DLm.futureRows(rowsMix).map((r) => r.tooth).join() === '2'
+        && DLr.thisVisitRows('not a list').length === 0,
+        'v0.0.24: a row marked future is left out of this visit, the same in the renderer and the main process (an older row with no status is this visit)');
+      log(provM.needsLabel({ filling: true, extraction: true }) === 'Filling + Extraction' && provM.needsLabel({ filling: false, extraction: true }) === 'Extraction'
+        && provM.needsLabel({ filling: false, extraction: false, other: true }) === 'Other procedure' && provM.needsLabel({}) === '' && provM.needsLabel(null) === '',
+        'v0.0.24: the Treatment column reads Filling, Extraction, Filling + Extraction or Other procedure');
+      log(provM.matchesNeed({ needs: { filling: true, extraction: true } }, 'extraction') && !provM.matchesNeed({ needs: { filling: true } }, 'extraction')
+        && provM.matchesNeed({}, 'all') && !provM.matchesNeed({}, 'filling'),
+        'v0.0.24: the Extractions filter keeps a patient who needs both, and drops one who needs only a filling');
+      const ordered = provM.byWaitingOrder([
+        { last_name: 'C', treatment_waiting_at: '2026-01-01T10:30:00Z' }, { last_name: 'A', treatment_waiting_at: '2026-01-01T10:45:00Z' },
+        { last_name: 'B', treatment_waiting_at: '2026-01-01T10:05:00Z' }]);
+      log(ordered.map((p) => p.last_name).join('') === 'BCA', 'v0.0.24: Treatment waiting is in the order patients were moved there, not A–Z');
+      log(provM.plannedForThisVisit({ fillings: [{ tooth: '3', status: 'future' }], extractions: [] }) === false
+        && provM.plannedForThisVisit({ fillings: [], extractions: [{ tooth: '', types: [], other: 'Root tip' }] }) === true
+        && provM.plannedForThisVisit({ fillings: [], extractions: [], other_procedures: 'Pulpotomy' }) === true
+        && provM.plannedForThisVisit({ fillings: [], extractions: [], restorative: { denture: { on: true } } }) === true
+        && provM.plannedForThisVisit({ fillings: [], extractions: [], restorative: { denture: { on: false } } }) === false,
+        'v0.0.24: a chart is ready for a chair with a filling, an extraction, an Other one, a procedure or restorative work for this visit, and not with only future work');
+      const hist = [
+        { event_name: 'Autumn', created_at: '2026-10-01', future: [{ kind: 'filling', tooth: '9', surfaces: ['M'] }], done: [{ kind: 'extraction', tooth: '17' }] },
+        { event_name: 'Spring', created_at: '2026-04-01', future: [{ kind: 'filling', tooth: '3', surfaces: ['O'] }, { kind: 'extraction', tooth: '17', types: ['surgical'] }, { kind: 'filling', tooth: '9', surfaces: ['O'] }], done: [] },
+      ];
+      const open = provM.stillToDo(hist);
+      log(open.length === 2 && open.some((f) => f.kind === 'filling' && f.tooth === '3' && f.from === 'Spring')
+        && open.some((f) => f.kind === 'filling' && f.tooth === '9' && f.from === 'Autumn' && f.surfaces[0] === 'M') && !open.some((f) => f.tooth === '17'),
+        'v0.0.24: what is still to do is the earlier visits’ future work less what a later visit did, one per tooth, the latest plan winning');
+
+      // An earlier clinic: a filling done, a filling and an extraction left for later.
+      const evEarly = db.createEvent(currentUser, { name: 'Spring Clinic', location: 'Sandy' });
+      db.setActiveEvent(currentUser, evEarly.id);
+      const early = mkB('Fran', 'Futura');
+      db.saveTreatment(currentUser, early.id, {
+        fillings: [{ tooth: '14', surfaces: ['M', 'O'] }, { tooth: '3', surfaces: ['O'], status: 'future' }],
+        extractions: [{ tooth: '17', types: ['surgical'], status: 'future' }],
+        provider_name: 'Dr Early',
+      }, 'complete');
+      const earlyA = db.getPatient(early.id);
+      log(earlyA.treatment.fillings[1].status === 'future' && earlyA.treatment.extractions[0].status === 'future',
+        'v0.0.24: the per-tooth status is stored on the chart row, and comes back when the chart is reopened');
+      const earlyProg = plain(pdfB.buildHtml(earlyA, 'progress'));
+      const earlySum = plain(pdfB.buildHtml(earlyA, 'summary'));
+      log(/Fillings #14 · MO Extractions None Future visit — still to do Filling #3 · O Extraction #17 · Surgical/.test(earlyProg)
+        && /Future visit — still to do Filling #3 · O Extraction #17 · Surgical/.test(earlySum),
+        'v0.0.24: the printed record lists future work apart, under "Future visit — still to do", never as care given');
+      const careEarly = require('../src/main/aftercare.js');
+      const keysEarly = careEarly.aftercareKeys(earlyA.treatment);
+      const keysNow = careEarly.aftercareKeys({ ...earlyA.treatment, extractions: [{ tooth: '17', types: ['surgical'] }] });
+      log(!keysEarly.includes('extraction') && keysEarly.includes('filling') && keysNow.includes('extraction_surgical'),
+        'v0.0.24: an extraction left for a future visit gets no after-care today (the same one done today does)');
+
+      // The next clinic: the same patient, and the chart offers what is still to do.
+      db.setActiveEvent(currentUser, evB.id);
+      const next = mkB('Fran', 'Futura');
+      const histNext = db.patientHistory(next.id);
+      log(histNext.length === 1 && /1 filling\(s\), 2 left for a future visit/.test(histNext[0].summary)
+        && histNext[0].future.length === 2 && histNext[0].done.some((d) => d.kind === 'filling' && d.tooth === '14'),
+        'v0.0.24: the patient history counts only the work done, and says how much was left for a future visit');
+      const provF = await view('provider.js', 'renderProvider', { id: next.id });
+      const carry = cardTitled(provF, 'Still to do from an earlier visit');
+      log(!!carry && /\(2\)/.test(carry.querySelector('.card-title').textContent) && /Filling #3 O/.test(carry.textContent)
+        && /Extraction #17 \(surgical\)/.test(carry.textContent) && /planned at Spring Clinic/.test(carry.textContent),
+        'v0.0.24: the next visit’s chart shows "Still to do from an earlier visit", with the clinic it was planned at');
+      // A future visit only, then the move is refused: the chair needs this visit's work.
+      const fRow0 = provF.querySelector('.filling-row');
+      setInput(fRow0.querySelector('input'), '5');
+      const seg0 = fRow0.querySelector('.visit-seg');
+      log(!!seg0 && /This visit/.test(seg0.textContent) && /Future visit/.test(seg0.textContent)
+        && seg0.querySelector('[data-visit="now"]').classList.contains('on'),
+        'v0.0.24: each filling row has This visit / Future visit, starting on This visit');
+      seg0.querySelector('[data-visit="future"]').click();
+      log(fRow0.classList.contains('tx-row--future') && fRow0._get().status === 'future', 'v0.0.24: tapping Future visit marks the row');
+      btnIn(provF, /Move Patient to Treatment Waiting/).click();
+      await settle();
+      log(db.getPatient(next.id).status === 'triaged' && toastTexts().some((m) => /Add the treatment for this visit/.test(m) && /Future visit/.test(m)),
+        'v0.0.24: a chart with only future work cannot be moved to Treatment Waiting — the dentist chooses this visit’s treatment, there is no undecided');
+      const addCarry = Array.from(carry.querySelectorAll('.carry-row')).find((r) => /Filling #3/.test(r.textContent));
+      btnIn(addCarry, /Add to this visit/).click();
+      await settle(2);
+      const carry2 = cardTitled(provF, 'Still to do from an earlier visit');
+      const fRows = Array.from(provF.querySelectorAll('.filling-row')).map((r) => r._get());
+      log(fRows.length === 2 && fRows[1].tooth === '3' && fRows[1].surfaces.join() === 'O' && !fRows[1].status
+        && !!carry2 && /\(1\)/.test(carry2.querySelector('.card-title').textContent) && !/Filling #3/.test(carry2.textContent),
+        'v0.0.24: "Add to this visit" puts it on today’s chart as this visit’s work, and it leaves the still-to-do list');
+      btnIn(provF, /Move Patient to Treatment Waiting/).click();
+      await settle();
+      const nextA = db.getPatient(next.id);
+      log(nextA.status === 'treatment_waiting' && nextA.treatment.fillings.length === 2
+        && nextA.treatment.fillings[0].tooth === '5' && nextA.treatment.fillings[0].status === 'future' && !nextA.treatment.fillings[1].status,
+        'v0.0.24: with this visit’s filling it moves, and the future one is kept on the chart for next time');
+      const provF2 = await view('provider.js', 'renderProvider', { id: next.id });
+      const reopened = Array.from(provF2.querySelectorAll('.filling-row'));
+      log(reopened[0].classList.contains('tx-row--future') && reopened[0].querySelector('[data-visit="future"]').classList.contains('on')
+        && !reopened[1].classList.contains('tx-row--future'),
+        'v0.0.24: reopening the chart shows which teeth are this visit and which a future one');
+      const carry3 = cardTitled(provF2, 'Still to do from an earlier visit');
+      log(!!carry3 && /Extraction #17/.test(carry3.textContent) && !/Filling #3/.test(carry3.textContent),
+        'v0.0.24: what is now on today’s chart is not offered twice');
+
+      // The queue: what each waiting patient needs, numbered in order, and a filter.
+      const ext = mkB('Ezra', 'Extracta');
+      db.saveTreatment(currentUser, ext.id, { extractions: [{ tooth: '32', types: ['simple'] }], fillings: [{ tooth: '2', status: 'future' }] }, 'waiting');
+      const listed = db.listPatients({});
+      const needOf = (id) => (listed.find((p) => p.id === id) || {}).needs || {};
+      log(needOf(next.id).filling === true && needOf(next.id).extraction === false && needOf(ext.id).extraction === true && needOf(ext.id).filling === false,
+        'v0.0.24: each patient in the list carries what they need this visit — a future filling is not a filling today');
+      const qv = await view('provider.js', 'renderProvider');
+      const wc = cardTitled(qv, 'Treatment waiting');
+      const heads = Array.from(wc.querySelectorAll('thead th')).map((h) => h.textContent);
+      log(heads.join('|') === '#|Patient|Age|Complaint|Chair|Treatment|Status|', 'v0.0.24: Treatment waiting has a number and a Treatment column, before Status');
+      const wRows = Array.from(wc.querySelectorAll('tbody tr'));
+      const rowOf = (re) => wRows.find((r) => re.test(r.textContent));
+      const posOf = (re) => Number(rowOf(re).querySelector('.queue-pos').textContent);
+      log(/Filling/.test(rowOf(/Futura, Fran/).querySelector('.tx-needs').textContent) && /^Extraction$/.test(rowOf(/Extracta, Ezra/).querySelector('.tx-needs').textContent.trim())
+        && posOf(/Futura, Fran/) < posOf(/Extracta, Ezra/),
+        'v0.0.24: each row says Filling or Extraction, and the patient moved first is higher in the queue');
+      const chip = (k) => wc.querySelector(`[data-need-filter="${k}"]`);
+      log(!!chip('all') && !!chip('filling') && !!chip('extraction') && /Extractions \(\d+\)/.test(chip('extraction').textContent),
+        'v0.0.24: the list has All / Fillings / Extractions filters, each with its count');
+      chip('extraction').click();
+      await settle(16);
+      const wc2 = cardTitled(qv, 'Treatment waiting');
+      const shown2 = Array.from(wc2.querySelectorAll('tbody tr')).map((r) => r.textContent);
+      log(shown2.length >= 1 && shown2.every((t) => /Extraction/.test(t)) && shown2.some((t) => /Extracta, Ezra/.test(t)) && !shown2.some((t) => /Futura, Fran/.test(t))
+        && wc2.querySelector('[data-need-filter="extraction"]').classList.contains('chip-btn--on'),
+        'v0.0.24: choosing Extractions shows only the patients who need one');
+      const pos2 = Number(Array.from(wc2.querySelectorAll('tbody tr')).find((r) => /Extracta/.test(r.textContent)).querySelector('.queue-pos').textContent);
+      log(pos2 === posOf(/Extracta, Ezra/), 'v0.0.24: and keeps each patient’s place in the whole queue');
+      wc2.querySelector('[data-need-filter="all"]').click();
+      await settle(16);
+      log(Array.from(cardTitled(qv, 'Treatment waiting').querySelectorAll('tbody tr')).length === wRows.length, 'v0.0.24: All shows everyone again');
+      db.setActiveEvent(currentUser, evB.id);
+    }
 
     if (prevEventId && db.listEvents().some((e) => e.id === prevEventId)) db.setActiveEvent(currentUser, prevEventId);
   }
@@ -9005,7 +9148,9 @@ const done=(o)=>process.stdout.write('\\n@@F@@'+JSON.stringify(o),()=>process.ex
     await settle();
     const pillIn = (title, name) => {
       const r = rowOf(listOf(pvF, title), name);
-      const pill = r && r.children[4] && r.children[4].querySelector('.pill');
+      // The Status cell is the one before the Open button (v0.0.24 added
+      // a Treatment column before it in the chair lists).
+      const pill = r && r.children[r.children.length - 2] && r.children[r.children.length - 2].querySelector('.pill');
       return pill ? pill.textContent : null;
     };
     log(db.getPatient(pExam.id).status === 'in_treatment' && !db.getPatient(pExam.id).triage.treatment_waiting_at

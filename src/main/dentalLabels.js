@@ -202,7 +202,14 @@ function cleaningDone(cleaning) {
 
 const statusLabel = (s) => STATUS_LABELS[s] || String(s || '');
 
+// v0.0.24: this visit or a future one — as dentalLists.js.
+const ROW_STATUS = { now: 'This visit', future: 'Future visit' };
+const isFutureRow = (r) => !!r && typeof r === 'object' && r.status === 'future';
+const thisVisitRows = (list) => (Array.isArray(list) ? list : []).filter((r) => r && typeof r === 'object' && !isFutureRow(r));
+const futureRows = (list) => (Array.isArray(list) ? list : []).filter(isFutureRow);
+
 module.exports = {
+  ROW_STATUS, isFutureRow, thisVisitRows, futureRows,
   SURFACES, LEGACY_SURFACE_COUNTS, ANESTHETICS, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY, STATUS_LABELS,
   ANES_LABELS, ANES_SITE_LABELS, SERVICE_LABELS,
   surfaceList, formatSurfaces, anesAgentLabel, anesSiteText, anesRows,

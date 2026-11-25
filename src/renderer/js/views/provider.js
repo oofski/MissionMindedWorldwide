@@ -15,6 +15,7 @@ import { scanBox } from '../components/wristband.js';
 import { chipGrid } from '../forms.js';
 import {
   SURFACES, LEGACY_SURFACE_COUNTS, surfaceList, toothList, ANES_SITES, DENTAL_REFERRAL_TO, REFERRAL_URGENCY,
+  ROW_STATUS, isFutureRow, thisVisitRows,
 } from '../../i18n/dentalLists.js';
 
 // The largest X-ray image kept, as a data URL (see toJpegDataUrl).
@@ -31,6 +32,28 @@ const CLEANING_OPTS = [
   ['adult_prophy', 'Adult prophy'], ['adult_fluoride', 'Adult fluoride'], ['gross_debridement', 'Gross debridement'],
   ['quad_deep_scaling', 'Quadrant deep scaling'], ['sealant', 'Sealant'], ['ohi', 'Oral hygiene instruction'],
 ];
+
+// v0.0.24: what a patient waiting for a chair needs this visit — from the
+// fillings and extractions Dental Triage planned (rows for a future visit
+// left out), so the floor lead can send patients to the right chair.
+export function needsLabel(n) {
+  if (!n) return '';
+  const parts = [n.filling ? 'Filling' : null, n.extraction ? 'Extraction' : null].filter(Boolean);
+  if (!parts.length && n.other) parts.push('Other procedure');
+  return parts.join(' + ');
+}
+// The Treatment waiting filter: 'all', 'filling' or 'extraction'. A patient
+// who needs both shows under each.
+export function matchesNeed(p, filter) {
+  if (!filter || filter === 'all') return true;
+  return !!(p && p.needs && p.needs[filter]);
+}
+// First in, first out: the order patients were moved to Treatment Waiting.
+export function byWaitingOrder(list) {
+  const at = (p) => { const t = new Date(p.treatment_waiting_at || p.created_at || 0).getTime(); return isNaN(t) ? 0 : t; };
+  return [...list].sort((a, b) => at(a) - at(b) || String(a.last_name || '').localeCompare(String(b.last_name || '')));
+}
+let waitFilter = 'all';
 
 export function renderProvider(ctx, params = {}) {
   const root = el('div', { class: 'view' });
@@ -56,7 +79,9 @@ export function renderProvider(ctx, params = {}) {
     // Treatment Waiting stamp is what tells the chair apart from triage.
     const triageQueue = sortedByName(ready.filter((p) => atDental(p)
       && (p.status === 'triaged' || (p.status === 'in_treatment' && !p.treatment_waiting_at))));
-    const waitingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'treatment_waiting'));
+    // In the order they were moved there — the next patient for a chair is
+    // the one at the top — not A–Z.
+    const waitingQueue = byWaitingOrder(ready.filter((p) => atDental(p) && p.status === 'treatment_waiting'));
     const treatingQueue = sortedByName(ready.filter((p) => atDental(p) && p.status === 'in_treatment' && p.treatment_waiting_at));
     const atHygienist = sortedByName(ready.filter((p) => p.route === 'hygienist'));
     // The pill says where the patient is at this station. In the Dental Triage
@@ -67,13 +92,21 @@ export function renderProvider(ctx, params = {}) {
     const stagePill = (p, list) => (list === triageQueue && p.status === 'in_treatment'
       ? el('span', { class: 'pill pill--warning' }, [el('span', { class: 'pill-dot' }), 'Being examined'])
       : statusPill(p.status, p));
-    const row = (p, list) => el('tr', {}, [
+    const needsCell = (p) => {
+      const label = needsLabel(p.needs);
+      return el('td', { class: 'tx-needs' }, [label
+        ? el('span', { class: 'pill ' + (p.needs.extraction ? 'pill--warning' : 'pill--info') }, [label])
+        : el('span', { class: 'subtle small' }, ['Not planned'])]);
+    };
+    const row = (p, list, opts = {}) => el('tr', {}, [
+      opts.order ? el('td', { class: 'num queue-pos' }, [String(list.indexOf(p) + 1)]) : null,
       el('td', {}, [el('strong', {}, [`${p.last_name}, ${p.first_name}`]),
         p.on_thinner ? el('span', { class: 'pill pill--danger', style: 'margin-left:8px' }, ['Blood thinner']) : null,
         (p.flags && p.flags.length) ? flagDot(p.flags.length) : null]),
       el('td', { class: 'num' }, [p.age != null ? String(p.age) : '—']),
       el('td', {}, [p.complaint || '—']),
       el('td', {}, [p.assigned_to || '—']),
+      opts.needs ? needsCell(p) : null,
       el('td', {}, [stagePill(p, list),
         // How long they have been waiting for a chair — the number the floor
         // lead balances fifteen chairs against.
@@ -81,15 +114,40 @@ export function renderProvider(ctx, params = {}) {
           ? el('span', { class: 'subtle small', style: 'margin-left:6px' }, [waitedFor(p.treatment_waiting_at)]) : null]),
       el('td', {}, [chevronBtn('Open', () => detail(p.id))]),
     ]);
-    const table = (list, emptyMsg) => el('div', { class: 'data-table-wrap' }, [
-      el('table', { class: 'data-table' }, [
-        el('thead', {}, [el('tr', {}, ['Patient', 'Age', 'Complaint', 'Chair', 'Status', ''].map((h) => el('th', {}, [h])))]),
-        el('tbody', {}, list.length ? list.map((p) => row(p, list)) : [el('tr', {}, [el('td', { colspan: 6, class: 'empty' }, [emptyMsg])])]),
-      ]),
-    ]);
-    const listCard = (ic, title, list, emptyMsg) => el('div', { class: 'card' }, [
+    const table = (list, emptyMsg, opts = {}) => {
+      const heads = [opts.order ? '#' : null, 'Patient', 'Age', 'Complaint', 'Chair', opts.needs ? 'Treatment' : null, 'Status', ''].filter((h) => h !== null);
+      const shown = opts.shown || list;
+      return el('div', { class: 'data-table-wrap' }, [
+        el('table', { class: 'data-table' }, [
+          el('thead', {}, [el('tr', {}, heads.map((h) => el('th', {}, [h])))]),
+          el('tbody', {}, shown.length ? shown.map((p) => row(p, list, opts)) : [el('tr', {}, [el('td', { colspan: heads.length, class: 'empty' }, [emptyMsg])])]),
+        ]),
+      ]);
+    };
+    const listCard = (ic, title, list, emptyMsg, opts = {}) => el('div', { class: 'card' }, [
       el('div', { class: 'card-title' }, [icon(ic, { size: 15 }), `${title} (${list.length})`]),
-      table(list, emptyMsg),
+      table(list, emptyMsg, opts),
+    ]);
+    // Treatment waiting: numbered in arrival order, with what each patient
+    // needs and a filter (e.g. only extractions, for an oral-surgery chair).
+    // The number is the patient's place in the whole queue, filtered or not.
+    const nNeed = (k) => waitingQueue.filter((p) => matchesNeed(p, k)).length;
+    const filterChip = (key, label) => el('button', {
+      type: 'button', class: 'chip-btn' + (waitFilter === key ? ' chip-btn--on' : ''), 'data-need-filter': key,
+      'aria-pressed': String(waitFilter === key),
+      onClick: () => { waitFilter = key; queue(); },
+    }, [`${label} (${key === 'all' ? waitingQueue.length : nNeed(key)})`]);
+    const waitingShown = waitingQueue.filter((p) => matchesNeed(p, waitFilter));
+    const waitingCard = el('div', { class: 'card waiting-card' }, [
+      el('div', { class: 'card-title' }, [icon('calendar', { size: 15 }), `Treatment waiting (${waitingQueue.length})`]),
+      el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['In the order they were moved here — the next patient for a chair is number 1. Treatment is what Dental Triage planned for this visit.']),
+      waitingQueue.length ? el('div', { class: 'chip-row need-filter', style: 'margin-bottom:10px' }, [
+        filterChip('all', 'All'), filterChip('filling', 'Fillings'), filterChip('extraction', 'Extractions'),
+      ]) : null,
+      table(waitingQueue, waitingQueue.length
+        ? `Nobody waiting needs ${waitFilter === 'filling' ? 'a filling' : 'an extraction'} — choose All to see everyone.`
+        : 'Nobody is waiting for a treatment chair — Dental Triage moves patients here once they have been examined.',
+      { order: true, needs: true, shown: waitingShown }),
     ]);
     mount(root,
       el('div', { class: 'view-head' }, [
@@ -98,8 +156,8 @@ export function renderProvider(ctx, params = {}) {
       ]),
       el('div', { style: 'margin-bottom:var(--space-4)' }, [scanBox({ onFound: (pt) => detail(pt.id) })]),
       listCard('clipboard', 'Dental Triage', triageQueue, 'No patients in the Dental Triage queue yet — the EMT station sends patients here after vitals.'),
-      listCard('calendar', 'Treatment waiting', waitingQueue, 'Nobody is waiting for a treatment chair — Dental Triage moves patients here once they have been examined.'),
-      listCard('tooth', 'In treatment', treatingQueue, 'Nobody is in a treatment chair yet.'),
+      waitingCard,
+      listCard('tooth', 'In treatment', treatingQueue, 'Nobody is in a treatment chair yet.', { needs: true }),
       atHygienist.length ? el('details', { class: 'collapse' }, [
         el('summary', {}, [`At the hygienist (${atHygienist.length})`]),
         el('div', { class: 'collapse-body' }, [table(atHygienist, '')]),
@@ -293,21 +351,23 @@ export function renderProvider(ctx, params = {}) {
       // Whatever else an older build stored on the row — a single `position`
       // the printed record still reads when Ant/Post are unset, above all — is
       // saved back untouched rather than dropped by the next save.
-      const keptF = legacyKeys(f, ['tooth', 'surfaces', 'ant', 'post', 'note']);
+      const keptF = legacyKeys(f, ['tooth', 'surfaces', 'ant', 'post', 'note', 'status']);
       const positionChip = f.position != null && String(f.position).trim()
         ? el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${f.position}" — kept as recorded` }, [String(f.position)])
         : null;
       const noteChip = el('span', { class: 'tx-note' + (f.note ? '' : ' hidden') }, [f.note || '']);
-      const row = el('div', { class: 'filling-row', style: 'grid-template-columns:160px auto auto auto' }, [
+      const visitF = visitToggle(isFutureRow(f), locked, () => { row.classList.toggle('tx-row--future', visitF.future()); refreshMarks(); });
+      const row = el('div', { class: 'filling-row' + (isFutureRow(f) ? ' tx-row--future' : ''), style: 'grid-template-columns:160px auto auto auto auto' }, [
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Surfaces']), surfWrap]),
         el('div', { class: 'antpost' }, [antBtn, postBtn, positionChip]),
+        visitF.node,
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = f.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ ...keptF, tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptF, tooth: tooth.value.trim(), surfaces: Array.from(surf), ant, post, note: noteChip.textContent.trim(), ...(visitF.future() ? { status: 'future' } : {}) });
       row._tooth = tooth;
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       fillingRows.append(row);
@@ -363,18 +423,20 @@ export function renderProvider(ctx, params = {}) {
         toggleChip(label, types.has(k), (on) => { if (on) types.add(k); else types.delete(k); }, locked));
       const unknownTypes = [...types].filter((k) => !EXTRACTION_TYPES.some(([key]) => key === k))
         .map((k) => el('span', { class: 'surf-chip surf-chip--legacy', title: `Recorded earlier as "${k}" — kept as recorded` }, [`(recorded) ${k}`]));
-      const keptX = legacyKeys(x, ['tooth', 'types', 'type', 'note']);
+      const keptX = legacyKeys(x, ['tooth', 'types', 'type', 'note', 'status']);
       const noteChip = el('span', { class: 'tx-note' + (x.note ? '' : ' hidden') }, [x.note || '']);
-      const row = el('div', { class: 'ext-row' }, [
+      const visitX = visitToggle(isFutureRow(x), locked, () => { row.classList.toggle('tx-row--future', visitX.future()); refreshMarks(); });
+      const row = el('div', { class: 'ext-row' + (isFutureRow(x) ? ' tx-row--future' : '') }, [
         el('label', { class: 'field', style: 'margin:0' }, [el('span', { class: 'field-label' }, ['Tooth #']), toothF.node]),
         ...typeChips,
         ...unknownTypes,
+        visitX.node,
         noteChip,
         locked ? el('span') : iconBtn('x', () => { row.remove(); refreshMarks(); }),
       ]);
       row.dataset.tooth = x.tooth || '';
       if (auto) row.dataset.auto = '1';
-      row._get = () => ({ ...keptX, tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim() });
+      row._get = () => ({ ...keptX, tooth: tooth.value.trim(), types: Array.from(types), note: noteChip.textContent.trim(), ...(visitX.future() ? { status: 'future' } : {}) });
       row._tooth = tooth;
       row._setNote = (n) => { noteChip.textContent = n || ''; noteChip.classList.toggle('hidden', !n); };
       extractRows.append(row);
@@ -386,6 +448,47 @@ export function renderProvider(ctx, params = {}) {
     const otherExisting = (tx.extractions || []).find((x) => x.other) || {};
     const extOther = el('input', { class: 'input', placeholder: 'Other extraction (describe)', value: otherExisting.other || '', disabled: locked });
     const extOtherTooth = el('input', { class: 'input input--sm num', list: TEETH_LIST_ID, inputmode: 'numeric', placeholder: 'Tooth #', value: otherExisting.tooth || '', disabled: locked });
+
+    /* ---------- Still to do from an earlier visit (v0.0.24) ---------- */
+    // A filling or extraction an earlier visit marked "Future visit" is
+    // offered here, so it is not forgotten at the next clinic. "Add to this
+    // visit" puts it on today's chart; one already on today's chart (for
+    // this visit or again for later) is not offered twice.
+    const carrySlot = el('div', {});
+    function paintCarry() {
+      const onChart = new Set();
+      Array.from(fillingRows.children).forEach((r) => { const x = r._get(); if (x.tooth) onChart.add('filling:' + x.tooth.toUpperCase()); });
+      Array.from(extractRows.children).forEach((r) => { const x = r._get(); if (x.tooth) onChart.add('extraction:' + x.tooth.toUpperCase()); });
+      const items = stillToDo(priorVisits).filter((f) => !onChart.has(`${f.kind}:${String(f.tooth).trim().toUpperCase()}`));
+      if (!items.length) { carrySlot.replaceChildren(); return; }
+      const describe = (f) => f.kind === 'filling'
+        ? `Filling #${f.tooth}${surfaceList(f.surfaces).length ? ' ' + surfaceList(f.surfaces).join('') : ''}`
+        : `Extraction #${f.tooth}${Array.isArray(f.types) && f.types.length ? ' (' + f.types.map((k) => (EXTRACTION_TYPES.find(([key]) => key === k) || [k, k])[1].toLowerCase()).join(', ') + ')' : ''}`;
+      const when = (f) => [f.from, f.from_at ? new Date(f.from_at).toLocaleDateString() : ''].filter(Boolean).join(', ');
+      carrySlot.replaceChildren(el('div', { class: 'card carry-card' }, [
+        el('div', { class: 'card-title' }, [icon('calendar', { size: 15 }), `Still to do from an earlier visit (${items.length})`]),
+        el('p', { class: 'subtle small', style: 'margin:0 0 8px' }, ['Marked "Future visit" at an earlier clinic and not done since.']),
+        el('div', { class: 'carry-rows' }, items.map((f) => el('div', { class: 'carry-row', 'data-carry': `${f.kind}:${f.tooth}` }, [
+          el('strong', {}, [describe(f)]),
+          when(f) ? el('span', { class: 'subtle small' }, [`planned at ${when(f)}`]) : null,
+          f.note ? el('span', { class: 'tx-note' }, [f.note]) : null,
+          locked ? null : softBtn('plus', 'Add to this visit', () => carryIn(f)),
+        ]))),
+      ]));
+    }
+    function carryIn(f) {
+      const { kind, from, from_at, status, ...row } = f;
+      const rowsEl = kind === 'filling' ? fillingRows : extractRows;
+      // The empty row a new chart opens with is filled in, not left above it.
+      const last = rowsEl.lastElementChild;
+      if (last && last._get) {
+        const x = last._get();
+        if (!x.tooth && !(x.surfaces || []).length && !(x.types || []).length && !x.ant && !x.post) last.remove();
+      }
+      if (kind === 'filling') addFilling(row); else addExtraction(row);
+      refreshMarks();
+      toast(`${kind === 'filling' ? 'Filling' : 'Extraction'} #${row.tooth} added to this visit — save to keep it.`, 'info');
+    }
 
     /* ---------- Cleaning ---------- */
     const cleanState = { ...(tx.cleaning || {}) };
@@ -1029,7 +1132,7 @@ export function renderProvider(ctx, params = {}) {
       return m;
     }
     // Manual row edits reflect back onto the mouth (silent — no onTag loop).
-    function refreshMarks() { odo.setMarks(computeMarksLive()); paintAddLabels(); }
+    function refreshMarks() { odo.setMarks(computeMarksLive()); paintAddLabels(); paintCarry(); }
 
     function collectTreatment() {
       const extractions = Array.from(extractRows.children).map((r) => r._get()).filter((x) => x.tooth);
@@ -1172,6 +1275,15 @@ export function renderProvider(ctx, params = {}) {
         return;
       }
       const payload = collectTreatment();
+      // v0.0.24: the Treatment waiting list says what each patient needs at a
+      // chair (Filling / Extraction), so the dentist decides here — there is
+      // no "undecided". Work marked for a future visit is not this visit's.
+      if (mode === 'waiting' && !plannedForThisVisit(payload)) {
+        toast('Add the treatment for this visit before moving the patient: use Add filling or Add extraction (or Other / restorative work). Rows marked "Future visit" do not count.', 'error');
+        const firstTooth = (fillingRows.firstElementChild && fillingRows.firstElementChild._tooth) || (extractRows.firstElementChild && extractRows.firstElementChild._tooth);
+        if (firstTooth && firstTooth.focus) firstTooth.focus();
+        return;
+      }
       // Every treatment note has to say who performed it — a record that leaves
       // this station unattributed is not a clinical record. Required whenever the
       // visit is finished or locked; a mid-treatment progress save is not blocked.
@@ -1364,6 +1476,7 @@ export function renderProvider(ctx, params = {}) {
       // LEAD WITH THE DENTIST'S WORK — fillings and extractions are always the
       // prominent first thing after the odontogram (planning + execution both
       // happen here now that the triage station is gone).
+      carrySlot,
       panel('pen', 'Fillings',
         fillingRows,
         locked ? null : addFillingBtn),
@@ -1538,6 +1651,54 @@ function toggleChip(label, on, cb, disabled) {
   if (disabled) b.disabled = true;
   else b.addEventListener('click', () => { const now = !b.classList.contains('chip-btn--on'); b.classList.toggle('chip-btn--on', now); cb(now); });
   return b;
+}
+// What earlier visits left "for a future visit" and no later visit has done,
+// oldest visit first. priorVisits is db.patientHistory (newest first); each
+// carries `future` rows and the `done` teeth it treated. One item per kind
+// and tooth — the latest plan for that tooth wins.
+export function stillToDo(priorVisits) {
+  const open = new Map();
+  const key = (kind, tooth) => `${kind}:${String(tooth || '').trim().toUpperCase()}`;
+  [...(Array.isArray(priorVisits) ? priorVisits : [])].reverse().forEach((v) => {
+    (v.done || []).forEach((d) => open.delete(key(d.kind, d.tooth)));
+    (v.future || []).forEach((f) => {
+      if (!String(f.tooth || '').trim()) return;
+      open.delete(key(f.kind, f.tooth));
+      open.set(key(f.kind, f.tooth), { ...f, from: v.event_name || '', from_at: v.created_at || '' });
+    });
+  });
+  return [...open.values()];
+}
+// Is anything planned for a treatment chair at this visit? The rule the
+// Treatment waiting list's Treatment column reads (db.treatmentNeeds).
+export function plannedForThisVisit(payload) {
+  if (!payload) return false;
+  const has = (r) => !!(String(r.tooth || '').trim() || (typeof r.other === 'string' && r.other.trim()));
+  if (thisVisitRows(payload.fillings).some(has) || thisVisitRows(payload.extractions).some(has)) return true;
+  if (String(payload.other_procedures || '').trim()) return true;
+  return Object.values(payload.restorative || {}).some((v) => v && typeof v === 'object' && v.on);
+}
+// v0.0.24: This visit | Future visit, on each filling and extraction row. A
+// row for a future visit stays on the chart (and is offered again at the
+// patient's next visit) but is not counted, printed or given after-care as
+// work done today. Words from ROW_STATUS, shared with the printed record.
+function visitToggle(future, disabled, onChange) {
+  let fut = !!future;
+  const mk = (val, label) => {
+    const b = el('button', { type: 'button', class: 'visit-seg-btn', 'data-visit': val, 'aria-pressed': String((val === 'future') === fut) }, [label]);
+    if (disabled) b.disabled = true;
+    else b.addEventListener('click', () => { fut = val === 'future'; paint(); onChange && onChange(fut); });
+    return b;
+  };
+  const now = mk('now', ROW_STATUS.now);
+  const later = mk('future', ROW_STATUS.future);
+  const node = el('div', { class: 'visit-seg', role: 'group', title: 'Is this done at this visit, or left for a future visit?' }, [now, later]);
+  function paint() {
+    now.classList.toggle('on', !fut); later.classList.toggle('on', fut);
+    now.setAttribute('aria-pressed', String(!fut)); later.setAttribute('aria-pressed', String(fut));
+  }
+  paint();
+  return { node, future: () => fut };
 }
 // The keys of a stored row this screen does not edit, to be saved back as they
 // were (a shape an older or newer build wrote), minus the ones it rebuilds.

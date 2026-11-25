@@ -145,7 +145,8 @@ function clinicSheets(bundle) {
     // the count taken is a Dental Triage figure, recorded before any treatment.
     if (!txBy.has(p.id) && tr.xrays_taken == null) return;
     const t = txBy.get(p.id) || {};
-    const fillings = j(t.fillings, []), extractions = j(t.extractions, []), cleaning = j(t.cleaning, {});
+    // v0.0.24: what was done at this visit — not what was left for a future one.
+    const fillings = DL.thisVisitRows(j(t.fillings, [])), extractions = DL.thisVisitRows(j(t.extractions, [])), cleaning = j(t.cleaning, {});
     const anes = DL.anesRows(j(t.anesthetic, []));
     // Only a referral that sends the patient somewhere is one (the rule the
     // printed record and every count use); details stored without a

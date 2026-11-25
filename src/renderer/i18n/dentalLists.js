@@ -143,6 +143,18 @@ export function hasReferralOut(r) {
   return !!(r && ((Array.isArray(r.to) && r.to.length) || (r.to_other && String(r.to_other).trim())));
 }
 
+/* ---------------- This visit or a future one (v0.0.24) ---------------- */
+
+// A filling or an extraction on the chart is done at this visit unless the
+// clinician marks it for a future one: Vinh's three extractions, #8 done today
+// and #9 and #10 left for the next clinic. Kept on the row as
+// status: 'future'; a row without it — every record before v0.0.24 — is this
+// visit's. The words are here once, so the clinic's own term can replace them.
+export const ROW_STATUS = { now: 'This visit', future: 'Future visit' };
+export const isFutureRow = (r) => !!r && typeof r === 'object' && r.status === 'future';
+export const thisVisitRows = (list) => (Array.isArray(list) ? list : []).filter((r) => r && typeof r === 'object' && !isFutureRow(r));
+export const futureRows = (list) => (Array.isArray(list) ? list : []).filter(isFutureRow);
+
 /* ---------------- Patient status ---------------- */
 
 // Where a patient is in the visit, as every screen and export names it. One map

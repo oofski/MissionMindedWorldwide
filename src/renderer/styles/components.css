@@ -578,6 +578,19 @@ body:has(.chart-actions-bar) .toast-host, body:has(.next-step-bar) .toast-host{ 
 .filling-row{ display:grid; grid-template-columns:108px auto auto auto; gap:10px; align-items:center; padding:8px; border:var(--border-line); border-radius:var(--radius-sm); background:var(--surface); }
 .filling-row .field{ margin:0; }
 .ext-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:8px; border:var(--border-line); border-radius:var(--radius-sm); background:var(--surface); }
+/* v0.0.24: This visit | Future visit on each filling / extraction row */
+.visit-seg{ display:inline-flex; border:1px solid var(--border-strong); border-radius:var(--radius-sm); overflow:hidden; flex:none; }
+.visit-seg-btn{ border:0; background:var(--surface); color:var(--text-muted); padding:6px 10px; font-size:var(--fs-xs); font-weight:var(--fw-medium); cursor:pointer; }
+.visit-seg-btn + .visit-seg-btn{ border-left:1px solid var(--border-strong); }
+.visit-seg-btn.on{ background:var(--accent-soft); color:var(--accent-text); font-weight:var(--fw-semibold); }
+.visit-seg-btn[data-visit="future"].on{ background:var(--warning-soft); color:var(--text); }
+.visit-seg-btn:disabled{ cursor:default; }
+.filling-row.tx-row--future, .ext-row.tx-row--future{ border-style:dashed; border-color:var(--warning-border); background:var(--surface-sunken); }
+.carry-rows{ display:flex; flex-direction:column; gap:6px; }
+.carry-row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px; border:1px dashed var(--warning-border); border-radius:var(--radius-sm); background:var(--surface); }
+.carry-row .btn{ margin-left:auto; }
+.queue-pos{ font-weight:var(--fw-semibold); color:var(--text-muted); width:32px; }
+.need-filter .chip-btn{ padding:5px 11px; }
 .anes-grid{ display:grid; grid-template-columns:1.4fr 90px 1.2fr; gap:8px; align-items:center; margin-bottom:7px; }
 .anes-grid .anes-agent{ font-weight:var(--fw-medium); font-size:var(--fs-sm); color:var(--text); }
 .field-row{ display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }

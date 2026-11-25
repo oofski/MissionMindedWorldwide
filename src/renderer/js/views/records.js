@@ -8,7 +8,7 @@ import { incompleteBanner, patientInfoCards, historyReviewText } from '../compon
 import { lockBanner, adminLockButtons, lockHistoryList, lockedByText } from '../components/recordLock.js';
 import { bloodThinnerText, bpStatus } from '../medFlags.js';
 import { sortedByName } from '../patientSort.js';
-import { hasReferralOut } from '../../i18n/dentalLists.js';
+import { hasReferralOut, thisVisitRows, futureRows } from '../../i18n/dentalLists.js';
 
 // Reconciled vitals + blood-thinner shown ON-SCREEN in the record, the same way
 // the EMT/dentist screens and the PDF do — so the record can't silently disagree
@@ -311,8 +311,12 @@ function languageLabel(code) {
 function treatmentSummary(p, stage) {
   const tx = p.treatment || {};
   const parts = [];
-  if ((tx.fillings || []).length) parts.push(`${tx.fillings.length} filling(s)`);
-  if ((tx.extractions || []).length) parts.push(`${tx.extractions.length} extraction(s)`);
+  // v0.0.24: this visit's work; what was left for a future one is said apart.
+  const fNow = thisVisitRows(tx.fillings), xNow = thisVisitRows(tx.extractions);
+  const later = futureRows(tx.fillings).length + futureRows(tx.extractions).length;
+  if (fNow.length) parts.push(`${fNow.length} filling(s)`);
+  if (xNow.length) parts.push(`${xNow.length} extraction(s)`);
+  if (later) parts.push(`${later} left for a future visit`);
   // The teeth tapped on the chart and the quadrant note are not a cleaning —
   // every dentist save stores teeth: [], which used to read as one here.
   if (Object.entries(tx.cleaning || {}).some(([k, v]) => v && k !== 'teeth' && k !== 'quad_detail')) parts.push('cleaning');

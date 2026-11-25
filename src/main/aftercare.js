@@ -409,8 +409,10 @@ function classify(t) {
     if (!out.variants[key].includes(variant)) out.variants[key].push(variant);
   };
 
-  const extractions = parsed(t.extractions, []);
-  const fillings = parsed(t.fillings, []);
+  // v0.0.24: only what was done at this visit — a tooth left for a future
+  // one gets its instructions when it is done.
+  const extractions = DL.thisVisitRows(parsed(t.extractions, []));
+  const fillings = DL.thisVisitRows(parsed(t.fillings, []));
   const cleaning = parsed(t.cleaning, {}) || {};
   const anesthetic = parsed(t.anesthetic, []);
   const restorative = parsed(t.restorative, {}) || {};
