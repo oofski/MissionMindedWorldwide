@@ -979,6 +979,12 @@ body.survey-open{ overflow:hidden; }
 .inv-move-delta.is-out{ color:var(--danger); }
 .inv-move > span:last-child{ grid-column:2 / -1; }
 .banner--warn{ background:var(--warning-soft); color:var(--warning); border:1px solid var(--warning-border); }
+.banner--success{ background:var(--success-soft); color:var(--success); border:1px solid var(--success-border); }
+.banner--info{ background:var(--info-soft); color:var(--info); border:1px solid var(--info-border); }
+/* v0.0.24: the clinic key the next laptop types, in large print */
+.lan-code-panel{ border:1px solid var(--accent-border); background:var(--accent-soft); border-radius:var(--radius-sm); padding:var(--space-3) var(--space-4); margin:0 0 var(--space-3); }
+.lan-code-label{ font-size:var(--fs-xs); font-weight:var(--fw-semibold); text-transform:uppercase; letter-spacing:.04em; color:var(--accent-text); }
+.lan-join-code{ font-family:var(--font-mono); font-size:40px; line-height:1.15; font-weight:700; letter-spacing:.08em; color:var(--text); margin:4px 0 6px; user-select:all; }
 /* v0.0.22: setting up the sync server on Cloudflare — each step as it runs. */
 .cloud-setup-steps{ list-style:none; margin:var(--space-3) 0 0; padding:0; display:grid; gap:6px; }
 .cloud-setup-steps li{ display:flex; align-items:center; gap:8px; color:var(--text-subtle); padding-left:21px; }

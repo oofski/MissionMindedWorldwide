@@ -121,7 +121,7 @@ export function renderSetup(ctx, params = {}) {
     url.addEventListener('input', () => { lanPick = null; });
     const found = el('div', { class: 'lan-found', style: 'display:none; flex-direction:column; gap:8px; margin:0 0 6px;' });
     // Shown as typed (v0.0.23): it is copied from another laptop's screen.
-    const key = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: 'Clinic key', style: 'font-family:var(--font-mono);' });
+    const key = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: 'Clinic key, like 482-913', style: 'font-family:var(--font-mono);' });
     const status = el('div', { class: 'update-status', style: 'display:none' });
     const error = el('div', { class: 'login-error', style: 'display:none' });
     const joinBtn = el('button', { class: 'btn btn--primary btn--block' }, [icon('globe', { size: 16 }), 'Connect and sync']);
@@ -287,7 +287,7 @@ export function renderSetup(ctx, params = {}) {
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic address']), url]),
       el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['On a clinic network with no internet, it is the host laptop\'s address, like 192.168.1.23:47800.']),
       el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['Clinic key']), key]),
-      el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['For a clinic network, capitals, spaces and dashes in the key do not matter.']),
+      el('p', { class: 'subtle small', style: 'margin:-6px 0 0' }, ['For a clinic network: the short key the host laptop\'s Cloud tab shows in large numbers, like 482-913. Spaces and dashes do not matter.']),
       status,
       error,
       joinBtn,

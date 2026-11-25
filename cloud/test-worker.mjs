@@ -1449,31 +1449,115 @@ async function hubChecks() {
     check('clinic network hub: the key typed in small letters, with spaces for dashes, still proves the host — and a host with a key the app made answers laptops on 0.0.22 too',
       proofMessy.pin === id.pin && typeof h1.proof === 'string' && typeof h1.proof2 === 'string' && lan.canonKey(messy) === id.key);
 
-    // A key the clinic chooses: kept as the host keeps it, sent nowhere
-    // without the proof, and answered only with the slow proof.
-    let short = null;
-    try { hubMod.setKey('clinic1'); } catch (e) { short = e.message; }
+    // v0.0.24: the short clinic key people type (joincode.js). The host
+    // and the laptop show each other they hold it without sending it; the
+    // network's password then comes sealed. Nothing a look-alike or a
+    // listener sees lets a guess be tested offline.
+    const J = requireApp('../src/main/joincode.js');
+    const code0 = hubMod.status().joinCode;
+    check('v0.0.24 clinic network hub: a new host has a six-digit clinic key, shown as 482-913',
+      /^\d{3}-\d{3}$/.test(code0) && h1.join === J.VERSION);
+    const paired = await lan.pairWithCode(base, ' ' + code0.replace('-', ' ') + ' ');
+    check('v0.0.24 clinic network hub: typed with a space for the dash, the clinic key joins — the laptop learns the host\'s certificate and receives the network\'s password, which it never typed',
+      paired.pin === id.pin && paired.hostId === id.hostId && paired.key === id.key && paired.name === 'Test clinic network');
+    const wrongDigit = code0.slice(0, 6) + String((Number(code0.slice(-1)) + 1) % 10);
+    let wrongCode = null;
+    try { await lan.pairWithCode(base, wrongDigit); } catch (e) { wrongCode = e; }
+    check('v0.0.24 clinic network hub: a wrong clinic key is told as such, and brings no password',
+      !!wrongCode && wrongCode.wrongCode === true && lan.classify(wrongCode) === 'wrong_code' && /did not accept that clinic key/.test(lan.explain(wrongCode, '127.0.0.1')));
+    let otherHost = null;
+    try { await lan.pairWithCode(base, code0, { expectHost: 'some-other-host' }); } catch (e) { otherHost = e; }
+    check('v0.0.24 clinic network hub: a host that is not the one chosen from the list is refused before the exchange', !!otherHost && otherHost.pinMismatch === true);
+    const longTyped = await lan.pairWithCode(base, id.key.toLowerCase());
+    check('v0.0.24 clinic network hub: the long key a 0.0.23 host showed, typed in full, still joins by the old proof (no wrong try counted)',
+      longTyped.pin === id.pin && longTyped.hostId === id.hostId && longTyped.key === undefined && hubMod.status().joinFailures === 1);
+    // A forged first message: not a group element, refused before any work.
+    const bad1 = await req('/lan/join1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ X: '01' }) });
+    const badGet = await req('/lan/join1');
+    const bad2 = await req('/lan/join2', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid: 'nope', cA: 'x' }) });
+    check('v0.0.24 clinic network hub: a forged exchange is refused — a value outside the group, a GET, an unknown session',
+      bad1.status === 400 && badGet.status === 405 && bad2.status === 403 && !/sealed/.test(bad2.text));
+
+    // Changing the clinic key: the next laptop types the new one; laptops
+    // already joined (they hold the network's password) are not signed out.
+    let tooShort = null;
+    try { hubMod.setJoinCode('12'); } catch (e) { tooShort = e.message; }
+    const set = hubMod.setJoinCode(' 2468 ');
+    const pairedNew = await lan.pairWithCode(base, '2-4-6-8');
+    let pairedOld = null;
+    try { await lan.pairWithCode(base, code0); } catch (e) { pairedOld = e; }
+    const stillIn = await req('/v1/pull?since=&limit=1', { headers: auth(id.key) });
+    check('v0.0.24 clinic network hub: a clinic key the clinic chooses (4 or more) works at once, the old one no longer joins, too short is refused — and the laptops already joined stay joined',
+      /at least 4 numbers or letters/.test(tooShort || '') && set === '2468' && hubMod.status().joinCode === '2468'
+      && pairedNew.key === id.key && !!pairedOld && pairedOld.wrongCode === true && stillIn.status === 200);
+    const made = hubMod.setJoinCode('');
+    check('v0.0.24 clinic network hub: left blank, a new six-digit clinic key is made', /^\d{3}-\d{3}$/.test(made) && made === hubMod.status().joinCode);
+
+    // A network password chosen by hand in 0.0.23: the host stops giving the
+    // join proofs it could be guessed from offline, and that key becomes the
+    // clinic key, which is what the clinic already types.
     const chosen = hubMod.setKey('  Sandy   Clinic Day 2026 ');
     const h2 = await hello();
-    const proofOwn = await lan.learnPin(base, 'SANDY CLINIC  day 2026');
-    let wrongOwn = null;
-    try { await lan.learnPin(base, 'sandy clinic day 2025'); } catch (e) { wrongOwn = e; }
+    let oldProof = null;
+    try { await lan.learnPin(base, 'SANDY CLINIC  day 2026'); } catch (e) { oldProof = e; }
     const withOwn = await req('/v1/pull?since=&limit=1', { headers: auth(chosen) });
     const withOld = await req('/v1/pull?since=&limit=1', { headers: auth(id.key) });
-    check('clinic network hub: a key the clinic chooses works at once — typed with other capitals or spacing it still proves the host, the old key is refused, and too short a key is refused',
-      /at least 8 letters or numbers/.test(short || '') && chosen === 'sandy clinic day 2026' && hubMod.identity().key === chosen
-      && proofOwn.pin === id.pin && !!wrongOwn && wrongOwn.noProof === true && withOwn.status === 200 && withOld.status === 401);
-    check('clinic network hub: with a key the clinic chose, the host answers only with the slow (scrypt) proof — never the quick one a short key could be guessed from',
-      typeof h2.proof2 === 'string' && h2.proof === undefined && h2.proof2 !== h1.proof2);
+    check('v0.0.24 clinic network hub: with a network password chosen by hand (0.0.23), the host gives neither old join proof — nothing to guess it from offline — and the password itself still syncs',
+      chosen === 'sandy clinic day 2026' && h2.proof2 === undefined && h2.proof === undefined && h2.join === J.VERSION
+      && !!oldProof && withOwn.status === 200 && withOld.status === 401);
     const remade = hubMod.setKey('');
     const h3 = await hello();
-    check('clinic network hub: a blank key makes a new long one, and the quick proof is back for laptops on 0.0.22',
-      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(remade) && remade !== id.key && typeof h3.proof === 'string');
+    check('v0.0.24 clinic network hub: a new long password brings the old proofs back for laptops still on 0.0.22 / 0.0.23',
+      /^[A-Z2-9]{5}(-[A-Z2-9]{5}){4}$/.test(remade) && remade !== id.key && typeof h3.proof === 'string' && typeof h3.proof2 === 'string');
+
+    // Guessing: each try is one guess, and the host stops taking them.
+    hubMod._resetJoinLimits();
+    const realCode = hubMod.status().joinCode;
+    const wrongOf = (i) => String((Number(J.canonCode(realCode)) + 1 + i) % 1000000).padStart(6, '0');
+    let lastWrong = null;
+    for (let i = 0; i < hubMod.JOIN_TRIES_PER_ADDRESS; i++) { try { await lan.pairWithCode(base, wrongOf(i)); } catch (e) { lastWrong = e; } }
+    let limited = null;
+    try { await lan.pairWithCode(base, realCode); } catch (e) { limited = e; }
+    check('v0.0.24 clinic network hub: after ' + hubMod.JOIN_TRIES_PER_ADDRESS + ' wrong tries from one laptop the host takes no more for a while — not even the right key — and says to wait or paste the connection code',
+      !!lastWrong && lastWrong.wrongCode === true && !!limited && limited.tooMany === true && limited.retryAfter > 0
+      && lan.classify(limited) === 'too_many' && /Wait five minutes/.test(lan.explain(limited, 'x')) && /connection code/.test(lan.explain(limited, 'x')));
+    check('v0.0.24 clinic network hub: the host\'s Cloud tab counts the wrong tries at once (the laptop says its check failed)', hubMod.status().joinFailures === hubMod.JOIN_TRIES_PER_ADDRESS);
+    hubMod._resetJoinLimits();
+    check('v0.0.24 clinic network hub: and once that is over, the right key joins', (await lan.pairWithCode(base, realCode)).key === remade);
+    // Refused the password many times from one address: refused unchecked.
+    const fakeReq = (a) => ({ socket: { remoteAddress: a } });
+    for (let i = 0; i < hubMod.AUTH_FAILS_PER_ADDRESS; i++) hubMod._noteAuthFail(fakeReq('192.168.1.77'));
+    check('v0.0.24 clinic network hub: an address refused the password ' + hubMod.AUTH_FAILS_PER_ADDRESS + ' times in ten minutes is refused without a check; another address, and the host itself, are not',
+      hubMod._authLimited(fakeReq('::ffff:192.168.1.77')) === true && hubMod._authLimited(fakeReq('192.168.1.78')) === false && hubMod._authLimited(fakeReq('127.0.0.1')) === false);
     await hubMod.stop();
     await hubMod.erase();
   } finally {
     hubMod.shutdown();
     rmSync(dir, { recursive: true, force: true });
+  }
+
+  // v0.0.24: a host made before this build, whose network password was
+  // chosen by hand in 0.0.23, keeps it — and that is its clinic key, so the
+  // clinic types what it already knows. One the app made gets a new key.
+  for (const [label, key, expect] of [['chosen by hand', 'sandy clinic day 2026', (c) => c === 'sandy clinic day 2026'],
+    ['made by the app', 'ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2', (c) => /^\d{3}-\d{3}$/.test(c)]]) {
+    const dir2 = mkdtempSync(join(tmpdir(), 'mmw-hub-old-'));
+    try {
+      const Database = requireApp('better-sqlite3');
+      const { cert, key: pk } = hubMod.makeCertificate();
+      const f = new Database(join(dir2, hubMod.HUB_FILE));
+      f.exec('CREATE TABLE IF NOT EXISTS hub_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
+      const put = f.prepare('INSERT INTO hub_meta (k, v) VALUES (?, ?)');
+      [['host_id', 'old-host'], ['cert', cert], ['private_key', pk], ['key', key], ['created_at', '2026-11-01T00:00:00.000Z']].forEach(([k, v]) => put.run(k, v));
+      f.close();
+      hubMod.init(dir2);
+      const c = hubMod.status().joinCode;
+      check(`v0.0.24 clinic network hub: a host from 0.0.23 with a network password ${label} is given its clinic key (${label === 'chosen by hand' ? 'that password' : 'a new six-digit one'}), and keeps its password`,
+        expect(c) && hubMod.identity().key === key && hubMod.status().joinCode === c);
+    } finally {
+      hubMod.shutdown();
+      rmSync(dir2, { recursive: true, force: true });
+    }
   }
 }
 

@@ -207,6 +207,9 @@ async function testClinicNetwork(url, key, t) {
   }
   if (!/^https:/.test(base)) throw new Error(PLAIN_HTTP);
   if (!String(key || '').trim()) throw new Error('Enter the clinic key shown on the host laptop\'s Cloud tab, or paste its connection code.');
+  // v0.0.24: typed, it is the short clinic key (lan.pairWithCode) — unless
+  // the host is on an older build, where it is the network's password.
+  const typed = String(key);
   // As the host keeps it: capitals, spaces and dashes do not matter (v0.0.23).
   key = lan.canonKey(key);
   if (keyProblem(key)) throw new Error(keyProblem(key));
@@ -228,7 +231,7 @@ async function testClinicNetwork(url, key, t) {
   };
   let at = base;
   if (!pin) {
-    const learn = (u) => lan.learnPin(u, key, { expectPrefix: t.fp || '', expectHost: hostId });
+    const learn = (u) => lan.pairWithCode(u, typed, { expectPrefix: t.fp || '', expectHost: hostId });
     let learned = null;
     try { learned = await learn(at); } catch (e) {
       if (!notAnswering(lan.classify(e))) throw refuse(e, at);
@@ -240,6 +243,10 @@ async function testClinicNetwork(url, key, t) {
       at = found.url; learned = found.value;
     }
     pin = learned.pin; hostId = learned.hostId || hostId; name = learned.name || name;
+    // Joined with the short key: the network's password came sealed from
+    // the host. Kept here, in the main process, for the save that follows —
+    // never sent to the screen.
+    if (learned.key) { key = learned.key; rememberPair(pin, typed, learned.key); }
   }
   let d = await lan.diagnose({ url: at, key, pin, hostId });
   // Heard somewhere else — a code made before the host's port or address
@@ -257,6 +264,20 @@ async function testClinicNetwork(url, key, t) {
   // A laptop joined to this host keeps it at the address it answers at now.
   if (at !== base) repointLan(at, pin);
   return { ok: true, service: d.health.service, version: d.health.version, time: d.health.time, lan: { pin, hostId, name }, url: at };
+}
+
+// v0.0.24: the network's password a join with the short clinic key brought
+// (testClinicNetwork), for the save of the same host with the same key that
+// follows it (applyConfig) — the screen only ever has the short key.
+let lastPair = null;
+const PAIR_KEEP_MS = 15 * 60 * 1000;
+function rememberPair(pin, code, key) {
+  lastPair = { pin: lan.normPin(pin), code: require('./joincode').canonCode(code), key, at: Date.now() };
+}
+function pairedKeyFor(pin, code) {
+  const p = lastPair;
+  if (!p || Date.now() - p.at > PAIR_KEEP_MS || p.pin !== lan.normPin(pin)) return '';
+  return require('./joincode').canonCode(code) === p.code ? p.key : '';
 }
 
 // The key saved for this server, when the address given is the one already
@@ -570,7 +591,7 @@ function applyConfig({ url, key, enabled, mode, online, lan: lanIn }) {
     ? { pin: lan.normPin(lanIn.pin), hostId: String(lanIn.hostId || '').slice(0, 64), name: String(lanIn.name || '').slice(0, 80) } : null;
   // A clinic network's key is saved as its host keeps it (lan.canonKey), so
   // the key typed with other capitals or spacing is the same key.
-  if (lanT && key) key = lan.canonKey(key);
+  if (lanT && key) key = pairedKeyFor(lanT.pin, key) || lan.canonKey(key);
   if (lanT && (url === undefined || !lanT.pin)) throw new Error('Test the clinic network connection before saving it.');
   const base = url === undefined ? undefined : (lanT ? lanUrl(url) : trimUrl(url));
   if (url !== undefined && isPlainHttp(base)) throw new Error(PLAIN_HTTP);
@@ -657,7 +678,7 @@ async function resyncAll() {
 }
 
 module.exports = {
-  start, stop, syncOnce, syncSettled, resyncAll, testConnection, savedKeyFor, status, applyConfig, normalizeUrl: trimUrl,
+  start, stop, syncOnce, syncSettled, resyncAll, testConnection, savedKeyFor, pairedKeyFor, status, applyConfig, normalizeUrl: trimUrl,
   connectionCode, encodeConnectionCode, CODE_PREFIX,
   // v0.0.17: the clinic network.
   lanUrl, identityOf, repointLan, refind, refindTiming, explain,

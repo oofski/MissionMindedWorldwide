@@ -148,6 +148,7 @@ export const api = {
   hubStart: (name, move, key) => call('hubStart', { name, ...(move ? { move: true } : {}), ...(key ? { key } : {}) }),
   // v0.0.23: a clinic key the clinic chooses — or, blank, a new one made here.
   hubSetKey: (key) => call('hubSetKey', { key: key || '' }),
+  hubSetJoinCode: (code, signOutOthers) => call('hubSetJoinCode', { code: code || '', signOutOthers: !!signOutOthers }),
   hubStop: (erase) => call('hubStop', { erase: !!erase }),
   hubFirewall: () => call('hubFirewall'),
   lanScan: (ms) => call('lanScan', { ms }),

@@ -420,6 +420,68 @@ async function learnPin(url, key, { expectPrefix = '', expectHost = '', timeoutM
   return { pin: r.pin, hostId: typeof j.host === 'string' ? j.host : '', name: cleanText(j.name, 80) };
 }
 
+/* ---------------- Joining with the short clinic key (v0.0.24) ---------------- */
+
+// The short key typed on the host's screen (joincode.js): the host and this
+// laptop show each other they hold the same key without either sending it,
+// and only then does the host send the network's own password, sealed under
+// the key the exchange agreed. A look-alike host learns nothing it can test a
+// guess against; a wrong key is one wrong try, counted by the host.
+//
+// Returns { pin, hostId, name, key } — key being the network's password, to
+// save. Without key when the host is on a build before this one, or the long
+// password a 0.0.23 host showed was typed in full: then the host proves it
+// holds what was typed by the old proof (learnPin's), from the same answer,
+// and what was typed is the password.
+async function pairWithCode(url, code, { expectPrefix = '', expectHost = '', timeoutMs = 8000 } = {}) {
+  const J = require('./joincode');
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const r = await request(new URL('/lan/hello?nonce=' + nonce, url).href, { timeoutMs });
+  if (expectPrefix && !r.pin.startsWith(String(expectPrefix).toLowerCase())) {
+    throw Object.assign(new Error('The host\'s certificate does not match.'), { pinMismatch: true, presented: r.pin });
+  }
+  let j = null;
+  try { j = JSON.parse(r.text); } catch (_) { /* not ours */ }
+  if (!j || j.app !== APP_ID) throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
+  if (expectHost && j.host !== expectHost) {
+    throw Object.assign(new Error('The host\'s certificate does not match.'), { pinMismatch: true, presented: r.pin });
+  }
+  if (j.join !== J.VERSION || (madeKey(canonKey(code)) && typeof j.proof2 === 'string')) {
+    if (typeof j.proof !== 'string' && typeof j.proof2 !== 'string') throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
+    const k = canonKey(code);
+    const proven = typeof j.proof2 === 'string'
+      ? sameHex(j.proof2, helloProof2(await proofKey(k, j.host), nonce, r.pin, j.host))
+      : sameHex(j.proof, helloProof(k, nonce, r.pin, j.host));
+    if (!proven) throw Object.assign(new Error('The host could not show it holds the clinic key.'), { noProof: true });
+    return { pin: r.pin, hostId: typeof j.host === 'string' ? j.host : '', name: cleanText(j.name, 80) };
+  }
+  const hostId = typeof j.host === 'string' ? j.host : '';
+  const post = async (pathname, obj) => {
+    const res = await request(new URL(pathname, url).href, {
+      method: 'POST', pin: r.pin, timeoutMs, headers: { 'content-type': 'application/json' }, body: JSON.stringify(obj),
+    });
+    let out = null;
+    try { out = JSON.parse(res.text); } catch (_) { /* below */ }
+    if (res.status === 429) throw Object.assign(new Error('Too many wrong tries.'), { tooMany: true, retryAfter: Number(out && out.retryAfter) || 0 });
+    if (res.status === 403) throw Object.assign(new Error('Wrong clinic key.'), { wrongCode: true });
+    if (res.status !== 200 || !out || out.ok !== true) throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
+    return out;
+  };
+  const start = J.laptopStart(code, hostId);
+  const a = await post('/lan/join1', { X: start.X });
+  const fin = J.laptopFinish(start.state, r.pin, a.Y, a.cB);
+  // The wrong key, or a look-alike: either way nothing is sent but word
+  // that the check failed, so the host's Cloud tab counts the wrong try now.
+  if (!fin) {
+    await post('/lan/join2', { sid: String(a.sid || ''), cA: '' }).catch(() => {});
+    throw Object.assign(new Error('Wrong clinic key.'), { wrongCode: true });
+  }
+  const b = await post('/lan/join2', { sid: String(a.sid || ''), cA: fin.cA });
+  const opened = J.unseal(fin.ke, String(a.sid || ''), b.sealed);
+  if (!opened || typeof opened.key !== 'string' || !opened.key) throw Object.assign(new Error('Not a clinic network host.'), { notHub: true });
+  return { pin: r.pin, hostId, name: cleanText(j.name, 80), key: opened.key };
+}
+
 /* ---------------- What went wrong, in plain words ---------------- */
 
 const MESSAGES = {
@@ -431,6 +493,9 @@ const MESSAGES = {
   wrong_key: () => 'The host answered, but refused the clinic key. Copy the connection code again from the host laptop, or type the key exactly as its Cloud tab shows it.',
   no_proof: (a) => `The laptop at ${a} could not show it holds this clinic key, so the key was not sent to it. Check the key against the host laptop: Admin → Cloud → Show connection code shows it (capitals, spaces and dashes do not matter) — or paste the host's whole connection code instead, which needs no typing. If this clinic network is listed twice, choose the other one.`,
   not_mmw: (a) => `Something answered at ${a}, but it is not a Mission Minded clinic network host.`,
+  // v0.0.24: the short clinic key (pairWithCode).
+  wrong_code: (a) => `The host at ${a} did not accept that clinic key. Check it against the host laptop: its Cloud tab shows the clinic key in large numbers (spaces and dashes do not matter). If this clinic network is listed twice, choose the other one — or paste the host's connection code instead.`,
+  too_many: () => 'The host has had too many wrong clinic key tries in the last few minutes, so it is not taking any for now. Wait five minutes and try again — or paste the host\'s connection code, which needs no clinic key. If nobody here typed a wrong key, tell whoever looks after the app: someone on this Wi-Fi may be guessing.',
   too_large: (a) => `The host at ${a} refused this laptop's latest changes as too large to send at once (more than 100 MB — usually many x-ray images together). They are kept on this laptop; ask whoever looks after the app.`,
 };
 const say = (code, addr) => MESSAGES[code](addr);
@@ -441,6 +506,8 @@ function classify(err) {
   if (err.pinMismatch) return 'pin_mismatch';
   if (err.status === 401) return 'wrong_key';
   if (err.noProof) return 'no_proof';
+  if (err.wrongCode) return 'wrong_code';
+  if (err.tooMany) return 'too_many';
   if (err.status === 413) return 'too_large';
   if (err.notHub) return 'not_mmw';
   // Something answered, but not in TLS: a plain web server, or another
@@ -516,7 +583,7 @@ module.exports = {
   normPin, isPin, showPin,
   beaconMessage, readBeacon, isQuery, QUERY,
   lanAddresses, broadcastTargets, hostBroadcastTargets, listen, scan, SCAN_PORTS_PER_ADDRESS, SCAN_URLS,
-  request, peerPin, firstOf, helloProof, helloProof2, proofKey, learnPin,
+  request, peerPin, firstOf, helloProof, helloProof2, proofKey, learnPin, pairWithCode,
   KEY_ALPHABET, canonKey, madeKey, ownKeyProblem,
   classify, explain, diagnose, MESSAGES,
 };

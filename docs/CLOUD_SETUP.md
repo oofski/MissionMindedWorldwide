@@ -389,27 +389,35 @@ Private networks and allow it there too, or type the host's address instead.
 3. Under **Host the clinic network on this laptop**, fill in the **Clinic
    network name** — the clinic's name and place is good; it is what the
    other laptops see in their list. **Clinic key (optional)**: leave it blank
-   and the app makes a long one, or choose your own that is easy to read out
-   and type (0.0.23 and later) — at least 8 letters or numbers; capitals do
-   not matter. Anyone who has the key can read and change the clinic's
-   records, so not a word anyone could guess. Press **Host the clinic
-   network**.
-4. The card **This laptop hosts the clinic network** shows the address the
-   other laptops reach it at (like `192.168.1.23:47800`), the laptops
-   connected now, and its **Security fingerprint**.
+   and the app makes a **6-digit** one, or choose your own (0.0.24 and later)
+   — at least 4 numbers or letters; 6 or more is safer. Press **Host the
+   clinic network**.
+4. The card **This laptop hosts the clinic network** shows the **clinic key
+   in large numbers** (like **482-913**) with what to do on the other
+   laptops, the address they reach it at (like `192.168.1.23:47800`), the
+   laptops connected now, and its **Security fingerprint**.
 
-Unless you chose one, the host makes its own clinic key (five groups of
-letters and numbers); it makes its own security certificate, and keeps both.
-**Show connection code** shows the code — and the key, for typing — only when
-asked. Like the internet server's, **the connection code is the clinic's
-password**.
+The clinic key is short on purpose: it is only what a laptop types to
+**join**. It is never sent over the Wi-Fi. The joining laptop and the host
+check they typed the same key without either sending it, and only then does
+the host hand the laptop the network's own password — long and random, made
+by the app, never shown or typed. Every wrong try is one guess, and the host
+stops taking them after 8 wrong tries from one laptop (30 from all) in ten
+minutes, and its card says how many there were. So a 6-digit key is safe
+here, where a short password would not be.
 
-**Change the clinic key** (on the host's card, 0.0.23 and later) sets a key you
-choose, or makes a new one if you leave it blank. The host carries on by
-itself; every other laptop joins again with the new key (**Join a different
-clinic network**, choose the host, type the new key) or the new connection
-code. All the laptops must run 0.0.23 or later to join a host with a key you
-chose.
+**Change the clinic key** (on the host's card) sets a key you choose, or makes
+a new 6-digit one if you leave it blank. **Laptops that have joined already
+stay joined** — the new key is only what the next laptop types. If a laptop
+was lost or stolen, tick **Also make every other laptop join again**: the
+network's password is made again too, and every other laptop joins again with
+the new key; their records are kept.
+
+**Show connection code** still gives a code to paste instead of typing — it
+holds the network's password, so like the internet server's, **the connection
+code is the clinic's password**. Every laptop must run **0.0.24 or later** to
+join with the short key: on an older laptop, update it first, or paste the
+connection code.
 
 ### Join it from every other laptop
 On each other laptop, on the same Wi-Fi:
@@ -417,10 +425,9 @@ On each other laptop, on the same Wi-Fi:
 - **In Admin → Cloud**, choose **Clinic network (no internet)**. Under
   **Join a clinic network** the clinic networks found on this Wi-Fi are
   listed (**Look again** searches again). Press **Choose** beside the
-  clinic's, type the **Clinic key** the host shows, and press **Join** — or
-  paste the host's connection code and press **Join with code**. The key is
-  shown as you type it, and capitals, spaces and dashes do not matter
-  (0.0.23 and later).
+  clinic's, type the **Clinic key** the host shows (like **482-913**), and
+  press **Join** — or paste the host's connection code and press **Join with
+  code**. The key is shown as you type it; spaces and dashes do not matter.
 - **On a new laptop's sign-in screen**, press **Join a clinic already set
   up**: the clinic networks heard on this Wi-Fi are listed there too.
   **Choose**, type the clinic key, **Connect and sync** — or paste the
@@ -430,14 +437,48 @@ On each other laptop, on the same Wi-Fi:
   with the clinic key.
 - **Listed twice under the same name?** Beacons prove nothing by
   themselves, so another device can copy the clinic's name. Choose either:
-  the wrong one cannot show it holds the clinic key, and says so — then
-  choose the other, or paste the connection code.
+  the wrong one does not accept the clinic key, and says so — then choose the
+  other, or paste the connection code.
 
-Before a laptop sends the clinic key, the host must prove it holds the same
-key; from then on the laptop accepts only that host's certificate. So a
-look-alike laptop on the Wi-Fi learns nothing, and a laptop that is not the
+The clinic key is never sent: the laptop and the host prove to each other
+they hold it, bound to the host's security certificate, and from then on the
+laptop accepts only that certificate. So a look-alike laptop on the Wi-Fi
+learns nothing it could guess the key from, and a laptop that is not the
 clinic's host is refused: "The laptop at … is not this clinic's host: its
 security certificate does not match, so nothing was sent to it."
+
+### How do I know a laptop is in?
+- **The sidebar**, bottom left, on every screen: **Clinic network:
+  connected — Synced 2 min ago** means the laptop is in and up to date.
+  **Clinic network: not reaching it** means it joined but cannot reach the
+  host right now (its records are kept and go across when it can). **Not
+  connected** means it has not joined anything.
+- **Admin → Cloud** on the laptop says it in so many words: "**You're in:
+  this laptop is connected to** …", with when it last synced.
+- **On the host**, the laptop appears under **Laptops connected now** within
+  a minute.
+- To be sure, check in a test patient on one laptop and see them appear on
+  another's Arrivals within a minute.
+
+### Still not joining? Check the router
+If the key is right and a laptop still cannot reach the host, the cause is
+almost always the Wi-Fi, not the key:
+- **Same network.** Every laptop on the router's own Wi-Fi name — not a guest
+  network, a phone hotspot or a neighbour's Wi-Fi. A dual-band router can
+  show two names (2.4 GHz and 5 GHz); either works, but check the router does
+  not keep them apart.
+- **Client isolation off.** Many routers have a setting that stops devices on
+  the Wi-Fi talking to each other — called *AP isolation*, *client
+  isolation*, *wireless isolation* or *guest mode*. It must be **off** for the
+  clinic network. It is usually on for guest networks and some "public"
+  hotspots.
+- **Private network on the host** (Windows), and the firewall allowed — see
+  *Windows on the host laptop*.
+- **Type the address.** If the host is not listed, type the address its card
+  shows into **Host address** with the clinic key: some routers block the
+  announcements that make the list.
+- Then press **Test the clinic network** on the joining laptop: it says which
+  of these it is.
 
 ### Test the clinic network
 On a joined laptop, **Admin → Cloud → Test the clinic network** says what is
@@ -450,7 +491,9 @@ wrong, in the same words the **Connection** card uses while it retries:
 | "A computer answered at …, but Mission Minded is not hosting there." | The app is closed on the host, or **Stop hosting** was pressed. Open it / host again |
 | "The laptop at … is not this clinic's host: its security certificate does not match…" | Another device has that address — or the host's clinic network was erased and hosted again: join with its new connection code |
 | "The host answered, but refused the clinic key." | Type the key exactly as the host's Cloud tab shows it, or paste a fresh connection code |
-| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | The key typed does not match the host's. On the host, **Show connection code** shows the key: type it as shown (capitals, spaces and dashes do not matter from 0.0.23 on) — or paste the whole connection code, which needs no typing. Still refused? On the host, **Change the clinic key** to one that is easy to type, and join with that. If the clinic network is listed twice, choose the other one |
+| "The host at … did not accept that clinic key." | The key typed is not the one the host's card shows in large numbers. Type it again (spaces and dashes do not matter) — or paste the connection code. If the clinic network is listed twice, choose the other one |
+| "The host has had too many wrong clinic key tries in the last few minutes…" | Wait five minutes and try again, or paste the connection code. If nobody mistyped the key, someone on the Wi-Fi may be guessing it: on the host, **Change the clinic key** |
+| "The laptop at … could not show it holds this clinic key, so the key was not sent to it." | The host runs an older version (before 0.0.24), or the long key it showed was typed and does not match. Update the host — or paste its connection code, which needs no typing. If the clinic network is listed twice, choose the other one |
 | "Something answered at …, but it is not a Mission Minded clinic network host." | Another program has the host's address or port now. Check the address on the host's Cloud tab |
 
 ### When the host laptop is off or asleep
@@ -576,10 +619,14 @@ laptop. Keep making backups under **Backup & Export**.
   was shown on.
 - **On the clinic network** the host's certificate is its own, so every
   laptop checks it by its fingerprint, carried in the connection code (or
-  learned once the host has proved it holds the clinic key), and refuses any
-  other before sending anything. The host makes the clinic key itself. Its
-  announcements on the Wi-Fi carry its name and address, never the key. Use
-  a Wi-Fi password on the router.
+  learned when it joins with the clinic key), and refuses any other before
+  sending anything. The short clinic key is never sent: a joining laptop and
+  the host prove to each other they hold it (a password-authenticated key
+  exchange, SPAKE2), and only then does the host send the network's own
+  password — long, random and made by the app — sealed for that laptop. Each
+  wrong try is one guess, counted and limited by the host. Its announcements
+  on the Wi-Fi carry its name and address, never a key. Use a Wi-Fi password
+  on the router.
 - Backups do not contain the clinic key. A database backup, or the ZIP made
   for a hard drive, is the clinic's records as **Disconnect** leaves them; a
   laptop put back from one is connected again under **Admin → Cloud**.

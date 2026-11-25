@@ -1416,29 +1416,45 @@ export function renderAdmin(ctx, params = {}) {
           finally { againBtn.disabled = false; }
         },
       }, [icon('refresh', { size: 16 }), h.paused ? 'Host here anyway' : 'Host again']);
-      // v0.0.23: a key the clinic chooses — easier to read out and type than
-      // the one the app made — or a new one made here.
+      // v0.0.24: the short clinic key the next laptop types — one the clinic
+      // chooses, or a new one made here. Laptops already joined stay joined,
+      // unless every one is to join again (a laptop lost or stolen).
       const keyBtn = el('button', {
         class: 'btn btn--ghost',
         onClick: async () => {
-          const newKey = el('input', { class: 'input lan-new-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'Leave blank, and the app makes a new one', style: 'font-family:var(--font-mono);' });
+          const newKey = el('input', { class: 'input lan-new-key', autocomplete: 'off', spellcheck: 'false', inputmode: 'numeric', placeholder: 'Leave blank for a new 6-digit key', style: 'font-family:var(--font-mono);' });
+          const signOut = el('input', { type: 'checkbox', class: 'lan-sign-out' });
           const ok = await modal({
             title: 'Change the clinic key?',
             body: el('div', {}, [
-              el('p', { style: 'margin:0 0 var(--space-3);' }, ['Choose a key that is easy to read out and type — at least 8 letters or numbers; capitals do not matter. Anyone who has it can read and change the clinic\'s records, so not a word anyone could guess. Or leave it blank, and the app makes a new long one.']),
+              el('p', { style: 'margin:0 0 var(--space-3);' }, ['Type the new key — numbers are easiest, at least 4 (6 or more is safer); spaces and dashes do not matter. Or leave it blank, and the app makes a new 6-digit one.']),
               el('label', { class: 'field' }, [el('span', { class: 'field-label' }, ['New clinic key']), newKey]),
-              el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0 0;' }, ['Every other laptop then joins again with the new key: Admin → Cloud → Join a different clinic network, choose this one and type it — or paste the new connection code. This laptop carries on by itself, and the records are kept.']),
+              el('p', { class: 'subtle small', style: 'margin:var(--space-3) 0;' }, ['Laptops that have joined already stay joined. The new key is only what the next laptop types.']),
+              el('label', { class: 'check-row', style: 'display:flex; gap:8px; align-items:flex-start;' }, [signOut,
+                el('span', {}, ['Also make every other laptop join again — if a laptop was lost or stolen. They join with the new key; their records are kept.'])]),
             ]),
             confirmText: 'Change the key', cancelText: 'Cancel',
           });
           if (!ok) return;
           try {
-            await api.hubSetKey(newKey.value.trim());
-            toast('The clinic key is changed. Show connection code shows the new one.', 'success');
+            const r = await api.hubSetJoinCode(newKey.value.trim(), signOut.checked);
+            toast(`The clinic key is now ${(r && r.joinCode) || 'changed'}.${signOut.checked ? ' Every other laptop joins again with it.' : ''}`, 'success');
             paint();
           } catch (e) { toast(e.message, 'error'); }
         },
       }, [icon('lock', { size: 16 }), 'Change the clinic key']);
+      // v0.0.24: the key the next laptop types, in large print — and wrong
+      // tries lately, which the host counts and limits.
+      const fails = Number(h.joinFailures) || 0;
+      const codePanel = h.joinCode ? el('div', { class: 'lan-code-panel' }, [
+        el('div', { class: 'lan-code-label' }, ['Clinic key — type this on each laptop that joins']),
+        el('div', { class: 'lan-join-code' }, [h.joinCode]),
+        el('div', { class: 'subtle small' }, ['On the other laptop: Admin → Cloud → Clinic network → choose ', el('strong', {}, [h.name || 'this clinic network']), ', type this key, press Join. Spaces and dashes do not matter.']),
+        fails ? el('div', { class: 'banner ' + (fails >= 5 ? 'banner--alert' : 'banner--warn') + ' lan-join-fails', style: 'margin-top:var(--space-3);' }, [icon('alert', { size: 14 }), el('span', {}, [
+          `${fails} wrong clinic key ${fails === 1 ? 'try' : 'tries'} in the last 10 minutes.`,
+          fails >= 5 ? ' If nobody here mistyped it, someone on this Wi-Fi may be guessing — change the clinic key. The host stops taking tries for a while when there are too many.' : '',
+        ])]) : null,
+      ]) : null;
       return el('div', { class: 'card lan-hosting' }, [
         el('div', { class: 'card-head-row' }, [
           el('div', { class: 'card-title' }, [icon('database', { size: 15 }), 'This laptop hosts the clinic network']),
@@ -1454,6 +1470,7 @@ export function renderAdmin(ctx, params = {}) {
         h.running && !onOwn ? el('div', { class: 'banner banner--warn lan-not-own' }, [icon('alert', { size: 14 }), el('span', {}, [
           `This laptop hosts the clinic network but does not sync with it — it is ${st.configured ? `connected to ${whereNow()}` : 'not connected to any server'}. Its own records do not reach the other laptops, nor theirs this one. Sync it with the clinic network, or stop hosting.`,
         ])]) : null,
+        codePanel,
         el('div', { class: 'kv-grid', style: 'margin:0 0 var(--space-3);' }, [
           kv('Clinic network', h.name || 'Clinic network'),
           kv('Other laptops reach it at', reach.length ? reach[0].url.replace(/^https:\/\//, '') : 'Not on a network', { class: 'kv-val lan-address' }),
@@ -1505,6 +1522,7 @@ export function renderAdmin(ctx, params = {}) {
       }, [icon('refresh', { size: 16 }), 'Test the clinic network']);
       return el('div', { class: 'card lan-joined' }, [
         el('div', { class: 'card-title' }, [icon('globe', { size: 15 }), 'Clinic network']),
+        inBanner(),
         el('div', { class: 'kv-grid', style: 'margin:0 0 var(--space-3);' }, [
           el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, ['Clinic network']), el('span', { class: 'kv-val' }, [st.lanName || 'Clinic network'])]),
           el('div', { class: 'kv' }, [el('span', { class: 'kv-label' }, ['Host']), el('span', { class: 'kv-val' }, [hostOf(st.url)])]),
@@ -1518,6 +1536,28 @@ export function renderAdmin(ctx, params = {}) {
       ]);
     }
 
+    // v0.0.24: "How do I know I'm in?" — said in so many words.
+    function inBanner() {
+      const when = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); };
+      if (!st.online) {
+        return el('div', { class: 'banner banner--warn lan-in', style: 'margin:0 0 var(--space-3);' }, [icon('alert', { size: 16 }), el('span', {}, [
+          el('strong', {}, ['Joined, but sync is paused. ']), 'Switch sync back on below to send and receive records.'])]);
+      }
+      if (st.lastError) {
+        return el('div', { class: 'banner banner--warn lan-in', style: 'margin:0 0 var(--space-3);' }, [icon('alert', { size: 16 }), el('span', {}, [
+          el('strong', {}, ['Joined, but not reaching the host right now. ']),
+          'Records made here are kept and go across as soon as it answers. Press Test the clinic network to see why.',
+          st.lastOk ? ` Last synced at ${when(st.lastOk)}.` : ''])]);
+      }
+      if (!st.lastOk) {
+        return el('div', { class: 'banner banner--info lan-in', style: 'margin:0 0 var(--space-3);' }, [icon('refresh', { size: 16 }), el('span', {}, [
+          el('strong', {}, ['Joined — syncing for the first time. ']), 'This can take a minute.'])]);
+      }
+      return el('div', { class: 'banner banner--success lan-in', style: 'margin:0 0 var(--space-3);' }, [icon('checkCircle', { size: 16 }), el('span', {}, [
+        el('strong', {}, [`You're in: this laptop is connected to ${st.lanName || 'the clinic network'}. `]),
+        `Last synced at ${when(st.lastOk)}. The sidebar says "Clinic network: connected" while it stays that way.`])]);
+    }
+
     // Joining: the hosts this laptop hears, or a code, or a typed address.
     function joinCard() {
       let picked = null;   // the host chosen from the list: { hostId, fp, name }
@@ -1527,7 +1567,7 @@ export function renderAdmin(ctx, params = {}) {
       const addrInput = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: '192.168.1.23:47800' });
       // Shown as typed (v0.0.23): it is copied from the host's screen, and a
       // hidden box hid the very typo that kept the laptop from joining.
-      const keyIn = el('input', { class: 'input lan-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'As the host shows it, like ABCDE-FGHJK-…', style: 'font-family:var(--font-mono);' });
+      const keyIn = el('input', { class: 'input lan-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'Like 482-913', style: 'font-family:var(--font-mono);' });
       addrInput.addEventListener('input', () => { picked = null; });
       const codeIn = el('input', { class: 'input', autocomplete: 'off', spellcheck: 'false', placeholder: 'MMW1-…', style: 'font-family:var(--font-mono);' });
       const codeJoinBtn = el('button', { class: 'btn btn--primary', onClick: () => joinWithCode() }, [icon('globe', { size: 16 }), 'Join with code']);
@@ -1584,7 +1624,7 @@ export function renderAdmin(ctx, params = {}) {
           el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Host address']), addrInput,
             el('span', { class: 'field-hint' }, ['Filled in when you choose a host above. Not listed? Type the address the host\'s Cloud tab shows.'])]),
           el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key']), keyIn,
-            el('span', { class: 'field-hint' }, ['On the host: Admin → Cloud → Show connection code shows it. Capitals, spaces and dashes do not matter.'])]),
+            el('span', { class: 'field-hint' }, ['The host laptop\'s Cloud tab shows it in large numbers. Spaces and dashes do not matter.'])]),
         ]),
         el('div', { class: 'action-row' }, [joinBtn]),
         el('div', { class: 'login-divider' }, [el('span', {}, ['or paste a connection code'])]),
@@ -1605,7 +1645,7 @@ export function renderAdmin(ctx, params = {}) {
       });
       // v0.0.23: the clinic's own key, if it wants one. Hosted before, it
       // has its key already (Change the clinic key, once hosting).
-      const ownKeyIn = before ? null : el('input', { class: 'input lan-own-key', autocomplete: 'off', spellcheck: 'false', placeholder: 'Leave blank, and the app makes one', style: 'font-family:var(--font-mono);' });
+      const ownKeyIn = before ? null : el('input', { class: 'input lan-own-key', autocomplete: 'off', spellcheck: 'false', inputmode: 'numeric', placeholder: 'Leave blank for a 6-digit key', style: 'font-family:var(--font-mono);' });
       const hostBtn = el('button', {
         class: 'btn btn--primary',
         onClick: async () => {
@@ -1651,7 +1691,7 @@ export function renderAdmin(ctx, params = {}) {
           el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic network name']), nameIn,
             el('span', { class: 'field-hint' }, ['What the other laptops see in their list — the clinic\'s name and place is good.'])]),
           ownKeyIn ? el('label', { class: 'field span-2' }, [el('span', { class: 'field-label' }, ['Clinic key (optional)']), ownKeyIn,
-            el('span', { class: 'field-hint' }, ['Leave it blank, and the app makes a long one. Or choose your own, easy to read out and type: at least 8 letters or numbers; capitals do not matter. Anyone who has it can read and change the clinic\'s records, so not a word anyone could guess.'])]) : null,
+            el('span', { class: 'field-hint' }, ['What the other laptops type to join. Leave it blank, and the app makes a 6-digit one. Or choose your own: at least 4 numbers or letters (6 or more is safer). You can change it later.'])]) : null,
         ]),
         el('div', { class: 'action-row' }, [hostBtn, eraseBtn]),
       ]);

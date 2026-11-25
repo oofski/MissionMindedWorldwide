@@ -20,6 +20,7 @@ const cloud = require('./cloud');
 const hub = require('./hub');
 const cfsetup = require('./cfsetup');
 const lan = require('./lan');
+const joincode = require('./joincode');
 const usb = require('./usb');
 const xrayFolder = require('./xrayFolder');
 const zipStore = require('./zipStore');
@@ -173,6 +174,7 @@ const PERMS = {
   'hub:start': ['admin'],
   // v0.0.23: choosing the clinic network's key, or a new one made here.
   'hub:setKey': ['admin'],
+  'hub:setJoinCode': ['admin'],
   'hub:stop': ['admin'],
   'hub:firewall': ['admin'],
   'patients:arrivalCheck': ['admin', 'registration', 'emt', 'triage', 'doctor', 'hygienist'],
@@ -402,14 +404,22 @@ function register(getMainWindow) {
     const pinIn = lanT ? lan.normPin(lanT.pin) : '';
     const already = saved.configured && !!String(url || '').trim() && String(key || '') === saved.key
       && (lanT ? !!pinIn && pinIn === saved.lanPin : cloud.normalizeUrl(url) === cloud.normalizeUrl(saved.url) && !saved.lanPin);
-    if (!currentUser && !already && !joinOpen()) {
-      throw new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
-    }
+    // v0.0.24: the short clinic key typed for the host this laptop is
+    // joined to already — the network's password it stands for is only
+    // known once the host has been asked (below), and is then checked.
+    const sameHostTyped = !already && !!lanT && !pinIn && saved.configured && !!saved.lanPin
+      && !!lanT.hostId && String(lanT.hostId) === saved.lanHost;
+    const refuseSignedOut = () => new Error('This computer already has its own administrator password. Sign in as an administrator and connect it under Admin → Cloud.');
+    if (!currentUser && !already && !sameHostTyped && !joinOpen()) throw refuseSignedOut();
     if (!String(key || '').trim()) throw new Error('Enter the clinic key as well as the address.');
     const health = await cloud.testConnection(url, key, lanT ? { lan: lanT } : {});
     const target = lanT ? health.lan : null;
     const joinUrl = target ? health.url : url;
-    const same = already || (!!target && saved.configured && target.pin === saved.lanPin && String(key) === saved.key);
+    // The network's password a join with the short key brought, or the key.
+    const useKey = target ? (cloud.pairedKeyFor(target.pin, key) || key) : key;
+    const sameNow = !!target && saved.configured && target.pin === saved.lanPin && String(useKey) === saved.key;
+    if (!currentUser && !already && !sameNow && !joinOpen()) throw refuseSignedOut();
+    const same = already || sameNow;
     const elsewhere = saved.configured && cloud.identityOf(joinUrl, target && target.pin) !== cloud.identityOf(saved.url, saved.lanPin);
     // A DIFFERENT server, for a laptop already connected — one tried on a
     // trial server, joining the clinic's — moves every record here to it.
@@ -427,7 +437,7 @@ function register(getMainWindow) {
         stopsHosting: !!h && (h.running || h.hosting) };
     }
     if (!same) {
-      cloud.applyConfig({ url: joinUrl, key, online: true, ...(target ? { lan: target } : {}) });
+      cloud.applyConfig({ url: joinUrl, key: useKey, online: true, ...(target ? { lan: target } : {}) });
       await leaveOwnHub(saved);
       db.audit(currentUser, 'cloud.join', 'settings', null, 'Joined ' + (target ? networkLabel(target.name, joinUrl) : cloud.normalizeUrl(url)));
     } else if (target && cloud.lanUrl(health.url) !== cloud.normalizeUrl(saved.url)) {
@@ -515,15 +525,16 @@ function register(getMainWindow) {
   // existing move: the cursor starts again and everything here is sent.
   handle('hub:start', async ({ name, move, key } = {}) => {
     const saved = db.getSyncMeta();
-    // A key the clinic chose (v0.0.23): refused before anything is made.
+    // A clinic key the clinic chose — since v0.0.24 the short one the other
+    // laptops type (joincode.js): refused before anything is made.
     const chosen = String(key == null ? '' : key).trim();
-    if (chosen && lan.ownKeyProblem(chosen)) throw new Error(lan.ownKeyProblem(chosen));
+    if (chosen && joincode.codeProblem(chosen)) throw new Error(joincode.codeProblem(chosen));
     // Which clinic network this laptop hosts, if it ever has — asked without
     // making one, so a move that is not confirmed leaves nothing behind.
     const ownId = hub.ownHostId();
     const onOwn = saved.configured && !!ownId && saved.lanHost === ownId;
     if (saved.configured && !onOwn && !move) return { moveFrom: savedLabel(saved) };
-    if (chosen) hub.setKey(chosen);
+    if (chosen) hub.setJoinCode(chosen);
     await hub.start({ name, version: appVersion(), selfDevice: db.ensureDeviceId() });
     const t = hub.ownTarget();
     // Already joined to it (hosting again, or after a restart on a new
@@ -545,6 +556,26 @@ function register(getMainWindow) {
     if (saved.configured && saved.lanHost === ownId) cloud.applyConfig({ key: k });
     db.audit(currentUser, 'hub.key', 'settings', null, String(key || '').trim()
       ? 'Clinic network key changed to one chosen here' : 'Clinic network key changed to a new one made here');
+    return hub.status();
+  });
+
+  // v0.0.24: the short clinic key the next laptop types — one the clinic
+  // chooses, or a new one (left blank). Laptops already joined stay joined,
+  // unless signOutOthers: then the network's password is made again too, and
+  // every other laptop joins again with the clinic key (a lost laptop).
+  handle('hub:setJoinCode', async ({ code, signOutOthers } = {}) => {
+    const ownId = hub.ownHostId();
+    if (!ownId) throw new Error('This laptop does not host a clinic network.');
+    const c = String(code == null ? '' : code).trim();
+    if (c && joincode.codeProblem(c)) throw new Error(joincode.codeProblem(c));
+    hub.setJoinCode(c);
+    if (signOutOthers) {
+      const saved = db.getSyncMeta();
+      const k = hub.setKey('');
+      if (saved.configured && saved.lanHost === ownId) cloud.applyConfig({ key: k });
+    }
+    db.audit(currentUser, 'hub.joincode', 'settings', null, (c ? 'Clinic key changed to one chosen here' : 'Clinic key changed to a new one made here')
+      + (signOutOthers ? '; every other laptop signed out of the clinic network' : ''));
     return hub.status();
   });
 

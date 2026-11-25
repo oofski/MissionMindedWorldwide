@@ -33,6 +33,7 @@ const CHANNELS = [
   'hub:status', 'hub:start', 'hub:stop', 'hub:firewall', 'lan:scan',
   // v0.0.23: the clinic network's key, chosen or made again.
   'hub:setKey',
+  'hub:setJoinCode',
   'data:reset',
 ];
 

@@ -29,6 +29,7 @@ const os = require('os');
 const dgram = require('dgram');
 const Database = require('better-sqlite3');
 const lan = require('./lan');
+const J = require('./joincode');
 
 const HUB_FILE = 'clinic-network.db';
 const WORKER_PATH = path.join(__dirname, '..', '..', 'cloud', 'worker.js');
@@ -76,7 +77,24 @@ const state = {
   // What worker.js checks the key against while hosting — changed in place
   // when the key is (setKey) — and the join proof's key, made from it.
   env: null, proofKey: null,
+  // v0.0.24: joining with the short clinic key — the exchanges under way,
+  // and every try in the last JOIN_WINDOW_MS, to limit wrong ones.
+  joins: new Map(), joinTries: [],
+  // Requests refused the network's password, by address (see authLimited).
+  authFails: new Map(),
 };
+// How many wrong clinic key tries the host takes: from one address, and from
+// all of them, in ten minutes. Each try is one guess at the key, so at these
+// limits a six-digit key holds for months against someone guessing all day —
+// and the host's Cloud tab says when it is happening.
+const JOIN_WINDOW_MS = 10 * 60 * 1000;
+const JOIN_TRIES_PER_ADDRESS = 8;
+const JOIN_TRIES_ALL = 30;
+const JOIN_SESSION_MS = 60 * 1000;
+const MAX_JOINS = 64;
+// Requests refused the network's password from one address in ten minutes,
+// before that address is refused without being checked at all.
+const AUTH_FAILS_PER_ADDRESS = 30;
 
 /* ---------------- D1, over better-sqlite3 ---------------- */
 
@@ -216,6 +234,7 @@ function open() {
       setMeta('cert', cert);
       setMeta('private_key', key);
       setMeta('key', makeClinicKey());
+      setMeta('join_code', J.makeCode());
       setMeta('created_at', new Date().toISOString());
     })();
   }
@@ -239,6 +258,30 @@ function setKey(key) {
   if (state.env) state.env.CLINIC_KEY = k;
   state.proofKey = null;
   return k;
+}
+// v0.0.24: the short clinic key people type to join (joincode.js). A host
+// made before this build gets one now: the key it was given by hand in
+// 0.0.23, which is what its clinic already types, or else a new one.
+function joinCode() {
+  open();
+  let c = getMeta('join_code');
+  if (!c) {
+    const k = getMeta('key');
+    c = !lan.madeKey(k) && k && !J.codeProblem(k) ? k : J.makeCode();
+    setMeta('join_code', c);
+  }
+  return c;
+}
+// A clinic key the clinic chooses, or a new one made here (left blank).
+// Laptops already joined stay joined: this is only what the next one types.
+function setJoinCode(code) {
+  open();
+  const chosen = String(code == null ? '' : code).trim();
+  if (chosen) { const problem = J.codeProblem(chosen); if (problem) throw new Error(problem); }
+  const c = chosen ? J.showCode(chosen) : J.makeCode();
+  setMeta('join_code', c);
+  state.joins.clear();
+  return c;
 }
 // The join proof's key, made once for each key (it takes a moment).
 async function proofKeyOf(id) {
@@ -350,24 +393,35 @@ async function onRequest(req, res, worker, env) {
     if (u.pathname === '/checkin' || u.pathname.startsWith('/checkin/')) {
       return refuse(req, res, 404, { ok: false, error: 'Online pre-registration is not available on the clinic network. Patients pre-register from the internet server\'s link; here, check them in at the front desk.' });
     }
-    // The join proof (lan.learnPin): answers only with an HMAC under the key.
+    // Who this host is, and that it takes the short clinic key (join). The
+    // join proofs of 0.0.22 and 0.0.23 (lan.learnPin) — for a laptop not yet
+    // updated — only with a key the app made: from them, a key chosen by
+    // hand could be guessed offline.
     if (u.pathname === '/lan/hello') {
       const nonce = u.searchParams.get('nonce') || '';
       if (req.method !== 'GET' || !/^[0-9a-f]{16,128}$/.test(nonce)) return refuse(req, res, 400, { ok: false, error: 'bad request' });
       const id = identity();
-      const answer = { ok: true, app: lan.APP_ID, host: id.hostId, name: id.name, proof2: lan.helloProof2(await proofKeyOf(id), nonce, id.pin, id.hostId) };
-      // The old proof too — for a laptop on 0.0.22 — only with a key the app
-      // made: from it, a short key the clinic chose could be guessed.
-      if (lan.madeKey(id.key)) answer.proof = lan.helloProof(id.key, nonce, id.pin, id.hostId);
+      const answer = { ok: true, app: lan.APP_ID, host: id.hostId, name: id.name, join: J.VERSION };
+      if (lan.madeKey(id.key)) {
+        answer.proof2 = lan.helloProof2(await proofKeyOf(id), nonce, id.pin, id.hostId);
+        answer.proof = lan.helloProof(id.key, nonce, id.pin, id.hostId);
+      }
       return sendJson(res, 200, answer);
     }
+    if (u.pathname === '/lan/join1' || u.pathname === '/lan/join2') return await onJoin(req, res, u.pathname);
     const method = String(req.method || 'GET').toUpperCase();
     // Everything under /v1/ needs the clinic key (worker.js answers OPTIONS
     // before it looks). Without it, refused here, before a byte of the body
     // is kept.
     const api = u.pathname === '/v1/' || u.pathname.startsWith('/v1/');
-    const authed = api && keyOk(req.headers.authorization, env.CLINIC_KEY);
-    if (api && method !== 'OPTIONS' && !authed) return refuse(req, res, 401, { ok: false, error: 'unauthorized' });
+    // An address refused the password many times lately is refused without
+    // a check (v0.0.24), so a password chosen by hand cannot be guessed here.
+    const limited = api && method !== 'OPTIONS' && authLimited(req);
+    const authed = api && !limited && keyOk(req.headers.authorization, env.CLINIC_KEY);
+    if (api && method !== 'OPTIONS' && !authed) {
+      if (!limited) noteAuthFail(req);
+      return refuse(req, res, 401, { ok: false, error: 'unauthorized' });
+    }
     const body = (method === 'GET' || method === 'HEAD') ? null
       : await readBody(req, authed ? MAX_BODY : PRE_AUTH_BODY, { drain: authed });
     const headers = {};
@@ -385,6 +439,85 @@ async function onRequest(req, res, worker, env) {
     if (!res.headersSent) sendJson(res, e && e.status ? e.status : 500, { ok: false, error: (e && e.message) || 'error' });
     else res.destroy();
   }
+}
+
+/* ---------------- Joining with the short clinic key (v0.0.24) ---------------- */
+
+const addressOf = (req) => String((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+function pruneJoins(now) {
+  state.joinTries = state.joinTries.filter((t) => now - t.at < JOIN_WINDOW_MS);
+  for (const [sid, j] of state.joins) if (now - j.at >= JOIN_SESSION_MS) state.joins.delete(sid);
+}
+// A try that has not ended in a laptop joining. One under way counts, so a
+// flood of them at once is limited too.
+const wrongTries = (now) => state.joinTries.filter((t) => !t.ok);
+// Wrong clinic key tries in the last ten minutes, for the host's Cloud tab:
+// ones that failed, or were left unfinished (a laptop of this build says
+// when its check fails; one guessing need not).
+function joinFailures() {
+  const now = Date.now();
+  pruneJoins(now);
+  return state.joinTries.filter((t) => !t.ok && (t.failed || now - t.at >= 15000)).length;
+}
+async function onJoin(req, res, pathname) {
+  if (String(req.method || '').toUpperCase() !== 'POST') return refuse(req, res, 405, { ok: false, error: 'POST only' });
+  let body = null;
+  try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) { body = null; }
+  if (!body || typeof body !== 'object') return sendJson(res, 400, { ok: false, error: 'bad request' });
+  const now = Date.now();
+  pruneJoins(now);
+  const address = addressOf(req);
+  if (pathname === '/lan/join1') {
+    const wrong = wrongTries(now);
+    const mine = wrong.filter((t) => t.address === address);
+    if (mine.length >= JOIN_TRIES_PER_ADDRESS || wrong.length >= JOIN_TRIES_ALL) {
+      const oldest = (mine.length >= JOIN_TRIES_PER_ADDRESS ? mine : wrong)[0];
+      const retryAfter = Math.max(1, Math.ceil((oldest.at + JOIN_WINDOW_MS - now) / 1000));
+      return sendJson(res, 429, { ok: false, error: 'too many tries', retryAfter });
+    }
+    const id = identity();
+    const a = J.hostAnswer(joinCode(), id.hostId, id.pin, typeof body.X === 'string' ? body.X : '');
+    if (!a) return sendJson(res, 400, { ok: false, error: 'bad request' });
+    const sid = crypto.randomBytes(16).toString('hex');
+    const tryRec = { at: now, address, ok: false, failed: false };
+    state.joinTries.push(tryRec);
+    while (state.joins.size >= MAX_JOINS) state.joins.delete(state.joins.keys().next().value);
+    state.joins.set(sid, { at: now, ke: a.ke, expectA: a.expectA, tryRec });
+    return sendJson(res, 200, { ok: true, sid, Y: a.Y, cB: a.cB });
+  }
+  const sid = typeof body.sid === 'string' ? body.sid : '';
+  const j = state.joins.get(sid);
+  state.joins.delete(sid);
+  if (!j || !J.sameHex(body.cA, j.expectA)) {
+    if (j) j.tryRec.failed = true;
+    return sendJson(res, 403, { ok: false, error: 'wrong clinic key' });
+  }
+  j.tryRec.ok = true;
+  // A laptop that has just joined is not one guessing the password.
+  state.authFails.delete(address);
+  return sendJson(res, 200, { ok: true, sealed: J.seal(j.ke, sid, { key: identity().key }) });
+}
+
+// Requests refused the network's password, by address, in ten minutes.
+function recentAuthFails(address, now) {
+  const list = (state.authFails.get(address) || []).filter((t) => now - t < JOIN_WINDOW_MS);
+  if (list.length) state.authFails.set(address, list); else state.authFails.delete(address);
+  return list;
+}
+function authLimited(req) {
+  const a = addressOf(req);
+  if (isLoopback(a)) return false;
+  return recentAuthFails(a, Date.now()).length >= AUTH_FAILS_PER_ADDRESS;
+}
+function noteAuthFail(req) {
+  const a = addressOf(req);
+  if (isLoopback(a)) return;
+  const now = Date.now();
+  const list = recentAuthFails(a, now);
+  list.push(now);
+  state.authFails.set(a, list);
+  // Never without end: the oldest addresses go first.
+  while (state.authFails.size > 1024) state.authFails.delete(state.authFails.keys().next().value);
 }
 
 // The limits above, applied as each connection arrives — before TLS starts
@@ -565,6 +698,7 @@ async function stop({ keepHosting = false } = {}) {
   state.server = null;
   state.env = null;
   state.laptops.clear();
+  state.joins.clear();
   if (server) {
     await new Promise((r) => {
       server.close(() => r());
@@ -624,6 +758,7 @@ function shutdown() {
   state.server = null;
   state.env = null;
   state.laptops.clear();
+  state.joins.clear();
   if (server) {
     try { server.close(); if (server.closeAllConnections) server.closeAllConnections(); } catch (_) { /* closing anyway */ }
   }
@@ -706,6 +841,8 @@ function status() {
   return {
     running: !!state.server, hasData, hosting: getMeta('hosting') === '1',
     name: id.name, port, hostId: id.hostId, pin: id.pin, pinShown: lan.showPin(id.pin),
+    // v0.0.24: what the next laptop types, and wrong tries lately.
+    joinCode: J.showCode(joinCode()), joinFailures: joinFailures(),
     addresses: lan.lanAddresses().map((a) => ({ address: a.address, iface: a.iface, preferred: a.preferred, url: port ? `https://${a.address}:${port}` : '' })),
     laptops, error: state.error, beaconError: state.beaconError, computer: os.hostname(),
     // Waiting for the clinic's Wi-Fi (see resume): the networks it hosts on,
@@ -715,7 +852,11 @@ function status() {
 }
 
 module.exports = {
-  HUB_FILE, defaults, init, open, identity, setKey, start, stop, resume, erase, shutdown,
+  HUB_FILE, defaults, init, open, identity, setKey, joinCode, setJoinCode, start, stop, resume, erase, shutdown,
+  JOIN_TRIES_PER_ADDRESS, JOIN_TRIES_ALL, AUTH_FAILS_PER_ADDRESS,
+  // for the tests
+  _resetJoinLimits: () => { state.joinTries = []; state.joins.clear(); state.authFails.clear(); },
+  _authLimited: authLimited, _noteAuthFail: noteAuthFail,
   status, shareUrl, ownTarget, ownHostId, runningHostId, networkOf,
   makeClinicKey, makeCertificate, d1, loadWorker, keyOk, computerName, MAX_LAPTOPS, PRE_AUTH_BODY, MAX_CONNECTIONS, PER_ADDRESS, HANDSHAKE_MS,
   firewallScript, firewallCommand, allowThroughFirewall, FIREWALL_RULE,

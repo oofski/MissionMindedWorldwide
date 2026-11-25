@@ -103,6 +103,37 @@ let lastNav = { name: 'dashboard', params: {} };
 // never interrupted.
 const LIVE_VIEWS = new Set(['dashboard', 'emt', 'provider', 'hygienist', 'checkout', 'records', 'management']);
 
+// The sidebar's sync badge (see renderShell): painted now, then every 20
+// seconds while it is on screen.
+export function syncBadgeText(st) {
+  if (!st || !st.configured) return { tone: 'off', text: 'Not connected', sub: 'Records stay on this laptop' };
+  // The clinic network (v0.0.17) syncs the same way; it is named for what
+  // it is, since there is no internet "cloud" in it.
+  const via = st.kind === 'lan' ? 'Clinic network' : 'Cloud';
+  if (!st.online) return { tone: 'off', text: `${via}: paused`, sub: 'Sync is switched off' };
+  if (st.lastError) return { tone: 'warn', text: `${via}: not reaching it`, sub: 'Trying again — records are kept' };
+  if (!st.lastOk) return { tone: 'warn', text: `${via}: connecting…`, sub: '' };
+  const mins = Math.max(0, Math.round((Date.now() - new Date(st.lastOk).getTime()) / 60000));
+  return { tone: 'ok', text: `${via}: connected`, sub: isNaN(mins) ? '' : (mins < 1 ? 'Synced just now' : `Synced ${mins} min ago`) };
+}
+function paintSyncBadge(badge) {
+  if (!api.cloudStatus) return;
+  const colour = { ok: 'var(--success, #2f8f66)', warn: 'var(--warning, #b7791f)', off: 'var(--text-subtle)' };
+  const once = () => api.cloudStatus().then((st) => {
+    const b = syncBadgeText(st);
+    badge.dataset.tone = b.tone;
+    badge.title = st && st.lanName && st.kind === 'lan' ? `${b.text} — ${st.lanName}` : b.text;
+    badge.replaceChildren(el('span', { class: 'offline-dot', style: `background:${colour[b.tone]}` }),
+      el('span', { class: 'sync-badge-text' }, [el('span', {}, [b.text]), b.sub ? el('span', { class: 'sync-badge-sub' }, [b.sub]) : null]));
+  }).catch(() => { /* leave it as it was */ });
+  once();
+  const timer = setInterval(() => {
+    if (!badge.isConnected) { clearInterval(timer); return; }
+    once();
+  }, 20000);
+  if (timer && timer.unref) timer.unref();
+}
+
 function navigate(name, params = {}) {
   if (name === 'setup') return renderFullscreen(renderSetup(ctx, params));
   if (name === 'login') return renderFullscreen(renderLogin(ctx));
@@ -190,22 +221,14 @@ function renderShell(active, contentNode) {
     if (open) items.forEach(([name, v]) => navItems.push(navButton(name, v)));
   }
 
-  // Live cloud-status badge (replaces the old, now-inaccurate "No cloud" label).
-  const cloudBadge = el('div', { class: 'offline-badge' }, [el('span', { class: 'offline-dot' }), 'Cloud sync']);
-  if (api.cloudStatus) {
-    api.cloudStatus().then((st) => {
-      if (!st) return;
-      clear(cloudBadge);
-      if (st.online) {
-        // The clinic network (v0.0.17) syncs the same way; it is named for
-        // what it is, since there is no internet "cloud" in it.
-        const via = st.kind === 'lan' ? 'Clinic network' : 'Cloud';
-        cloudBadge.append(el('span', { class: 'offline-dot', style: 'background:var(--success, #2f8f66)' }), st.lastError ? `${via} · reconnecting` : (st.lastOk ? `${via} · synced` : `${via} · online`));
-      } else {
-        cloudBadge.append(el('span', { class: 'offline-dot', style: 'background:var(--text-subtle)' }), 'Offline mode');
-      }
-    }).catch(() => { /* leave the neutral label */ });
-  }
+  // Live sync badge. v0.0.24: "How do I know I'm in?" — it says so in plain
+  // words (connected / not reaching it / not connected), keeps itself up to
+  // date, and takes an administrator to the Cloud tab.
+  const cloudBadge = el('button', {
+    type: 'button', class: 'offline-badge sync-badge',
+    onClick: () => { if (store.user && store.user.role === 'admin') navigate('cloud'); },
+  }, [el('span', { class: 'offline-dot' }), 'Cloud sync']);
+  paintSyncBadge(cloudBadge);
 
   const verChip = el('button', {
     id: 'ver-chip',
