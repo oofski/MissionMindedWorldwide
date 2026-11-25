@@ -579,7 +579,7 @@ body:has(.chart-actions-bar) .toast-host, body:has(.next-step-bar) .toast-host{ 
 .filling-row .field{ margin:0; }
 .ext-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:8px; border:var(--border-line); border-radius:var(--radius-sm); background:var(--surface); }
 /* v0.0.24: This visit | Future visit on each filling / extraction row */
-.visit-seg{ display:inline-flex; border:1px solid var(--border-strong); border-radius:var(--radius-sm); overflow:hidden; flex:none; }
+.visit-seg{ display:inline-flex; border:1px solid var(--border-strong); border-radius:var(--radius-sm); overflow:hidden; flex:none; justify-self:start; align-self:center; width:max-content; }
 .visit-seg-btn{ border:0; background:var(--surface); color:var(--text-muted); padding:6px 10px; font-size:var(--fs-xs); font-weight:var(--fw-medium); cursor:pointer; }
 .visit-seg-btn + .visit-seg-btn{ border-left:1px solid var(--border-strong); }
 .visit-seg-btn.on{ background:var(--accent-soft); color:var(--accent-text); font-weight:var(--fw-semibold); }

@@ -1794,7 +1794,12 @@ export function wristbandLabelCard() {
   function paintCard() {
     customRow.style.display = sizeSel.value === 'custom' ? '' : 'none';
     offRow.style.display = labelLayout(cur) === 'band' || labelLayout(cur) === 'small' ? '' : 'none';
-    preview.replaceChildren(wristbandLabel(SAMPLE_BAND, { forPrint: true, label: cur }));
+    // Shown whole, scaled down to fit when the label is wider than the card
+    // (a 1 × 11 in band is about 1,060 pixels).
+    const inner = el('div', { class: 'wb-label-preview-inner' }, [wristbandLabel(SAMPLE_BAND, { forPrint: true, label: cur })]);
+    const px = cur.w ? cur.w * 96 / 25.4 : 0;
+    inner.style.zoom = px > 860 ? String(Math.round((860 / px) * 100) / 100) : '1';
+    preview.replaceChildren(inner);
     what.textContent = cur.w
       ? `Prints one ${cur.w} × ${cur.h} mm label per patient, with no margins — set the printer to this label size too, and to 100% (no "fit to page").`
       : 'Prints the band on a sheet of paper, to cut out. For a wristband printer, choose its band size above.';
